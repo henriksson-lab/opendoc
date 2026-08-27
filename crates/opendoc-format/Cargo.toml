@@ -1,0 +1,9 @@
+[package]
+name = "opendoc-format"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cbor2 = "1.1.4"
+opendoc-core = { path = "../opendoc-core" }
+serde = { version = "1", features = ["derive"] }

@@ -1,0 +1,23 @@
+{
+  "name": "opendoc-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "node scripts/build.mjs",
+    "gui-smoke": "node scripts/gui-smoke.mjs",
+    "mock-contract": "node scripts/mock-contract.mjs",
+    "native-check": "node scripts/native-check.mjs",
+    "preflight": "node scripts/preflight.mjs",
+    "smoke": "node scripts/smoke-check.mjs",
+    "tauri": "tauri",
+    "verify": "node scripts/verify.mjs"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
+    "typescript": "^5.0.0",
+    "vite": "^7.0.0"
+  }
+}

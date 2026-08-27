@@ -1,0 +1,9 @@
+[package]
+name = "opendoc-sign"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opendoc-core = { path = "../opendoc-core" }
+opendoc-format = { path = "../opendoc-format" }
+ssh-key = { version = "0.7.0-rc.11", features = ["crypto", "ed25519"] }

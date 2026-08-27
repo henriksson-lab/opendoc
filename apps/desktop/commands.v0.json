@@ -1,0 +1,141 @@
+{
+  "version": 0,
+  "projection": "../../docs/APP_API_CONTRACT_V0.md",
+  "commands": [
+    {
+      "name": "create_document",
+      "returns": "AppDocument",
+      "args": { "title": "string" }
+    },
+    {
+      "name": "get_document",
+      "returns": "AppDocument",
+      "args": {}
+    },
+    {
+      "name": "add_paragraph",
+      "returns": "AppDocument",
+      "args": { "text": "string" }
+    },
+    {
+      "name": "add_heading",
+      "returns": "AppDocument",
+      "args": { "text": "string", "level": "number" }
+    },
+    {
+      "name": "add_link",
+      "returns": "AppDocument",
+      "args": { "text": "string", "href": "string" }
+    },
+    {
+      "name": "add_mention",
+      "returns": "AppDocument",
+      "args": { "label": "string" }
+    },
+    {
+      "name": "add_footnote_ref",
+      "returns": "AppDocument",
+      "args": {}
+    },
+    {
+      "name": "add_equation",
+      "returns": "AppDocument",
+      "args": { "source": "string" }
+    },
+    {
+      "name": "add_equation_block",
+      "returns": "AppDocument",
+      "args": { "source": "string" }
+    },
+    {
+      "name": "add_list_item",
+      "returns": "AppDocument",
+      "args": { "text": "string", "level": "number", "ordered": "boolean" }
+    },
+    {
+      "name": "add_page_break",
+      "returns": "AppDocument",
+      "args": {}
+    },
+    {
+      "name": "add_table",
+      "returns": "AppDocument",
+      "args": {}
+    },
+    {
+      "name": "add_citation",
+      "returns": "AppDocument",
+      "args": {}
+    },
+    {
+      "name": "add_comment",
+      "returns": "AppDocument",
+      "args": { "author": "string", "body": "string" }
+    },
+    {
+      "name": "add_suggestion",
+      "returns": "AppDocument",
+      "args": { "author": "string", "text": "string" }
+    },
+    {
+      "name": "update_inline_text",
+      "returns": "AppDocument",
+      "args": { "inlineId": "string", "text": "string" }
+    },
+    {
+      "name": "delete_comment_thread",
+      "returns": "AppDocument",
+      "args": { "threadId": "string" }
+    },
+    {
+      "name": "accept_suggestion",
+      "returns": "AppDocument",
+      "args": { "suggestionId": "string", "acceptedBy": "string" }
+    },
+    {
+      "name": "reject_suggestion",
+      "returns": "AppDocument",
+      "args": { "suggestionId": "string", "rejectedBy": "string" }
+    },
+    {
+      "name": "add_text_mark",
+      "returns": "AppDocument",
+      "args": { "inlineId": "string", "markKind": "string" }
+    },
+    {
+      "name": "update_block_equation_source",
+      "returns": "AppDocument",
+      "args": { "blockId": "string", "source": "string" }
+    },
+    {
+      "name": "set_spreadsheet_cell",
+      "returns": "AppDocument",
+      "args": { "address": "string", "value": "string" }
+    },
+    {
+      "name": "update_bibliography_reference",
+      "returns": "AppDocument",
+      "args": { "referenceId": "string", "title": "string", "issued": "string|null" }
+    },
+    {
+      "name": "save_local_repository",
+      "returns": "AppDocument",
+      "args": { "path": "string" }
+    },
+    {
+      "name": "open_local_repository",
+      "returns": "AppDocument",
+      "args": { "path": "string", "documentUuid": "string" }
+    },
+    {
+      "name": "sign_with_openssh_private_key",
+      "returns": "AppDocument",
+      "args": { "privateKeyPem": "string", "signerDisplay": "string" }
+    },
+    {
+      "name": "verify_current_signature",
+      "returns": "string",
+      "args": { "privateKeyPem": "string" }
+    }
+  ]
+}

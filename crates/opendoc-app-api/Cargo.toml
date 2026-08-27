@@ -1,0 +1,13 @@
+[package]
+name = "opendoc-app-api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opendoc-core = { path = "../opendoc-core" }
+opendoc-format = { path = "../opendoc-format" }
+opendoc-merge = { path = "../opendoc-merge" }
+opendoc-sign = { path = "../opendoc-sign" }
+opendoc-store = { path = "../opendoc-store" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

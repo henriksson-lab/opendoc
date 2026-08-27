@@ -1,0 +1,7 @@
+formula	expected	status
+=1+2	3	supported
+=1+2*3	7	supported
+=SUM(B1:B2)	12	supported
+=A1	mirrors A1	supported
+=MISSING()	#NAME?	deferred
+=IMPORTRANGE("url","A1")	#N/A	excluded
