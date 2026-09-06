@@ -1,16 +1,14 @@
 [workspace]
 members = [
     "crates/opendoc-core",
+    "crates/opendoc-citations",
     "crates/opendoc-format",
     "crates/opendoc-store",
     "crates/opendoc-merge",
     "crates/opendoc-sign",
     "crates/opendoc-import",
     "crates/opendoc-app-api",
-    "prototypes/richtext-crdt",
-    "prototypes/spreadsheet-grid",
-    "prototypes/signed-manifest",
-    "prototypes/citation-render",
+    "crates/opendoc-wasm",
 ]
 exclude = [
     "apps/desktop/src-tauri",

@@ -2,33 +2,45 @@ name: Desktop
 
 on:
   push:
+    paths:
+      - ".github/workflows/desktop.yml"
+      - "Cargo.toml"
+      - "crates/**"
+      - "apps/desktop/**"
+      - "docs/GOOGLE_DOCS_EQUIVALENT_PLAN.md"
   pull_request:
+    paths:
+      - ".github/workflows/desktop.yml"
+      - "Cargo.toml"
+      - "crates/**"
+      - "apps/desktop/**"
+      - "docs/GOOGLE_DOCS_EQUIVALENT_PLAN.md"
 
 jobs:
-  verify:
-    runs-on: ubuntu-22.04
+  desktop-linux:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
 
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
 
-      - uses: dtolnay/rust-toolchain@stable
-
       - name: Install Tauri Linux dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential \
-            libgtk-3-dev \
-            libwebkit2gtk-4.1-dev \
-            pkg-config
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev pkg-config
 
-      - name: Verify runnable prototype checks
+      - name: Install desktop npm dependencies
+        working-directory: apps/desktop
+        run: npm ci
+
+      - name: Verify desktop and Rust workspace
         working-directory: apps/desktop
         run: npm run verify
 
-      - name: Verify native Tauri backend
+      - name: Check native Tauri backend
         working-directory: apps/desktop
         run: npm run native-check

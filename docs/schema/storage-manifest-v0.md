@@ -86,10 +86,18 @@ The examples below are diagnostic JSON projections only. The canonical stored an
 
 ## Object Layout
 
+All storage backends must use the same logical key layout. `opendoc-store`
+exposes `ObjectStoreLayout` so local disk, flat bucket-style filesystems, future
+OpenDAL filesystems, and future S3-compatible adapters derive identical keys
+instead of duplicating path rules.
+
 - `documents/{document_id}/heads/{branch}.head`: mutable binary branch head pointer.
+- `documents/{document_id}/head-candidates/{branch}/{algorithm}/{digest}.head`: immutable candidate branch head for backends or races where the mutable head CAS cannot be completed.
 - `documents/{document_id}/manifests/{manifest_hash}.manifest`: immutable binary manifest.
 - `objects/sha256/{first_two}/{rest}`: immutable content blobs.
 - `objects/sha256/{first_two}/{rest}.sig`: optional detached sidecar signature for a content blob.
+- `packs/{pack_name}.pack`: immutable local pack file containing exact object bytes.
+- `packs/{pack_name}.idx`: deterministic binary local pack index mapping object hashes to byte ranges.
 - `indexes/by-uuid/{prefix}/{document_uuid}.idx`: optional signed lookup record for document UUIDs.
 - `indexes/by-doi/{doi_hash}.idx`: optional signed lookup record for DOI aliases.
 - `archive/tombstones/{object_hash}.tombstone`: optional signed recall metadata for data moved to tape or cold storage.
@@ -157,10 +165,82 @@ Typed content signatures can be reused across different byte blobs that have the
 ## Write Rules
 
 - Immutable object writes are idempotent.
+- Packed objects remain logical immutable objects; the pack is a local storage optimization, not a signed source object by default.
 - Blob sidecar signature writes are idempotent and keyed by the blob hash.
 - Branch head writes must use conditional put when the backend supports it.
-- If conditional put is unavailable, writers create candidate heads and require manual or server-mediated reconciliation.
+- If conditional put is unavailable or a head race is detected, writers create deterministic candidate heads and require later automatic, manual, or server-mediated reconciliation.
 - A signed manifest is valid only if every referenced hash matches downloaded bytes.
+
+`opendoc-store::verify_object_store_contract` is the reusable backend
+conformance gate. Every local, OpenDAL, S3-compatible, or test backend must
+prove content-addressed idempotent writes, named records, prefix listing, and
+compare-and-swap branch heads before it is treated as a real repository backend.
+`FlatObjectStore` is the current filesystem-backed conformance adapter for an
+S3/OpenDAL-shaped key namespace. It stores the same logical keys below an
+optional `bucket/prefix` namespace and deliberately does not use local pack
+files, so tests can catch assumptions that would not hold on object storage.
+
+`Repository::commit_manifest_or_candidate` is the serverless fallback path.
+It writes the immutable manifest first. If the branch head cannot be advanced
+with the expected value, it writes a `BranchHeadRecord` candidate under the
+head-candidate prefix. Clients can list this prefix and merge/rebase candidates
+without losing edits.
+
+`Repository::resolve_candidate_heads` classifies listed candidate heads
+deterministically:
+
+- `FastForward`: candidate manifest parent is the current head and may advance
+  without operation merge.
+- `NeedsMerge`: candidate manifest exists but is not a direct child of the
+  current head.
+- `AlreadyCurrent`: candidate points at the current head and can be ignored.
+- `IntegratedAncestor`: candidate is an ancestor of the current head and can be
+  ignored. This matters because serverless candidate records are immutable and
+  may remain visible after reconciliation.
+- `MissingManifest`: candidate head exists but its manifest object is absent or
+  not yet visible.
+
+`Repository::try_fast_forward_candidate` is the safe automatic transition for
+`FastForward` candidates. It re-reads the current head, verifies that the
+candidate manifest belongs to the requested document and branch, checks that the
+candidate parent is exactly the current head, then advances the mutable head with
+CAS. If the head changes during the attempt, the result is `HeadChanged` and the
+caller reruns candidate resolution. If the candidate is divergent, absent, or
+already current, the helper reports that state without losing the candidate.
+
+`Repository::reconcile_candidate_heads` repeatedly resolves candidates and
+advances every currently fast-forwardable candidate. This lets a serverless
+client consume a visible linear candidate chain such as `head -> A -> B` without
+waiting for a commit server. It stops once no fast-forward candidates remain;
+remaining `NeedsMerge` candidates require operation-level automatic merge/rebase
+before a new manifest can be committed.
+
+`Repository::plan_candidate_merges` prepares those remaining divergent
+candidates for the app or service merge layer. It returns the current head, each
+candidate manifest, the nearest common manifest ancestor when one exists, and
+the ordered manifest paths from that base to both tips. The store still does not
+interpret document operations; callers load snapshots and operation segments
+from the planned manifest ranges, run the OpenDoc merge engine, write a merged
+manifest, and advance the head with CAS or a new candidate.
+
+## Local Pack Files
+
+Local disk repositories may compact loose immutable objects into pack files to
+avoid creating many files smaller than the filesystem block size. The v0 pack
+format keeps object identity unchanged:
+
+- Pack files begin with `ODP0`.
+- Each object is stored as its exact original object bytes.
+- The sidecar pack index is a deterministic binary `PackIndexRecord` encoded
+  with the shared `opendoc-format` binary record framing.
+- The index records pack name plus one entry per object hash, byte offset, and
+  byte length.
+- Reads check loose objects first, then packed objects.
+- Packed reads rehash extracted bytes before returning them.
+
+Compaction writes temporary pack and index files, verifies every indexed object
+against its hash, then renames pack and index into place. Users should never
+need to know whether an object is loose or packed.
 
 ## Commit Granularity
 

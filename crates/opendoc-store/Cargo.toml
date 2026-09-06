@@ -6,3 +6,15 @@ edition = "2021"
 [dependencies]
 opendoc-core = { path = "../opendoc-core" }
 opendoc-format = { path = "../opendoc-format" }
+opendal = { version = "0.58.2", optional = true, default-features = false, features = [
+    "blocking",
+    "internal-tokio-rt",
+    "services-fs",
+    "services-s3",
+    "http-transport-reqwest-rustls",
+] }
+tokio = { version = "1", optional = true, features = ["rt-multi-thread"] }
+
+[features]
+default = []
+opendal = ["dep:opendal", "dep:tokio"]

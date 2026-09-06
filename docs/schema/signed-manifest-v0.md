@@ -86,6 +86,36 @@ Diagnostic projection:
 
 Typed signatures can be stored as sidecars next to a blob, in a shared signature index keyed by semantic digest, or embedded when the format safely supports it. The envelope must include the profile ID and excluded fields so verifiers know exactly what the signature claims.
 
+## Image Pixel Profile v0
+
+`opendoc.image.pixels.v0` signs decoded image semantics instead of a PNG, JPEG,
+WebP, TIFF, or S3 object byte stream. The profile includes width, height, the
+normalized color model, and normalized pixel bytes. The initial implemented
+normal form is `rgba8-srgb`: four bytes per pixel in row-major order.
+
+The profile explicitly excludes compression bytes, container metadata, and
+storage paths. Format-specific decoders are adapters that must produce the same
+decoded pixel frame before signing or verification. This keeps image signatures
+reusable across recompression and object-store layout changes while exact-byte
+blob signatures remain available for byte-for-byte evidence.
+
+## FASTQ Profiles v0
+
+`opendoc.fastq.sequence.v0` signs a canonical sequence-only profile. It
+includes read IDs and normalized nucleotide sequences, and explicitly excludes
+PHRED quality scores and comments. This lets a signature survive workflows that
+drop, rewrite, or regenerate quality scores while preserving read identity and
+sequence content.
+
+`opendoc.fastq.full.v0` signs read IDs, normalized nucleotide sequences, and
+PHRED quality scores. It is the stricter profile for workflows where quality
+scores are evidence, not disposable processing metadata.
+
+Both profiles canonicalize independently of storage paths and line endings,
+hash their profile-defined binary representation, and then sign the semantic
+digest. Invalid or incomplete FASTQ records fail verification rather than being
+silently repaired.
+
 ## Verification Workflow
 
 1. Fetch branch head.

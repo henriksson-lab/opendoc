@@ -5,7 +5,14 @@
     {
       "name": "create_document",
       "returns": "AppDocument",
-      "args": { "title": "string" }
+      "args": {
+        "title": "string"
+      }
+    },
+    {
+      "name": "close_document",
+      "returns": "AppDocument",
+      "args": {}
     },
     {
       "name": "get_document",
@@ -13,24 +20,350 @@
       "args": {}
     },
     {
+      "name": "get_audit_view",
+      "returns": "AppAuditView",
+      "args": {}
+    },
+    {
+      "name": "get_runtime_profile",
+      "returns": "OpenDocRuntimeProfile",
+      "args": {
+        "mode": "string",
+        "storageBackends": "object[]",
+        "signingEnabled": "boolean|null"
+      }
+    },
+    {
+      "name": "get_runtime_session",
+      "returns": "OpenDocRuntimeSession",
+      "args": {
+        "mode": "string",
+        "storageBackends": "object[]",
+        "signingEnabled": "boolean|null",
+        "subject": "string|null",
+        "documentUuid": "string|null",
+        "presence": "object[]",
+        "permissions": "object[]"
+      }
+    },
+    {
+      "name": "authorize_runtime_command",
+      "returns": "OpenDocAuthorizationDecision",
+      "args": {
+        "mode": "string",
+        "storageBackends": "object[]",
+        "signingEnabled": "boolean|null",
+        "subject": "string|null",
+        "documentUuid": "string|null",
+        "commandName": "string",
+        "permissions": "object[]"
+      }
+    },
+    {
+      "name": "create_runtime_share_invite",
+      "returns": "OpenDocShareInvite",
+      "args": {
+        "mode": "string",
+        "storageBackends": "object[]",
+        "signingEnabled": "boolean|null",
+        "subject": "string|null",
+        "documentUuid": "string|null",
+        "targetSubject": "string|null",
+        "actions": "string[]",
+        "permissions": "object[]"
+      }
+    },
+    {
+      "name": "relay_runtime_sync",
+      "returns": "OpenDocSyncRelayResult",
+      "args": {
+        "mode": "string",
+        "storageBackends": "object[]",
+        "signingEnabled": "boolean|null",
+        "subject": "string|null",
+        "documentUuid": "string|null",
+        "baseManifest": "string|null",
+        "operations": "object[]",
+        "permissions": "object[]",
+        "presence": "object[]"
+      }
+    },
+    {
+      "name": "resolve_runtime_document_lookup",
+      "returns": "OpenDocRuntimeLookupResult",
+      "args": {
+        "mode": "string",
+        "storageBackends": "object[]",
+        "signingEnabled": "boolean|null",
+        "subject": "string|null",
+        "documentUuid": "string|null",
+        "doi": "string|null",
+        "permissions": "object[]",
+        "serviceIndex": "object[]",
+        "scannedDocuments": "object[]"
+      }
+    },
+    {
+      "name": "undo_current_edit",
+      "returns": "AppDocument",
+      "args": {}
+    },
+    {
+      "name": "redo_current_edit",
+      "returns": "AppDocument",
+      "args": {}
+    },
+    {
+      "name": "import_google_docs_json",
+      "returns": "AppDocument",
+      "args": {
+        "title": "string",
+        "jsonText": "string"
+      }
+    },
+    {
+      "name": "import_doc_or_docx_path",
+      "returns": "AppDocument",
+      "args": {
+        "path": "string"
+      }
+    },
+    {
+      "name": "export_google_docs_json",
+      "returns": "string",
+      "args": {}
+    },
+    {
+      "name": "import_google_sheets_json",
+      "returns": "AppDocument",
+      "args": {
+        "jsonText": "string"
+      }
+    },
+    {
+      "name": "export_google_sheets_json",
+      "returns": "string",
+      "args": {}
+    },
+    {
+      "name": "add_binary_blob",
+      "returns": "AppDocument",
+      "args": {
+        "name": "string",
+        "mediaType": "string",
+        "bytes": "number[]"
+      }
+    },
+    {
+      "name": "update_binary_blob_metadata",
+      "returns": "AppDocument",
+      "args": {
+        "blobHash": "string",
+        "name": "string",
+        "mediaType": "string"
+      }
+    },
+    {
+      "name": "add_image_block",
+      "returns": "AppDocument",
+      "args": {
+        "blobHash": "string",
+        "altText": "string"
+      }
+    },
+    {
+      "name": "insert_image_block_after",
+      "returns": "AppDocument",
+      "args": {
+        "afterBlockId": "string",
+        "blobHash": "string",
+        "altText": "string"
+      }
+    },
+    {
+      "name": "sign_blob_with_openssh_private_key",
+      "returns": "AppDocument",
+      "args": {
+        "blobHash": "string",
+        "privateKeyPem": "string",
+        "signerDisplay": "string"
+      }
+    },
+    {
+      "name": "sign_fastq_blob_with_openssh_private_key",
+      "returns": "AppDocument",
+      "args": {
+        "blobHash": "string",
+        "profile": "string",
+        "privateKeyPem": "string",
+        "signerDisplay": "string"
+      }
+    },
+    {
+      "name": "sign_image_pixels_blob_with_openssh_private_key",
+      "returns": "AppDocument",
+      "args": {
+        "blobHash": "string",
+        "width": "number",
+        "height": "number",
+        "pixels": "number[]",
+        "privateKeyPem": "string",
+        "signerDisplay": "string"
+      }
+    },
+    {
+      "name": "delete_binary_blob",
+      "returns": "AppDocument",
+      "args": {
+        "blobHash": "string"
+      }
+    },
+    {
+      "name": "restore_binary_blob",
+      "returns": "AppDocument",
+      "args": {
+        "blobHash": "string"
+      }
+    },
+    {
+      "name": "simulate_shallow_clone",
+      "returns": "AppDocument",
+      "args": {}
+    },
+    {
+      "name": "record_blob_archive_tombstone",
+      "returns": "AppDocument",
+      "args": {
+        "blobHash": "string",
+        "archiveLocator": "string",
+        "restoreHint": "string",
+        "signer": "string",
+        "signature": "number[]"
+      }
+    },
+    {
+      "name": "set_document_doi",
+      "returns": "AppDocument",
+      "args": {
+        "doi": "string"
+      }
+    },
+    {
+      "name": "set_document_title",
+      "returns": "AppDocument",
+      "args": {
+        "title": "string"
+      }
+    },
+    {
+      "name": "set_document_locale",
+      "returns": "AppDocument",
+      "args": {
+        "locale": "string"
+      }
+    },
+    {
       "name": "add_paragraph",
       "returns": "AppDocument",
-      "args": { "text": "string" }
+      "args": {
+        "text": "string"
+      }
+    },
+    {
+      "name": "insert_paragraph_after",
+      "returns": "AppDocument",
+      "args": {
+        "afterBlockId": "string|null",
+        "text": "string"
+      }
+    },
+    {
+      "name": "split_paragraph_at_inline",
+      "returns": "AppDocument",
+      "args": {
+        "inlineId": "string"
+      }
+    },
+    {
+      "name": "split_paragraph_at_text_offset",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "inlineId": "string",
+        "offset": "number"
+      }
+    },
+    {
+      "name": "join_paragraph_with_previous",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string"
+      }
+    },
+    {
+      "name": "delete_block",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string"
+      }
+    },
+    {
+      "name": "set_block_text_style",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "style": "string",
+        "level": "number",
+        "ordered": "boolean"
+      }
     },
     {
       "name": "add_heading",
       "returns": "AppDocument",
-      "args": { "text": "string", "level": "number" }
+      "args": {
+        "text": "string",
+        "level": "number"
+      }
+    },
+    {
+      "name": "update_heading_level",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "level": "number"
+      }
     },
     {
       "name": "add_link",
       "returns": "AppDocument",
-      "args": { "text": "string", "href": "string" }
+      "args": {
+        "text": "string",
+        "href": "string"
+      }
     },
     {
       "name": "add_mention",
       "returns": "AppDocument",
-      "args": { "label": "string" }
+      "args": {
+        "label": "string"
+      }
+    },
+    {
+      "name": "insert_mention_after",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "afterInlineId": "string|null",
+        "label": "string"
+      }
+    },
+    {
+      "name": "update_mention_label",
+      "returns": "AppDocument",
+      "args": {
+        "inlineId": "string",
+        "label": "string"
+      }
     },
     {
       "name": "add_footnote_ref",
@@ -38,19 +371,86 @@
       "args": {}
     },
     {
+      "name": "insert_footnote_ref_after",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "afterInlineId": "string|null"
+      }
+    },
+    {
+      "name": "update_footnote_body",
+      "returns": "AppDocument",
+      "args": {
+        "footnoteId": "string",
+        "body": "string"
+      }
+    },
+    {
       "name": "add_equation",
       "returns": "AppDocument",
-      "args": { "source": "string" }
+      "args": {
+        "source": "string"
+      }
+    },
+    {
+      "name": "insert_equation_after",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "afterInlineId": "string?",
+        "source": "string"
+      }
     },
     {
       "name": "add_equation_block",
       "returns": "AppDocument",
-      "args": { "source": "string" }
+      "args": {
+        "source": "string"
+      }
+    },
+    {
+      "name": "insert_equation_block_after",
+      "returns": "AppDocument",
+      "args": {
+        "afterBlockId": "string",
+        "source": "string"
+      }
     },
     {
       "name": "add_list_item",
       "returns": "AppDocument",
-      "args": { "text": "string", "level": "number", "ordered": "boolean" }
+      "args": {
+        "text": "string",
+        "level": "number",
+        "ordered": "boolean"
+      }
+    },
+    {
+      "name": "insert_list_item_after",
+      "returns": "AppDocument",
+      "args": {
+        "afterBlockId": "string",
+        "text": "string",
+        "level": "number",
+        "ordered": "boolean"
+      }
+    },
+    {
+      "name": "update_list_item",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "level": "number",
+        "ordered": "boolean"
+      }
+    },
+    {
+      "name": "insert_page_break_after",
+      "returns": "AppDocument",
+      "args": {
+        "afterBlockId": "string"
+      }
     },
     {
       "name": "add_page_break",
@@ -58,9 +458,54 @@
       "args": {}
     },
     {
+      "name": "insert_table_after",
+      "returns": "AppDocument",
+      "args": {
+        "afterBlockId": "string",
+        "rows": "number?",
+        "columns": "number?"
+      }
+    },
+    {
       "name": "add_table",
       "returns": "AppDocument",
       "args": {}
+    },
+    {
+      "name": "add_table_row",
+      "returns": "AppDocument",
+      "args": {
+        "tableBlockId": "string",
+        "afterRow": "string|null",
+        "text": "string"
+      }
+    },
+    {
+      "name": "delete_table_row",
+      "returns": "AppDocument",
+      "args": {
+        "tableBlockId": "string",
+        "rowId": "string"
+      }
+    },
+    {
+      "name": "add_table_cell",
+      "returns": "AppDocument",
+      "args": {
+        "tableBlockId": "string",
+        "rowId": "string",
+        "afterCell": "string|null",
+        "text": "string"
+      }
+    },
+    {
+      "name": "delete_table_cell",
+      "returns": "AppDocument",
+      "args": {
+        "tableBlockId": "string",
+        "rowId": "string",
+        "cellId": "string"
+      }
     },
     {
       "name": "add_citation",
@@ -68,74 +513,916 @@
       "args": {}
     },
     {
+      "name": "insert_citation",
+      "returns": "AppDocument",
+      "args": {
+        "referenceId": "string",
+        "afterInlineId": "string|null",
+        "locator": "string|null",
+        "label": "string|null",
+        "prefix": "string|null",
+        "suffix": "string|null",
+        "suppressAuthor": "boolean"
+      }
+    },
+    {
+      "name": "insert_citation_group",
+      "returns": "AppDocument",
+      "args": {
+        "items": "AppCitationItem[]",
+        "afterInlineId": "string|null"
+      }
+    },
+    {
+      "name": "insert_footnote_citation_group",
+      "returns": "AppDocument",
+      "args": {
+        "footnoteId": "string",
+        "items": "AppCitationItem[]"
+      }
+    },
+    {
+      "name": "update_citation_group_items",
+      "returns": "AppDocument",
+      "args": {
+        "citationId": "string",
+        "items": "AppCitationItem[]"
+      }
+    },
+    {
+      "name": "set_citation_style",
+      "returns": "AppDocument",
+      "args": {
+        "style": "string",
+        "locale": "string"
+      }
+    },
+    {
       "name": "add_comment",
       "returns": "AppDocument",
-      "args": { "author": "string", "body": "string" }
+      "args": {
+        "author": "string",
+        "body": "string"
+      }
+    },
+    {
+      "name": "add_text_range_comment",
+      "returns": "AppDocument",
+      "args": {
+        "startInlineId": "string",
+        "endInlineId": "string",
+        "author": "string",
+        "body": "string"
+      }
+    },
+    {
+      "name": "add_block_comment",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "author": "string",
+        "body": "string"
+      }
+    },
+    {
+      "name": "add_comment_reply",
+      "returns": "AppDocument",
+      "args": {
+        "threadId": "string",
+        "author": "string",
+        "body": "string"
+      }
     },
     {
       "name": "add_suggestion",
       "returns": "AppDocument",
-      "args": { "author": "string", "text": "string" }
+      "args": {
+        "author": "string",
+        "text": "string"
+      }
+    },
+    {
+      "name": "add_text_range_suggestion",
+      "returns": "AppDocument",
+      "args": {
+        "startInlineId": "string",
+        "endInlineId": "string",
+        "author": "string",
+        "text": "string"
+      }
+    },
+    {
+      "name": "add_block_suggestion",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "author": "string",
+        "text": "string"
+      }
+    },
+    {
+      "name": "add_delete_suggestion",
+      "returns": "AppDocument",
+      "args": {
+        "author": "string",
+        "inlineId": "string"
+      }
+    },
+    {
+      "name": "add_text_range_delete_suggestion",
+      "returns": "AppDocument",
+      "args": {
+        "startInlineId": "string",
+        "endInlineId": "string",
+        "author": "string"
+      }
+    },
+    {
+      "name": "add_format_suggestion",
+      "returns": "AppDocument",
+      "args": {
+        "author": "string",
+        "inlineId": "string",
+        "markKind": "string",
+        "value": "string|null"
+      }
+    },
+    {
+      "name": "add_text_range_format_suggestion",
+      "returns": "AppDocument",
+      "args": {
+        "startInlineId": "string",
+        "endInlineId": "string",
+        "author": "string",
+        "markKind": "string",
+        "value": "string|null"
+      }
+    },
+    {
+      "name": "update_suggestion",
+      "returns": "AppDocument",
+      "args": {
+        "suggestionId": "string",
+        "text": "string"
+      }
     },
     {
       "name": "update_inline_text",
       "returns": "AppDocument",
-      "args": { "inlineId": "string", "text": "string" }
+      "args": {
+        "inlineId": "string",
+        "text": "string"
+      }
+    },
+    {
+      "name": "update_inline_equation_source",
+      "returns": "AppDocument",
+      "args": {
+        "inlineId": "string",
+        "source": "string"
+      }
+    },
+    {
+      "name": "update_link_href",
+      "returns": "AppDocument",
+      "args": {
+        "inlineId": "string",
+        "href": "string"
+      }
+    },
+    {
+      "name": "insert_inline_text",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "afterInlineId": "string|null",
+        "text": "string"
+      }
+    },
+    {
+      "name": "insert_link_after",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "afterInlineId": "string|null",
+        "text": "string",
+        "href": "string"
+      }
+    },
+    {
+      "name": "delete_inline",
+      "returns": "AppDocument",
+      "args": {
+        "inlineId": "string"
+      }
     },
     {
       "name": "delete_comment_thread",
       "returns": "AppDocument",
-      "args": { "threadId": "string" }
+      "args": {
+        "threadId": "string"
+      }
+    },
+    {
+      "name": "restore_comment_thread",
+      "returns": "AppDocument",
+      "args": {
+        "threadId": "string"
+      }
+    },
+    {
+      "name": "delete_comment",
+      "returns": "AppDocument",
+      "args": {
+        "threadId": "string",
+        "commentId": "string"
+      }
+    },
+    {
+      "name": "restore_comment",
+      "returns": "AppDocument",
+      "args": {
+        "threadId": "string",
+        "commentId": "string"
+      }
+    },
+    {
+      "name": "update_comment",
+      "returns": "AppDocument",
+      "args": {
+        "threadId": "string",
+        "commentId": "string",
+        "body": "string"
+      }
     },
     {
       "name": "accept_suggestion",
       "returns": "AppDocument",
-      "args": { "suggestionId": "string", "acceptedBy": "string" }
+      "args": {
+        "suggestionId": "string",
+        "acceptedBy": "string"
+      }
     },
     {
       "name": "reject_suggestion",
       "returns": "AppDocument",
-      "args": { "suggestionId": "string", "rejectedBy": "string" }
+      "args": {
+        "suggestionId": "string",
+        "rejectedBy": "string"
+      }
     },
     {
       "name": "add_text_mark",
       "returns": "AppDocument",
-      "args": { "inlineId": "string", "markKind": "string" }
+      "args": {
+        "inlineId": "string",
+        "markKind": "string",
+        "value": "string|null"
+      }
+    },
+    {
+      "name": "add_text_mark_range",
+      "returns": "AppDocument",
+      "args": {
+        "startInlineId": "string",
+        "endInlineId": "string",
+        "markKind": "string",
+        "value": "string|null"
+      }
+    },
+    {
+      "name": "remove_text_mark",
+      "returns": "AppDocument",
+      "args": {
+        "inlineId": "string",
+        "markKind": "string",
+        "value": "string|null"
+      }
+    },
+    {
+      "name": "remove_text_mark_range",
+      "returns": "AppDocument",
+      "args": {
+        "startInlineId": "string",
+        "endInlineId": "string",
+        "markKind": "string",
+        "value": "string|null"
+      }
     },
     {
       "name": "update_block_equation_source",
       "returns": "AppDocument",
-      "args": { "blockId": "string", "source": "string" }
+      "args": {
+        "blockId": "string",
+        "source": "string"
+      }
+    },
+    {
+      "name": "update_image_alt_text",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "altText": "string"
+      }
+    },
+    {
+      "name": "update_image_blob_hash",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "blobHash": "string"
+      }
     },
     {
       "name": "set_spreadsheet_cell",
       "returns": "AppDocument",
-      "args": { "address": "string", "value": "string" }
+      "args": {
+        "address": "string",
+        "value": "string"
+      }
+    },
+    {
+      "name": "set_spreadsheet_workbook_metadata",
+      "returns": "AppDocument",
+      "args": {
+        "title": "string",
+        "locale": "string",
+        "timezone": "string"
+      }
+    },
+    {
+      "name": "set_spreadsheet_cells",
+      "returns": "AppDocument",
+      "args": {
+        "cells": "SpreadsheetCellEdit[]"
+      }
+    },
+    {
+      "name": "add_spreadsheet_sheet",
+      "returns": "AppDocument",
+      "args": {
+        "title": "string"
+      }
+    },
+    {
+      "name": "rename_spreadsheet_sheet",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string",
+        "title": "string"
+      }
+    },
+    {
+      "name": "delete_spreadsheet_sheet",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string"
+      }
+    },
+    {
+      "name": "restore_spreadsheet_sheet",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string"
+      }
+    },
+    {
+      "name": "add_spreadsheet_row",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string",
+        "row": "string"
+      }
+    },
+    {
+      "name": "delete_spreadsheet_row",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string",
+        "row": "string"
+      }
+    },
+    {
+      "name": "restore_spreadsheet_row",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string",
+        "row": "string"
+      }
+    },
+    {
+      "name": "add_spreadsheet_column",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string",
+        "column": "string"
+      }
+    },
+    {
+      "name": "delete_spreadsheet_column",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string",
+        "column": "string"
+      }
+    },
+    {
+      "name": "restore_spreadsheet_column",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string",
+        "column": "string"
+      }
+    },
+    {
+      "name": "add_spreadsheet_cell_comment",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string",
+        "address": "string",
+        "author": "string",
+        "body": "string"
+      }
+    },
+    {
+      "name": "update_spreadsheet_cell_comment",
+      "returns": "AppDocument",
+      "args": {
+        "commentId": "string",
+        "body": "string"
+      }
+    },
+    {
+      "name": "delete_spreadsheet_cell_comment",
+      "returns": "AppDocument",
+      "args": {
+        "commentId": "string"
+      }
+    },
+    {
+      "name": "restore_spreadsheet_cell_comment",
+      "returns": "AppDocument",
+      "args": {
+        "commentId": "string"
+      }
+    },
+    {
+      "name": "set_spreadsheet_frozen_axes",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string",
+        "frozenRows": "number",
+        "frozenColumns": "number"
+      }
+    },
+    {
+      "name": "set_spreadsheet_cell_validation",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string",
+        "address": "string",
+        "kind": "string",
+        "values": "string[]",
+        "strict": "boolean"
+      }
+    },
+    {
+      "name": "clear_spreadsheet_cell_validation",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string",
+        "address": "string"
+      }
+    },
+    {
+      "name": "restore_spreadsheet_cell_validation",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string",
+        "address": "string"
+      }
+    },
+    {
+      "name": "merge_spreadsheet_cells",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string",
+        "range": "string"
+      }
+    },
+    {
+      "name": "unmerge_spreadsheet_cells",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string",
+        "range": "string"
+      }
+    },
+    {
+      "name": "restore_spreadsheet_merge",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string",
+        "range": "string"
+      }
+    },
+    {
+      "name": "set_spreadsheet_basic_filter",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string",
+        "range": "string"
+      }
+    },
+    {
+      "name": "set_spreadsheet_basic_filter_options",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string",
+        "criteria": "object[]",
+        "sortSpecs": "object[]"
+      }
+    },
+    {
+      "name": "clear_spreadsheet_basic_filter",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string"
+      }
+    },
+    {
+      "name": "restore_spreadsheet_basic_filter",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string"
+      }
+    },
+    {
+      "name": "add_spreadsheet_protected_range",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string",
+        "range": "string",
+        "description": "string",
+        "warningOnly": "boolean"
+      }
+    },
+    {
+      "name": "update_spreadsheet_protected_range",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string",
+        "range": "string",
+        "description": "string",
+        "warningOnly": "boolean"
+      }
+    },
+    {
+      "name": "delete_spreadsheet_protected_range",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string",
+        "range": "string"
+      }
+    },
+    {
+      "name": "restore_spreadsheet_protected_range",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string",
+        "range": "string"
+      }
+    },
+    {
+      "name": "set_spreadsheet_cell_in_sheet",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string",
+        "address": "string",
+        "value": "string"
+      }
+    },
+    {
+      "name": "set_spreadsheet_cells_in_sheet",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string",
+        "cells": "SpreadsheetCellEdit[]"
+      }
+    },
+    {
+      "name": "set_spreadsheet_cell_format",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string",
+        "address": "string",
+        "property": "string",
+        "value": "string"
+      }
+    },
+    {
+      "name": "copy_spreadsheet_range",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string",
+        "sourceRange": "string",
+        "targetAddress": "string"
+      }
+    },
+    {
+      "name": "add_spreadsheet_named_range",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string",
+        "name": "string",
+        "range": "string"
+      }
+    },
+    {
+      "name": "update_spreadsheet_named_range",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string",
+        "name": "string",
+        "range": "string"
+      }
+    },
+    {
+      "name": "delete_spreadsheet_named_range",
+      "returns": "AppDocument",
+      "args": {
+        "name": "string"
+      }
+    },
+    {
+      "name": "restore_spreadsheet_named_range",
+      "returns": "AppDocument",
+      "args": {
+        "name": "string"
+      }
     },
     {
       "name": "update_bibliography_reference",
       "returns": "AppDocument",
-      "args": { "referenceId": "string", "title": "string", "issued": "string|null" }
+      "args": {
+        "referenceId": "string",
+        "title": "string",
+        "issued": "string|null"
+      }
+    },
+    {
+      "name": "update_bibliography_reference_metadata",
+      "returns": "AppDocument",
+      "args": {
+        "referenceId": "string",
+        "title": "string",
+        "authors": "string[]",
+        "issued": "string|null",
+        "doi": "string|null",
+        "url": "string|null"
+      }
+    },
+    {
+      "name": "add_bibliography_reference",
+      "returns": "AppDocument",
+      "args": {
+        "title": "string",
+        "authors": "string[]",
+        "issued": "string|null",
+        "doi": "string|null",
+        "url": "string|null"
+      }
+    },
+    {
+      "name": "delete_bibliography_reference",
+      "returns": "AppDocument",
+      "args": {
+        "referenceId": "string"
+      }
+    },
+    {
+      "name": "restore_bibliography_reference",
+      "returns": "AppDocument",
+      "args": {
+        "referenceId": "string"
+      }
+    },
+    {
+      "name": "delete_citation_group",
+      "returns": "AppDocument",
+      "args": {
+        "citationId": "string"
+      }
+    },
+    {
+      "name": "restore_citation_group",
+      "returns": "AppDocument",
+      "args": {
+        "citationId": "string"
+      }
     },
     {
       "name": "save_local_repository",
       "returns": "AppDocument",
-      "args": { "path": "string" }
+      "args": {
+        "path": "string"
+      }
+    },
+    {
+      "name": "save_local_repository_or_candidate",
+      "returns": "AppDocument",
+      "args": {
+        "path": "string"
+      }
+    },
+    {
+      "name": "save_flat_repository",
+      "returns": "AppDocument",
+      "args": {
+        "path": "string",
+        "namespace": "string"
+      }
+    },
+    {
+      "name": "save_flat_repository_or_candidate",
+      "returns": "AppDocument",
+      "args": {
+        "path": "string",
+        "namespace": "string"
+      }
+    },
+    {
+      "name": "save_opendal_fs_repository",
+      "returns": "AppDocument",
+      "args": {
+        "path": "string",
+        "namespace": "string"
+      }
+    },
+    {
+      "name": "save_opendal_fs_repository_or_candidate",
+      "returns": "AppDocument",
+      "args": {
+        "path": "string",
+        "namespace": "string"
+      }
+    },
+    {
+      "name": "autosave_current_repository",
+      "returns": "AppDocument",
+      "args": {}
     },
     {
       "name": "open_local_repository",
       "returns": "AppDocument",
-      "args": { "path": "string", "documentUuid": "string" }
+      "args": {
+        "path": "string",
+        "documentUuid": "string"
+      }
+    },
+    {
+      "name": "scan_local_repository",
+      "returns": "AppDocument",
+      "args": {
+        "path": "string"
+      }
+    },
+    {
+      "name": "open_flat_repository",
+      "returns": "AppDocument",
+      "args": {
+        "path": "string",
+        "namespace": "string",
+        "documentUuid": "string"
+      }
+    },
+    {
+      "name": "open_opendal_fs_repository",
+      "returns": "AppDocument",
+      "args": {
+        "path": "string",
+        "namespace": "string",
+        "documentUuid": "string"
+      }
+    },
+    {
+      "name": "merge_local_repository_candidates",
+      "returns": "AppDocument",
+      "args": {
+        "path": "string",
+        "documentUuid": "string"
+      }
+    },
+    {
+      "name": "compact_local_repository",
+      "returns": "AppDocument",
+      "args": {
+        "path": "string",
+        "packName": "string"
+      }
+    },
+    {
+      "name": "merge_flat_repository_candidates",
+      "returns": "AppDocument",
+      "args": {
+        "path": "string",
+        "namespace": "string",
+        "documentUuid": "string"
+      }
+    },
+    {
+      "name": "merge_opendal_fs_repository_candidates",
+      "returns": "AppDocument",
+      "args": {
+        "path": "string",
+        "namespace": "string",
+        "documentUuid": "string"
+      }
+    },
+    {
+      "name": "open_local_repository_by_doi",
+      "returns": "AppDocument",
+      "args": {
+        "path": "string",
+        "doi": "string"
+      }
+    },
+    {
+      "name": "open_flat_repository_by_doi",
+      "returns": "AppDocument",
+      "args": {
+        "path": "string",
+        "namespace": "string",
+        "doi": "string"
+      }
+    },
+    {
+      "name": "open_opendal_fs_repository_by_doi",
+      "returns": "AppDocument",
+      "args": {
+        "path": "string",
+        "namespace": "string",
+        "doi": "string"
+      }
     },
     {
       "name": "sign_with_openssh_private_key",
       "returns": "AppDocument",
-      "args": { "privateKeyPem": "string", "signerDisplay": "string" }
+      "args": {
+        "privateKeyPem": "string",
+        "signerDisplay": "string"
+      }
     },
     {
       "name": "verify_current_signature",
       "returns": "string",
-      "args": { "privateKeyPem": "string" }
+      "args": {
+        "privateKeyPem": "string"
+      }
+    },
+    {
+      "name": "verify_current_signatures",
+      "returns": "string",
+      "args": {}
+    },
+    {
+      "name": "apply_editor_input",
+      "returns": "EditorResult",
+      "args": {
+        "selection": "EditorSelection",
+        "input_type": "string",
+        "data": "string?"
+      }
+    },
+    {
+      "name": "render_document_html",
+      "returns": "string",
+      "args": {}
+    },
+    {
+      "name": "apply_editor_mark",
+      "returns": "EditorResult",
+      "args": {
+        "selection": "EditorSelection",
+        "mark_kind": "string",
+        "value": "string|null",
+        "action": "string?"
+      }
+    },
+    {
+      "name": "render_workbook_html",
+      "returns": "string",
+      "args": {
+        "sheetId": "string"
+      }
+    },
+    {
+      "name": "import_docx_base64",
+      "returns": "AppDocument",
+      "args": {
+        "name": "string",
+        "base64": "string"
+      }
     }
   ]
 }

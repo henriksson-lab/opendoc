@@ -7,3 +7,6 @@ edition = "2021"
 opendoc-core = { path = "../opendoc-core" }
 opendoc-format = { path = "../opendoc-format" }
 ssh-key = { version = "0.7.0-rc.11", features = ["crypto", "ed25519"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"

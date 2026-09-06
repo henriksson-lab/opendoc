@@ -41,7 +41,18 @@ Block nodes:
 - `heading`
 - `list_item`
 - `table`
+- `image`
 - `page_break`
+
+Page breaks are standalone source blocks. Google Docs-shaped export uses a
+paragraph-level `pageBreak` element. Import accepts page-break-only paragraphs
+and older `sectionBreak` fixture records, while mixed page-break/content
+paragraphs abort instead of silently changing document order.
+
+Table cells contain nested OpenDoc blocks. Google Docs-shaped table-cell import
+and export use the same supported block adapters as top-level body content for
+paragraphs, page breaks, images, and block equations. Nested tables are
+explicitly unsupported on import and export in v0.
 
 Inline nodes:
 
@@ -51,6 +62,45 @@ Inline nodes:
 - `footnote_ref`
 - `mention`
 - `equation`
+
+Footnote references point to document-local footnote records. A footnote record
+contains a stable ID, revision, inline body content, and deleted flag. Footnote
+body text is source state and is edited through operations, while reference
+labels are render projections.
+
+Citations are inline source nodes, not links. A citation node references a
+document-local citation group; the group references one or more bibliography
+records. Rendered citation text is a projection/cache and is excluded from
+normal source-content signatures. See `docs/schema/citation-v0.md`.
+
+Google Docs-shaped citation fixtures use an explicit OpenDoc extension because
+the public Google Docs API does not expose an arbitrary first-class inline node
+for OpenDoc citations. Paragraph elements may contain `opendocCitation`, and
+the document may contain a top-level `opendocCitations` database. This adapter
+shape is for import/export tests and interoperability, not the canonical binary
+document format.
+
+Comments and suggestions are also source state, not renderer-only annotations.
+They anchor to document, nearest-block, or stable text-range anchors and are
+signed with the document source state. Google Docs-shaped fixtures carry them
+as top-level `opendocComments` and `opendocSuggestions` extension arrays so
+the adapter can prove full round-trip behavior without reducing them to plain
+text, DOM spans, or Google-specific transient IDs.
+App/API suggestion projections preserve insert anchors, structured insert inline
+content, delete/format range endpoints, format mark labels, state, and
+provenance. Insert suggestion `text` is a compact editable projection;
+`content` is the source-shaped inline payload.
+Deleted comment threads and individual deleted comments remain retained source
+state for audit/recovery and can be restored by stable IDs as operation-backed
+source changes.
+
+Warning records are retained source-side audit metadata for deterministic
+degradation. Each warning must carry a non-empty stable code and non-empty
+message; empty warning payloads are invalid after import or binary decode.
+
+Mentions are typed inline source nodes. Google Docs-shaped fixtures carry them
+as `opendocMention` paragraph elements with `inlineId` and `label` so adapters
+do not flatten them into plain text.
 
 Marks:
 
@@ -65,6 +115,10 @@ Marks:
 - `background`
 - `font`
 - `size`
+
+`color`, `background`, `font`, and `size` carry string values in canonical
+source state. The first prototype treats those values as editor-facing source
+properties and keeps rendering details as projection.
 
 ## Equations
 
@@ -86,6 +140,52 @@ Equations may be inline or block-level:
 
 - inline equations are inline nodes inside paragraphs
 - block equations are block nodes with equation source and display metadata
+
+Inline and block equation source edits are dedicated structured operations, not
+generic text edits. This keeps equation source atomic for merge, audit, and
+signature reasoning.
+
+Google Docs API import can see equation elements, but that API shape does not
+expose TeX/LaTeX source. V0 imports those elements as placeholder equations
+with explicit warnings; Google Docs-shaped export can emit an equation marker
+but cannot prove source-preserving equation round-trip through that API alone.
+
+Source-preserving Google Docs-shaped fixtures use explicit `opendocEquation`
+and `opendocEquationBlock` extensions. The adapter stores stable inline/block
+IDs, `equationId`, `sourceFormat`, and `source`, and rejects unknown source
+formats rather than silently changing equation semantics.
+
+## Images And Attachments
+
+Images are source blocks that reference content-addressed blobs. The document
+stores the blob hash and source-level alt text; bytes, compression details,
+availability, and exact-byte sidecar signatures remain in the blob layer.
+
+```json
+{
+  "type": "image",
+  "id": "img_1",
+  "blob_hash": "sha256:...",
+  "alt_text": "Gel electrophoresis figure"
+}
+```
+
+Image alt text is edited as source state by stable image block ID. Updating alt
+text does not change the blob hash and therefore does not invalidate detached
+exact-byte blob signatures. Replacing an image updates the `blob_hash` source
+reference while preserving the image block ID and alt text, so comments and
+history anchored to the image can remain stable.
+
+Missing image blobs do not make the document invalid. Clients render a
+placeholder, keep the hash reference, and surface a deterministic warning so a
+shallow clone can be completed later by restoring the blob by hash.
+
+Google Docs-shaped image fixtures use an explicit OpenDoc extension because the
+public Google Docs API image/object model is not the canonical OpenDoc blob
+model. Body content may contain `opendocImage` with `blockId`, `blobHash`, and
+`altText`; the adapter imports and exports that extension while keeping native
+Google inline object import as high-risk unsupported work until blob recovery
+semantics can be preserved.
 
 ## Examples
 

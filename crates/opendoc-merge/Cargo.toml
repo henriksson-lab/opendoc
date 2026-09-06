@@ -4,4 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+opendoc-citations = { path = "../opendoc-citations" }
 opendoc-core = { path = "../opendoc-core" }
+serde = { version = "1", features = ["derive"] }
