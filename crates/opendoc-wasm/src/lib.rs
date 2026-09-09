@@ -2,7 +2,7 @@
 //! uses, compiled to WebAssembly so the web build runs the real Rust core
 //! instead of a JavaScript re-implementation.
 
-use opendoc_app_api::OpenDocApp;
+use opendoc_app::OpenDocApp;
 use std::cell::RefCell;
 use wasm_bindgen::prelude::*;
 
@@ -51,5 +51,5 @@ pub fn reset() {
 /// Names of every command accepted by `dispatch`.
 #[wasm_bindgen]
 pub fn command_names() -> String {
-    serde_json::to_string(&opendoc_app_api::command_names()).unwrap_or_else(|_| "[]".to_string())
+    serde_json::to_string(&opendoc_app::command_names()).unwrap_or_else(|_| "[]".to_string())
 }

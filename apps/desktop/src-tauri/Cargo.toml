@@ -7,7 +7,7 @@ edition = "2021"
 tauri-build = { version = "2.4.1", features = [] }
 
 [dependencies]
-opendoc-app-api = { path = "../../../crates/opendoc-app-api", features = ["opendal-store"] }
+opendoc-app = { path = "../../../crates/opendoc-app", features = ["opendal-store"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri-plugin-dialog = "2"

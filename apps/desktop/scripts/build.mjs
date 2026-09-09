@@ -49,7 +49,7 @@ const wasmDir = join(src, "wasm");
 if (existsSync(wasmDir)) {
   cpSync(wasmDir, join(assets, "wasm"), { recursive: true });
 } else {
-  console.warn("src/wasm/ missing: run `npm run build:wasm` for the browser build to work");
+  throw new Error("src/wasm/ missing: run `npm run build:wasm` before `npm run build`");
 }
 
 writeFileSync(

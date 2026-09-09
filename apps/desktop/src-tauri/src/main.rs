@@ -5,7 +5,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use opendoc_app_api::{base64_decode, base64_encode, AppCommandResult, OpenDocApp};
+use opendoc_app::{base64_decode, base64_encode, AppCommandResult, OpenDocApp};
 use serde::Serialize;
 use serde_json::Value;
 use std::path::{Path, PathBuf};

@@ -7,14 +7,14 @@ const repoRoot = join(desktopRoot, "../..");
 run("cargo fmt check", "cargo", ["fmt", "--all", "--check"], { cwd: repoRoot });
 run("cargo clippy", "cargo", ["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"], { cwd: repoRoot });
 run("cargo test", "cargo", ["test", "--workspace"], { cwd: repoRoot });
-run("cargo test opendal app api", "cargo", [
+run("cargo test opendal app", "cargo", [
   "test",
   "-p",
-  "opendoc-app-api",
+  "opendoc-app",
   "--features",
   "opendal-store",
-  "opendal_fs",
 ], { cwd: repoRoot });
+run("desktop generated command bindings", "npm", ["run", "generate:commands", "--", "--check"], { cwd: desktopRoot });
 run("desktop typecheck", "npm", ["run", "typecheck"], { cwd: desktopRoot });
 run("desktop wasm build", "npm", ["run", "build:wasm"], { cwd: desktopRoot });
 run("desktop build", "npm", ["run", "build"], { cwd: desktopRoot });

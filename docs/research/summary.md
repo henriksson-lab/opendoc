@@ -20,7 +20,8 @@ Status: implementation research phase started; not ready for product implementat
 - Collaboration ADR: `docs/adr/0001-collaboration-core.md`
 - Storage/signing ADR: `docs/adr/0002-storage-and-signing.md`
 - V0 implementation scope ADR: `docs/adr/0003-v0-implementation-scope.md`
-- Implementation plan: `docs/IMPLEMENTATION_PLAN.md`
+- Service backend boundary ADR: `docs/adr/0004-service-backend-boundary.md`
+- Active restructure plan: `docs/RESTRUCTURE_PLAN.md`
 
 ## Core Question Answers
 

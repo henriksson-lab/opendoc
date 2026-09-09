@@ -318,6 +318,16 @@
       }
     },
     {
+      "name": "set_editor_selection_block_style",
+      "returns": "AppDocument",
+      "args": {
+        "selection": "EditorSelection",
+        "style": "string",
+        "level": "number",
+        "ordered": "boolean"
+      }
+    },
+    {
       "name": "add_heading",
       "returns": "AppDocument",
       "args": {
@@ -398,7 +408,7 @@
       "returns": "AppDocument",
       "args": {
         "blockId": "string",
-        "afterInlineId": "string?",
+        "afterInlineId": "string|null",
         "source": "string"
       }
     },
@@ -443,6 +453,14 @@
         "blockId": "string",
         "level": "number",
         "ordered": "boolean"
+      }
+    },
+    {
+      "name": "adjust_editor_selection_list_indent",
+      "returns": "AppDocument",
+      "args": {
+        "selection": "EditorSelection",
+        "delta": "number"
       }
     },
     {
@@ -538,6 +556,15 @@
       "returns": "AppDocument",
       "args": {
         "footnoteId": "string",
+        "items": "AppCitationItem[]"
+      }
+    },
+    {
+      "name": "insert_footnote_citation_after",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "afterInlineId": "string|null",
         "items": "AppCitationItem[]"
       }
     },
@@ -764,10 +791,24 @@
       }
     },
     {
+      "name": "accept_all_suggestions",
+      "returns": "AppDocument",
+      "args": {
+        "acceptedBy": "string"
+      }
+    },
+    {
       "name": "reject_suggestion",
       "returns": "AppDocument",
       "args": {
         "suggestionId": "string",
+        "rejectedBy": "string"
+      }
+    },
+    {
+      "name": "reject_all_suggestions",
+      "returns": "AppDocument",
+      "args": {
         "rejectedBy": "string"
       }
     },
@@ -839,6 +880,128 @@
       "args": {
         "address": "string",
         "value": "string"
+      }
+    },
+    {
+      "name": "describe_spreadsheet_selection",
+      "returns": "AppSpreadsheetSelection",
+      "args": {
+        "sheetId": "string",
+        "anchor": "string",
+        "focus": "string"
+      }
+    },
+    {
+      "name": "reduce_spreadsheet_selection",
+      "returns": "AppSpreadsheetSelection",
+      "args": {
+        "sheetId": "string",
+        "anchor": "string",
+        "focus": "string",
+        "action": "string",
+        "value": "string",
+        "extend": "boolean"
+      }
+    },
+    {
+      "name": "copy_spreadsheet_selection_tsv",
+      "returns": "string",
+      "args": {
+        "sheetId": "string",
+        "anchor": "string",
+        "focus": "string"
+      }
+    },
+    {
+      "name": "paste_spreadsheet_tsv",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string",
+        "origin": "string",
+        "text": "string"
+      }
+    },
+    {
+      "name": "clear_spreadsheet_selection",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string",
+        "anchor": "string",
+        "focus": "string"
+      }
+    },
+    {
+      "name": "set_spreadsheet_selection_format",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string",
+        "anchor": "string",
+        "focus": "string",
+        "property": "string",
+        "value": "string"
+      }
+    },
+    {
+      "name": "add_spreadsheet_row_after_selection",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string",
+        "anchor": "string",
+        "focus": "string"
+      }
+    },
+    {
+      "name": "add_spreadsheet_column_after_selection",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string",
+        "anchor": "string",
+        "focus": "string"
+      }
+    },
+    {
+      "name": "delete_spreadsheet_selection_row",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string",
+        "anchor": "string",
+        "focus": "string"
+      }
+    },
+    {
+      "name": "delete_spreadsheet_selection_column",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string",
+        "anchor": "string",
+        "focus": "string"
+      }
+    },
+    {
+      "name": "merge_spreadsheet_selection",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string",
+        "anchor": "string",
+        "focus": "string"
+      }
+    },
+    {
+      "name": "freeze_spreadsheet_selection",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string",
+        "anchor": "string",
+        "focus": "string"
+      }
+    },
+    {
+      "name": "set_spreadsheet_selection_filter",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string",
+        "anchor": "string",
+        "focus": "string"
       }
     },
     {
@@ -1386,12 +1549,25 @@
       "args": {}
     },
     {
+      "name": "describe_editor_selection",
+      "returns": "AppEditorSelection",
+      "args": {
+        "selection": "EditorSelection"
+      }
+    },
+    {
+      "name": "select_all_editor_content",
+      "returns": "EditorResult",
+      "args": {}
+    },
+    {
       "name": "apply_editor_input",
       "returns": "EditorResult",
       "args": {
         "selection": "EditorSelection",
         "input_type": "string",
-        "data": "string?"
+        "data": "string|null",
+        "html": "string|null"
       }
     },
     {

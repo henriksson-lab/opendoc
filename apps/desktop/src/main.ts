@@ -1,7 +1,3 @@
-// OpenDoc frontend shell. The Rust core owns the document model, editing
-// semantics, and body rendering; this file wires DOM chrome (menus, toolbar,
-// panels, dialogs) to `dispatch` calls and hosts the editor.
-
 import "./styles.css";
 import { DocumentEditor, morphChildren } from "./editor";
 import {
@@ -21,12 +17,15 @@ import type {
   AppAuditView,
   AppBlock,
   AppDocument,
+  AppEditorSelection,
   AppInline,
+  AppSpreadsheetSelection,
   EditorInput,
   EditorResult,
   EditorSelection,
   OpenDocRuntimeProfile,
 } from "./types";
+import { confirmDialog, escapeHtml, promptDialog, setDialogAfterClose, toast } from "./ui";
 
 // ---- State -----------------------------------------------------------------
 
@@ -50,6 +49,7 @@ let workbookHtml = "";
 let sheetId: string | null = null;
 let cellAnchor = "A1";
 let cellFocus = "A1";
+let spreadsheetSelection: AppSpreadsheetSelection | null = null;
 let cellEditing: { address: string; draft: string } | null = null;
 let findQuery = "";
 let findIndex = 0;
@@ -58,17 +58,9 @@ let showFind = false;
 const app = document.getElementById("app") as HTMLElement;
 const editorHost = document.createElement("div");
 editorHost.className = "doc-body";
+setDialogAfterClose(() => editor?.focus());
 
 // ---- Utilities -------------------------------------------------------------
-
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
 
 function query<T extends Element = HTMLElement>(selector: string, root: ParentNode = app): T | null {
   return root.querySelector(selector) as T | null;
@@ -77,15 +69,6 @@ function query<T extends Element = HTMLElement>(selector: string, root: ParentNo
 function showError(message: string): void {
   lastError = message;
   renderStatus();
-}
-
-function toast(message: string): void {
-  const node = document.createElement("div");
-  node.className = "toast";
-  node.setAttribute("role", "status");
-  node.textContent = message;
-  document.body.appendChild(node);
-  window.setTimeout(() => node.remove(), 2500);
 }
 
 async function run<K extends DesktopCommandName>(command: K, args: CommandArgs<K> = {} as CommandArgs<K>) {
@@ -113,70 +96,6 @@ async function edit<K extends DocumentCommandName>(command: K, args: CommandArgs
 function applyDocument(next: AppDocument): void {
   doc = next;
   renderAll();
-}
-
-// ---- Dialogs (real modals, focus-trapped by <dialog>) -----------------------
-
-type Field = {
-  name: string;
-  label: string;
-  type?: "text" | "textarea" | "number" | "select" | "password" | "color";
-  value?: string;
-  options?: { value: string; label: string }[];
-  placeholder?: string;
-};
-
-function promptDialog(options: { title: string; fields: Field[]; submit?: string; cancel?: string }): Promise<Record<string, string> | null> {
-  return new Promise((resolve) => {
-    const dialog = document.createElement("dialog");
-    dialog.className = "modal";
-    dialog.innerHTML = `
-      <form method="dialog" class="modal-form">
-        <h2>${escapeHtml(options.title)}</h2>
-        ${options.fields
-          .map((field) => {
-            const id = `field-${field.name}`;
-            const control =
-              field.type === "textarea"
-                ? `<textarea id="${id}" name="${escapeHtml(field.name)}" rows="5" placeholder="${escapeHtml(field.placeholder ?? "")}">${escapeHtml(field.value ?? "")}</textarea>`
-                : field.type === "select"
-                  ? `<select id="${id}" name="${escapeHtml(field.name)}">${(field.options ?? [])
-                      .map((option) => `<option value="${escapeHtml(option.value)}"${option.value === field.value ? " selected" : ""}>${escapeHtml(option.label)}</option>`)
-                      .join("")}</select>`
-                  : `<input id="${id}" name="${escapeHtml(field.name)}" type="${field.type ?? "text"}" value="${escapeHtml(field.value ?? "")}" placeholder="${escapeHtml(field.placeholder ?? "")}">`;
-            return `<label for="${id}"><span>${escapeHtml(field.label)}</span>${control}</label>`;
-          })
-          .join("")}
-        <div class="modal-actions">
-          <button type="button" value="cancel" data-cancel>${escapeHtml(options.cancel ?? "Cancel")}</button>
-          <button type="submit" value="ok" class="primary">${escapeHtml(options.submit ?? "OK")}</button>
-        </div>
-      </form>`;
-    document.body.appendChild(dialog);
-    const form = dialog.querySelector("form") as HTMLFormElement;
-    let result: Record<string, string> | null = null;
-    form.addEventListener("submit", () => {
-      result = {};
-      for (const field of options.fields) {
-        const control = form.elements.namedItem(field.name) as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | null;
-        result[field.name] = control?.value ?? "";
-      }
-    });
-    dialog.querySelector("[data-cancel]")?.addEventListener("click", () => dialog.close());
-    dialog.addEventListener("close", () => {
-      dialog.remove();
-      resolve(result);
-      editor?.focus();
-    });
-    dialog.showModal();
-    const first = form.querySelector("input, textarea, select") as HTMLElement | null;
-    first?.focus();
-  });
-}
-
-async function confirmDialog(title: string, body: string, okLabel = "OK"): Promise<boolean> {
-  const result = await promptDialog({ title, fields: [{ name: "note", label: body, type: "text", value: "" }], submit: okLabel });
-  return result !== null;
 }
 
 // ---- Document helpers -------------------------------------------------------
@@ -209,24 +128,6 @@ function findInline(id: string): { block: AppBlock; inline: AppInline } | null {
   return null;
 }
 
-function markKinds(inline: AppInline | null | undefined): Set<string> {
-  const kinds = new Set<string>();
-  for (const mark of inline?.marks ?? []) {
-    kinds.add(mark.split(":")[0]);
-  }
-  return kinds;
-}
-
-function markValue(inline: AppInline | null | undefined, kind: string): string | null {
-  for (const mark of inline?.marks ?? []) {
-    const parts = mark.split(":");
-    if (parts[0] === kind && parts.length >= 3) {
-      return parts.slice(1, -1).join(":");
-    }
-  }
-  return null;
-}
-
 function focusBlock(): AppBlock | null {
   return selection ? findBlock(selection.focus.block_id) : null;
 }
@@ -236,35 +137,8 @@ function focusInline(): AppInline | null {
   return findInline(selection.focus.inline_id)?.inline ?? null;
 }
 
-/** Ordered list of top-level block ids covered by the selection. */
-function selectedBlockIds(): string[] {
-  if (!doc || !selection) return [];
-  const order = doc.blocks.map((block) => block.id);
-  const a = order.indexOf(selection.anchor.block_id);
-  const b = order.indexOf(selection.focus.block_id);
-  if (a < 0 || b < 0) return [selection.focus.block_id];
-  const [from, to] = a <= b ? [a, b] : [b, a];
-  return order.slice(from, to + 1);
-}
-
-function selectedInlineRange(): { start: string; end: string } | null {
-  if (!doc || !selection) return null;
-  const ids: string[] = [];
-  for (const block of walkBlocks(doc.blocks)) {
-    for (const inline of block.content) ids.push(inline.id);
-  }
-  const a = selection.anchor.inline_id ? ids.indexOf(selection.anchor.inline_id) : -1;
-  const b = selection.focus.inline_id ? ids.indexOf(selection.focus.inline_id) : -1;
-  if (a < 0 && b < 0) return null;
-  const from = Math.min(a < 0 ? b : a, b < 0 ? a : b);
-  const to = Math.max(a < 0 ? b : a, b < 0 ? a : b);
-  return { start: ids[from], end: ids[to] };
-}
-
 function wordStats(): string {
-  const text = doc?.visible_text ?? "";
-  const words = text.split(/\s+/).filter((word) => word.length > 0).length;
-  return `${words} words · ${Array.from(text).length} characters`;
+  return `${doc?.word_count ?? 0} words · ${doc?.character_count ?? 0} characters`;
 }
 
 // ---- Rendering -------------------------------------------------------------
@@ -487,9 +361,10 @@ function renderToolbar(): void {
   const bar = query("[data-toolbar]");
   if (!bar || !doc) return;
   const inline = focusInline();
-  const kinds = markKinds(inline);
+  const kinds = new Set(inline?.mark_kinds ?? []);
+  const markValue = (kind: string, fallback: string) => inline?.mark_values[kind] ?? fallback;
   const block = focusBlock();
-  const styleValue = block?.kind === "heading" ? `heading:${block.level ?? 1}` : block?.kind === "list-item" ? `list:${block.ordered ? "true" : "false"}` : "paragraph";
+  const styleValue = block?.style_value ?? "paragraph";
   const toggle = (kind: string, label: string, title: string) =>
     `<button type="button" data-action="mark:${kind}" class="tb${kinds.has(kind) ? " active" : ""}" aria-pressed="${kinds.has(kind)}" title="${escapeHtml(title)}">${label}</button>`;
   const docsToolbar = `
@@ -510,18 +385,18 @@ function renderToolbar(): void {
         .join("")}
     </select>
     <select class="tb-select" data-select="font" aria-label="Font">
-      ${FONTS.map((font) => `<option value="${font}"${(markValue(inline, "font") ?? "Arial") === font ? " selected" : ""}>${font}</option>`).join("")}
+      ${FONTS.map((font) => `<option value="${font}"${markValue("font", "Arial") === font ? " selected" : ""}>${font}</option>`).join("")}
     </select>
     <select class="tb-select narrow" data-select="size" aria-label="Font size">
-      ${FONT_SIZES.map((size) => `<option value="${size}"${(markValue(inline, "size") ?? "11") === size ? " selected" : ""}>${size}</option>`).join("")}
+      ${FONT_SIZES.map((size) => `<option value="${size}"${markValue("size", "11") === size ? " selected" : ""}>${size}</option>`).join("")}
     </select>
     <span class="sep"></span>
     ${toggle("bold", "<b>B</b>", "Bold (Ctrl+B)")}
     ${toggle("italic", "<i>I</i>", "Italic (Ctrl+I)")}
     ${toggle("underline", "<u>U</u>", "Underline (Ctrl+U)")}
     ${toggle("strike", "<s>S</s>", "Strikethrough")}
-    <label class="tb color" title="Text colour"><span style="border-bottom:3px solid ${escapeHtml(markValue(inline, "color") ?? "#000")}">A</span><input type="color" data-color="color" value="${escapeHtml(markValue(inline, "color") ?? "#000000")}"></label>
-    <label class="tb color" title="Highlight"><span style="background:${escapeHtml(markValue(inline, "background") ?? "transparent")}">▮</span><input type="color" data-color="background" value="${escapeHtml(markValue(inline, "background") ?? "#ffff00")}"></label>
+    <label class="tb color" title="Text colour"><span style="border-bottom:3px solid ${escapeHtml(markValue("color", "#000"))}">A</span><input type="color" data-color="color" value="${escapeHtml(markValue("color", "#000000"))}"></label>
+    <label class="tb color" title="Highlight"><span style="background:${escapeHtml(markValue("background", "transparent"))}">▮</span><input type="color" data-color="background" value="${escapeHtml(markValue("background", "#ffff00"))}"></label>
     <span class="sep"></span>
     <button type="button" class="tb" data-action="insert-link" title="Insert link (Ctrl+K)">🔗</button>
     <button type="button" class="tb" data-action="comment" title="Add comment (Ctrl+Alt+M)">💬</button>
@@ -873,7 +748,7 @@ function renderPanelBody(which: Panel): string {
           .map(
             (thread) => `
           <article class="thread" data-thread="${escapeHtml(thread.id)}">
-            <p class="anchor">${escapeHtml(anchorLabel(thread.anchor))}</p>
+            <p class="anchor">${escapeHtml(thread.anchor_label)}</p>
             ${thread.comments
               .filter((comment) => !comment.deleted)
               .map((comment) => `<div class="comment"><strong>${escapeHtml(comment.author)}</strong><p>${escapeHtml(comment.body)}</p></div>`)
@@ -897,6 +772,7 @@ function renderPanelBody(which: Panel): string {
             (item) => `
           <article class="suggestion">
             <p><strong>${escapeHtml(item.author)}</strong> · ${escapeHtml(item.kind)}</p>
+            ${item.anchor_label ? `<p class="anchor">${escapeHtml(item.anchor_label)}</p>` : ""}
             <p>${escapeHtml(item.text)}</p>
             <div class="thread-actions">
               <button type="button" data-action="accept-suggestion" data-id="${escapeHtml(item.id)}">Accept</button>
@@ -976,19 +852,6 @@ function renderPanelBody(which: Panel): string {
   }
 }
 
-function anchorLabel(anchor: string): string {
-  if (anchor.startsWith("nearest:")) {
-    const block = findBlock(anchor.slice("nearest:".length));
-    return block ? `On: “${block.content.map((inline) => inline.text).join("").slice(0, 60)}”` : "On a removed block";
-  }
-  const [start, end] = anchor.split("..");
-  const first = start ? findInline(start) : null;
-  const last = end ? findInline(end) : null;
-  if (!first) return "On removed text";
-  const text = first.inline.id === last?.inline.id ? first.inline.text : `${first.inline.text} … ${last?.inline.text ?? ""}`;
-  return `“${text.slice(0, 80)}”`;
-}
-
 // ---- Spreadsheet ---------------------------------------------------------------
 
 function currentSheet() {
@@ -1030,6 +893,7 @@ async function renderSheets(main: HTMLElement): Promise<void> {
   tabs.innerHTML = `${doc.workbook.sheets
     .map((item) => `<button type="button" class="sheet-tab${item.id === sheet.id ? " active" : ""}" data-action="select-sheet" data-id="${escapeHtml(item.id)}" data-title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</button>`)
     .join("")}<button type="button" class="sheet-tab add" data-action="add-sheet" title="Add sheet">＋</button>`;
+  await refreshSpreadsheetSelection();
   updateCellSelection();
   const formula = query<HTMLInputElement>("[data-formula-input]", grid);
   const cell = sheet.cells.find((item) => item.address === cellFocus);
@@ -1039,64 +903,36 @@ async function renderSheets(main: HTMLElement): Promise<void> {
   renderCellEditor(gridHost);
 }
 
-function parseAddress(address: string): { col: number; row: number } | null {
-  const match = /^([A-Z]+)(\d+)$/.exec(address.toUpperCase());
-  if (!match) return null;
-  let col = 0;
-  for (const ch of match[1]) col = col * 26 + (ch.charCodeAt(0) - 64);
-  return { col, row: Number(match[2]) };
-}
-
-function formatAddress(col: number, row: number): string {
-  let label = "";
-  let value = Math.max(col, 1);
-  while (value > 0) {
-    const remainder = (value - 1) % 26;
-    label = String.fromCharCode(65 + remainder) + label;
-    value = Math.floor((value - 1) / 26);
-  }
-  return `${label}${Math.max(row, 1)}`;
-}
-
-function selectedRange(): { from: { col: number; row: number }; to: { col: number; row: number } } {
-  const a = parseAddress(cellAnchor) ?? { col: 1, row: 1 };
-  const b = parseAddress(cellFocus) ?? a;
-  return { from: { col: Math.min(a.col, b.col), row: Math.min(a.row, b.row) }, to: { col: Math.max(a.col, b.col), row: Math.max(a.row, b.row) } };
-}
-
 function rangeLabel(): string {
-  const { from, to } = selectedRange();
-  const start = formatAddress(from.col, from.row);
-  const end = formatAddress(to.col, to.row);
-  return start === end ? start : `${start}:${end}`;
+  if (spreadsheetSelection?.anchor === cellAnchor && spreadsheetSelection.focus === cellFocus) return spreadsheetSelection.range;
+  return cellFocus;
+}
+
+async function refreshSpreadsheetSelection(): Promise<void> {
+  if (!sheetId) {
+    spreadsheetSelection = null;
+    return;
+  }
+  try {
+    spreadsheetSelection = await invoke("describe_spreadsheet_selection", { sheetId, anchor: cellAnchor, focus: cellFocus });
+    cellAnchor = spreadsheetSelection.anchor;
+    cellFocus = spreadsheetSelection.focus;
+  } catch (error) {
+    spreadsheetSelection = null;
+    showError(error instanceof Error ? error.message : String(error));
+  }
 }
 
 function updateCellSelection(): void {
   const grid = query("[data-grid]");
   if (!grid) return;
-  const { from, to } = selectedRange();
+  const selected = new Set(spreadsheetSelection?.anchor === cellAnchor && spreadsheetSelection.focus === cellFocus ? spreadsheetSelection.selected_addresses : [cellFocus]);
   grid.querySelectorAll<HTMLElement>("[data-address]").forEach((node) => {
-    const parsed = parseAddress(node.dataset.address ?? "");
-    const inside = !!parsed && parsed.col >= from.col && parsed.col <= to.col && parsed.row >= from.row && parsed.row <= to.row;
-    node.classList.toggle("selected", inside);
+    node.classList.toggle("selected", selected.has(node.dataset.address ?? ""));
     node.classList.toggle("focus", node.dataset.address === cellFocus);
   });
   const summary = query("[data-cell-summary]");
-  const sheet = currentSheet();
-  if (summary && sheet) {
-    let sum = 0;
-    let count = 0;
-    for (const cell of sheet.cells) {
-      const parsed = parseAddress(cell.address);
-      if (!parsed || parsed.col < from.col || parsed.col > to.col || parsed.row < from.row || parsed.row > to.row) continue;
-      const value = Number(cell.computed_value);
-      if (cell.computed_kind === "number" && Number.isFinite(value)) {
-        sum += value;
-        count += 1;
-      }
-    }
-    summary.textContent = count > 0 ? `Sum ${sum} · Count ${count} · Avg ${(sum / count).toFixed(2)}` : rangeLabel();
-  }
+  if (summary) summary.textContent = spreadsheetSelection?.summary_label ?? rangeLabel();
   const focusCell = grid.querySelector<HTMLElement>(`[data-address="${cellFocus}"]`);
   if (focusCell && typeof focusCell.scrollIntoView === "function") focusCell.scrollIntoView({ block: "nearest", inline: "nearest" });
 }
@@ -1132,7 +968,10 @@ async function commitCellEdit(move: { col: number; row: number } | null): Promis
   if (editing && sheetId) {
     await edit("set_spreadsheet_cell_in_sheet", { sheetId, address: editing.address, value: editing.draft });
   }
-  if (move) moveFocus(move.col, move.row, false);
+  if (move) {
+    const direction = move.col < 0 ? "left" : move.col > 0 ? "right" : move.row < 0 ? "up" : "down";
+    await moveFocus(direction, false);
+  }
   query<HTMLElement>("[data-grid]")?.focus();
   await renderSheets(query("[data-main]") as HTMLElement);
 }
@@ -1152,11 +991,11 @@ async function onCellEditorKey(event: KeyboardEvent): Promise<void> {
   }
 }
 
-function moveFocus(dc: number, dr: number, extend: boolean): void {
-  const current = parseAddress(cellFocus) ?? { col: 1, row: 1 };
-  const next = formatAddress(Math.max(1, current.col + dc), Math.max(1, current.row + dr));
-  cellFocus = next;
-  if (!extend) cellAnchor = next;
+async function applySpreadsheetSelectionAction(action: string, value: string, extend: boolean): Promise<void> {
+  if (!sheetId) return;
+  spreadsheetSelection = await invoke("reduce_spreadsheet_selection", { sheetId, anchor: cellAnchor, focus: cellFocus, action, value, extend });
+  cellAnchor = spreadsheetSelection.anchor;
+  cellFocus = spreadsheetSelection.focus;
   updateCellSelection();
   renderToolbar();
   const formula = query<HTMLInputElement>("[data-formula-input]");
@@ -1164,6 +1003,10 @@ function moveFocus(dc: number, dr: number, extend: boolean): void {
   if (formula && document.activeElement !== formula) formula.value = cell?.user_value ?? "";
   const nameBox = query<HTMLInputElement>("[data-name-box]");
   if (nameBox) nameBox.value = rangeLabel();
+}
+
+async function moveFocus(direction: string, extend: boolean, edge = false): Promise<void> {
+  await applySpreadsheetSelectionAction(edge ? "move-edge" : "move", direction, extend);
 }
 
 function bindSheetEvents(root: HTMLElement): void {
@@ -1174,20 +1017,16 @@ function bindSheetEvents(root: HTMLElement): void {
     if (cellEditing && target.dataset.address !== cellEditing.address) {
       void commitCellEdit(null);
     }
-    cellFocus = target.dataset.address;
-    if (!event.shiftKey) cellAnchor = cellFocus;
-    moveFocus(0, 0, event.shiftKey);
+    void applySpreadsheetSelectionAction("set-focus", target.dataset.address, event.shiftKey);
     const dragging = (move: MouseEvent) => {
       const over = (move.target as Element | null)?.closest<HTMLElement>("[data-address]");
       if (over?.dataset.address && over.dataset.address !== cellFocus) {
-        cellFocus = over.dataset.address;
-        updateCellSelection();
+        void applySpreadsheetSelectionAction("set-focus", over.dataset.address, true);
       }
     };
     const stop = () => {
       grid.removeEventListener("mousemove", dragging);
       window.removeEventListener("mouseup", stop);
-      moveFocus(0, 0, true);
     };
     grid.addEventListener("mousemove", dragging);
     window.addEventListener("mouseup", stop);
@@ -1205,11 +1044,15 @@ function bindSheetEvents(root: HTMLElement): void {
   });
   grid.addEventListener("copy", (event) => {
     event.preventDefault();
-    event.clipboardData?.setData("text/plain", selectedCellsTsv());
+    const tsv = selectedCellsTsv();
+    if (tsv !== null) event.clipboardData?.setData("text/plain", tsv);
+    else void copySelectedCellsTsv().then((text) => navigator.clipboard?.writeText(text).catch((error) => showError(String(error))));
   });
   grid.addEventListener("cut", (event) => {
     event.preventDefault();
-    event.clipboardData?.setData("text/plain", selectedCellsTsv());
+    const tsv = selectedCellsTsv();
+    if (tsv !== null) event.clipboardData?.setData("text/plain", tsv);
+    else void copySelectedCellsTsv().then((text) => navigator.clipboard?.writeText(text).catch((error) => showError(String(error))));
     void clearSelectedCells();
   });
   const formula = query<HTMLInputElement>("[data-formula-input]", root);
@@ -1232,13 +1075,7 @@ function bindSheetEvents(root: HTMLElement): void {
   nameBox?.addEventListener("keydown", (event) => {
     if (event.key !== "Enter") return;
     event.preventDefault();
-    const [start, end] = nameBox.value.toUpperCase().split(":");
-    if (parseAddress(start ?? "")) {
-      cellAnchor = start;
-      cellFocus = end && parseAddress(end) ? end : start;
-      updateCellSelection();
-      grid.focus();
-    }
+    void applySpreadsheetSelectionAction("set-range", nameBox.value, false).then(() => grid.focus());
   });
 }
 
@@ -1247,6 +1084,7 @@ function startCellEdit(address: string, seed: string | null): void {
   cellEditing = { address, draft: seed ?? cell?.user_value ?? "" };
   cellFocus = address;
   cellAnchor = address;
+  spreadsheetSelection = null;
   updateCellSelection();
   renderCellEditor(query("[data-grid]") as HTMLElement);
 }
@@ -1254,20 +1092,10 @@ function startCellEdit(address: string, seed: string | null): void {
 async function onGridKey(event: KeyboardEvent): Promise<void> {
   if (cellEditing) return;
   const ctrl = event.ctrlKey || event.metaKey;
-  const moves: Record<string, [number, number]> = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0] };
-  if (moves[event.key]) {
+  const moveDirection = { ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right" }[event.key];
+  if (moveDirection) {
     event.preventDefault();
-    const [dc, dr] = moves[event.key];
-    if (ctrl) {
-      const sheet = currentSheet();
-      const parsed = parseAddress(cellFocus) ?? { col: 1, row: 1 };
-      const maxCol = sheet?.columns.length ?? 1;
-      const maxRow = sheet?.rows.length ?? 1;
-      cellFocus = formatAddress(dc === 0 ? parsed.col : dc < 0 ? 1 : maxCol, dr === 0 ? parsed.row : dr < 0 ? 1 : maxRow);
-      moveFocus(0, 0, event.shiftKey);
-    } else {
-      moveFocus(dc, dr, event.shiftKey);
-    }
+    await moveFocus(moveDirection, event.shiftKey, ctrl);
     return;
   }
   if (event.key === "Enter" || event.key === "F2") {
@@ -1277,7 +1105,7 @@ async function onGridKey(event: KeyboardEvent): Promise<void> {
   }
   if (event.key === "Tab") {
     event.preventDefault();
-    moveFocus(event.shiftKey ? -1 : 1, 0, false);
+    await moveFocus(event.shiftKey ? "left" : "right", false);
     return;
   }
   if (event.key === "Delete" || event.key === "Backspace") {
@@ -1287,17 +1115,12 @@ async function onGridKey(event: KeyboardEvent): Promise<void> {
   }
   if (event.key === "Home") {
     event.preventDefault();
-    const parsed = parseAddress(cellFocus) ?? { col: 1, row: 1 };
-    cellFocus = formatAddress(1, ctrl ? 1 : parsed.row);
-    moveFocus(0, 0, event.shiftKey);
+    await applySpreadsheetSelectionAction("home", ctrl ? "sheet" : "row", event.shiftKey);
     return;
   }
   if (ctrl && event.key.toLowerCase() === "a") {
     event.preventDefault();
-    const sheet = currentSheet();
-    cellAnchor = "A1";
-    cellFocus = formatAddress(sheet?.columns.length ?? 1, sheet?.rows.length ?? 1);
-    updateCellSelection();
+    await applySpreadsheetSelectionAction("select-all", "", false);
     return;
   }
   const ctrlActions: Record<string, string> = { b: "cell-format:bold", i: "cell-format:italic", z: event.shiftKey ? "redo" : "undo", y: "redo", f: "find", s: "save" };
@@ -1312,58 +1135,36 @@ async function onGridKey(event: KeyboardEvent): Promise<void> {
   }
 }
 
-function selectedCellsTsv(): string {
-  const sheet = currentSheet();
-  if (!sheet) return "";
-  const { from, to } = selectedRange();
-  const lines: string[] = [];
-  for (let row = from.row; row <= to.row; row += 1) {
-    const values: string[] = [];
-    for (let col = from.col; col <= to.col; col += 1) {
-      const address = formatAddress(col, row);
-      values.push(sheet.cells.find((cell) => cell.address === address)?.user_value ?? "");
-    }
-    lines.push(values.join("\t"));
-  }
-  return lines.join("\n");
+function selectedCellsTsv(): string | null {
+  if (spreadsheetSelection?.anchor === cellAnchor && spreadsheetSelection.focus === cellFocus) return spreadsheetSelection.selected_tsv;
+  return null;
+}
+
+async function copySelectedCellsTsv(): Promise<string> {
+  if (!sheetId) return "";
+  return await invoke("copy_spreadsheet_selection_tsv", { sheetId, anchor: cellAnchor, focus: cellFocus });
 }
 
 async function pasteCells(text: string): Promise<void> {
   if (!sheetId) return;
-  const origin = parseAddress(cellFocus) ?? { col: 1, row: 1 };
-  const cells: { address: string; value: string }[] = [];
-  const rows = text.replace(/\r\n?/g, "\n").split("\n");
-  if (rows.length > 1 && rows[rows.length - 1] === "") rows.pop();
-  rows.forEach((line, r) => {
-    line.split("\t").forEach((value, c) => {
-      cells.push({ address: formatAddress(origin.col + c, origin.row + r), value });
-    });
-  });
-  if (cells.length === 0) return;
-  await edit("set_spreadsheet_cells_in_sheet", { sheetId, cells });
+  await edit("paste_spreadsheet_tsv", { sheetId, origin: cellFocus, text });
   await renderSheets(query("[data-main]") as HTMLElement);
 }
 
 async function clearSelectedCells(): Promise<void> {
   if (!sheetId) return;
-  const { from, to } = selectedRange();
-  const cells: { address: string; value: string }[] = [];
-  for (let row = from.row; row <= to.row; row += 1) {
-    for (let col = from.col; col <= to.col; col += 1) cells.push({ address: formatAddress(col, row), value: "" });
-  }
-  await edit("set_spreadsheet_cells_in_sheet", { sheetId, cells });
+  await edit("clear_spreadsheet_selection", { sheetId, anchor: cellAnchor, focus: cellFocus });
   await renderSheets(query("[data-main]") as HTMLElement);
 }
 
 async function setCellFormat(property: string, value: string): Promise<void> {
   if (!sheetId) return;
-  const { from, to } = selectedRange();
-  for (let row = from.row; row <= to.row; row += 1) {
-    for (let col = from.col; col <= to.col; col += 1) {
-      await invoke("set_spreadsheet_cell_format", { sheetId, address: formatAddress(col, row), property, value }).catch((error) => showError(String(error)));
-    }
-  }
-  applyDocument(await invoke("get_document"));
+  await edit("set_spreadsheet_selection_format", { sheetId, anchor: cellAnchor, focus: cellFocus, property, value });
+  await renderSheets(query("[data-main]") as HTMLElement);
+}
+
+function currentSpreadsheetSelectionArgs(): { sheetId: string; anchor: string; focus: string } | null {
+  return sheetId ? { sheetId, anchor: cellAnchor, focus: cellFocus } : null;
 }
 
 // ---- Actions -----------------------------------------------------------------
@@ -1392,12 +1193,19 @@ async function applyMark(kind: string, value: string | null, action: "toggle" | 
 }
 
 async function setBlockStyle(style: "paragraph" | "heading" | "list-item", level: number, ordered: boolean): Promise<void> {
-  for (const blockId of selectedBlockIds()) {
-    await invoke("set_block_text_style", { blockId, style, level, ordered }).catch((error) => showError(String(error)));
-  }
-  applyDocument(await invoke("get_document"));
+  if (!selection) return;
+  await edit("set_editor_selection_block_style", { selection, style, level, ordered });
   editor?.setSelection(selection);
   editor?.focus();
+}
+
+async function describeEditorSelection(): Promise<AppEditorSelection | null> {
+  if (!selection) return null;
+  try {
+    return await run("describe_editor_selection", { selection });
+  } catch {
+    return null;
+  }
 }
 
 function requireBlock(): AppBlock | null {
@@ -1581,14 +1389,8 @@ async function runAction(action: string, data: DOMStringMap = {}): Promise<void>
       break;
     case "select-all": {
       if (!doc || mode !== "docs") return;
-      const first = doc.blocks[0];
-      const last = doc.blocks[doc.blocks.length - 1];
-      if (!first || !last) return;
-      const lastInline = last.content[last.content.length - 1];
-      editor?.setSelection({
-        anchor: { block_id: first.id, inline_id: first.content[0]?.id ?? null, offset: 0 },
-        focus: { block_id: last.id, inline_id: lastInline?.id ?? null, offset: Array.from(lastInline?.text ?? "").length },
-      });
+      const result = await invoke("select_all_editor_content");
+      editorHooks.onResult(result);
       break;
     }
     case "find":
@@ -1628,8 +1430,9 @@ async function runAction(action: string, data: DOMStringMap = {}): Promise<void>
       break;
     }
     case "comment": {
-      const range = selectedInlineRange();
-      const target = requireBlock();
+      const context = await describeEditorSelection();
+      const range = context?.inline_range ?? null;
+      const target = context?.focus_block_id ? findBlock(context.focus_block_id) : requireBlock();
       if (!target) return;
       const result = await promptDialog({ title: "Add comment", fields: [{ name: "body", label: "Comment", type: "textarea" }], submit: "Comment" });
       if (!result?.body.trim()) return;
@@ -1648,7 +1451,7 @@ async function runAction(action: string, data: DOMStringMap = {}): Promise<void>
       if (data.id) await edit("delete_comment_thread", { threadId: data.id });
       break;
     case "suggest": {
-      const range = selectedInlineRange();
+      const range = (await describeEditorSelection())?.inline_range ?? null;
       if (!range) {
         showError("Select the text to replace first.");
         return;
@@ -1660,7 +1463,7 @@ async function runAction(action: string, data: DOMStringMap = {}): Promise<void>
       break;
     }
     case "suggest-delete": {
-      const range = selectedInlineRange();
+      const range = (await describeEditorSelection())?.inline_range ?? null;
       if (!range) {
         showError("Select the text to delete first.");
         return;
@@ -1677,11 +1480,10 @@ async function runAction(action: string, data: DOMStringMap = {}): Promise<void>
       if (data.id) await edit("reject_suggestion", { suggestionId: data.id, rejectedBy: authorName });
       break;
     case "accept-all":
+      await edit("accept_all_suggestions", { acceptedBy: authorName });
+      break;
     case "reject-all":
-      for (const item of doc?.suggestions.filter((entry) => entry.state === "proposed") ?? []) {
-        if (action === "accept-all") await edit("accept_suggestion", { suggestionId: item.id, acceptedBy: authorName });
-        else await edit("reject_suggestion", { suggestionId: item.id, rejectedBy: authorName });
-      }
+      await edit("reject_all_suggestions", { rejectedBy: authorName });
       break;
     case "insert-table": {
       const target = requireBlock();
@@ -1796,15 +1598,11 @@ async function runAction(action: string, data: DOMStringMap = {}): Promise<void>
       const target = requireBlock();
       if (!target) return;
       if (action === "cite-footnote") {
-        const before = new Set((doc.footnotes ?? []).map((note) => note.id));
-        await edit("insert_footnote_ref_after", { blockId: target.id, afterInlineId: selection?.focus.inline_id ?? null });
-        const footnote = doc?.footnotes.find((note) => !before.has(note.id));
-        if (footnote) {
-          await edit("insert_footnote_citation_group", {
-            footnoteId: footnote.id,
-            items: [{ reference_id: referenceId, locator: locator || null, label: null, prefix: null, suffix: null, suppress_author: false }],
-          });
-        }
+        await edit("insert_footnote_citation_after", {
+          blockId: target.id,
+          afterInlineId: selection?.focus.inline_id ?? null,
+          items: [{ reference_id: referenceId, locator: locator || null, label: null, prefix: null, suffix: null, suppress_author: false }],
+        });
       } else {
         await edit("insert_citation", { referenceId, afterInlineId: selection?.focus.inline_id ?? null, locator: locator || null, label: null, prefix: null, suffix: null, suppressAuthor: false });
       }
@@ -1833,9 +1631,7 @@ async function runAction(action: string, data: DOMStringMap = {}): Promise<void>
       break;
     }
     case "import-bibtex": {
-      const file = await openFile(["bib", "bibtex", "ris", "json"]);
-      if (!file) return;
-      await edit("import_bibliography_text", { name: file.name, text: textFromBase64(file.base64) });
+      showError("Bibliography import is not available until the Rust command contract is regenerated.");
       break;
     }
     case "delete-reference":
@@ -1864,13 +1660,8 @@ async function runAction(action: string, data: DOMStringMap = {}): Promise<void>
       break;
     case "indent":
     case "outdent": {
-      for (const blockId of selectedBlockIds()) {
-        const target = findBlock(blockId);
-        if (target?.kind !== "list-item") continue;
-        const level = Math.max(0, Math.min(8, (target.level ?? 0) + (action === "indent" ? 1 : -1)));
-        await invoke("update_list_item", { blockId, level, ordered: target.ordered ?? false }).catch((error) => showError(String(error)));
-      }
-      applyDocument(await invoke("get_document"));
+      if (!selection) return;
+      await edit("adjust_editor_selection_list_indent", { selection, delta: action === "indent" ? 1 : -1 });
       editor?.setSelection(selection);
       break;
     }
@@ -1930,32 +1721,27 @@ async function runAction(action: string, data: DOMStringMap = {}): Promise<void>
     case "add-column":
     case "delete-row":
     case "delete-column": {
-      const sheet = currentSheet();
-      if (!sheet) return;
-      const parsed = parseAddress(cellFocus) ?? { col: 1, row: 1 };
-      const rowLabel = String(parsed.row);
-      const columnLabel = formatAddress(parsed.col, 1).replace(/\d+$/, "");
-      if (action === "add-row") await edit("insert_spreadsheet_row_at", { sheetId: sheet.id, row: rowLabel, position: "below" });
-      if (action === "add-column") await edit("insert_spreadsheet_column_at", { sheetId: sheet.id, column: columnLabel, position: "right" });
-      if (action === "delete-row") await edit("delete_spreadsheet_row", { sheetId: sheet.id, row: rowLabel });
-      if (action === "delete-column") await edit("delete_spreadsheet_column", { sheetId: sheet.id, column: columnLabel });
+      const args = currentSpreadsheetSelectionArgs();
+      if (!args) return;
+      if (action === "add-row") await edit("add_spreadsheet_row_after_selection", args);
+      if (action === "add-column") await edit("add_spreadsheet_column_after_selection", args);
+      if (action === "delete-row") await edit("delete_spreadsheet_selection_row", args);
+      if (action === "delete-column") await edit("delete_spreadsheet_selection_column", args);
       break;
     }
     case "merge-cells": {
-      const sheet = currentSheet();
-      const range = rangeLabel();
-      if (sheet && range.includes(":")) await edit("merge_spreadsheet_cells", { sheetId: sheet.id, range });
+      const args = currentSpreadsheetSelectionArgs();
+      if (args) await edit("merge_spreadsheet_selection", args);
       break;
     }
     case "freeze": {
-      const sheet = currentSheet();
-      const parsed = parseAddress(cellFocus) ?? { col: 1, row: 1 };
-      if (sheet) await edit("set_spreadsheet_frozen_axes", { sheetId: sheet.id, frozenRows: parsed.row - 1, frozenColumns: parsed.col - 1 });
+      const args = currentSpreadsheetSelectionArgs();
+      if (args) await edit("freeze_spreadsheet_selection", args);
       break;
     }
     case "filter": {
-      const sheet = currentSheet();
-      if (sheet) await edit("set_spreadsheet_basic_filter", { sheetId: sheet.id, range: rangeLabel() });
+      const args = currentSpreadsheetSelectionArgs();
+      if (args) await edit("set_spreadsheet_selection_filter", args);
       break;
     }
     default:

@@ -1,12 +1,217 @@
 # App API Contract v0
 
 This is the prototype projection contract between the Rust app core, the Tauri
-command layer, the browser demo backend, and future server modes. The Rust
-source of truth is `opendoc_app_api::AppDocument`.
+command layer, the browser WASM adapter, and future server modes. Command
+metadata is generated from `opendoc-api`; the current document projection
+source of truth is `opendoc_app::AppDocument`.
 
 Compatibility is not promised yet. Changes are allowed while OpenDoc remains a
 research prototype, but every change to this contract must update the Rust
-projection tests and the TypeScript rendering/mock backend together.
+projection tests, generated TypeScript command/types, and WASM/Tauri transport
+checks together.
+
+<!-- BEGIN GENERATED COMMAND REFERENCE -->
+## Generated Command Reference
+
+This section is generated from `opendoc-api` Rust command metadata. Do not edit it by hand.
+
+| Command | Returns | Args | Policy |
+| --- | --- | --- | --- |
+| `create_document` | `AppDocument` | `title: string` | closed-state<br>requires `write` |
+| `close_document` | `AppDocument` | none | closed-state<br>requires `write` |
+| `get_document` | `AppDocument` | none | closed-state<br>requires `read` |
+| `get_audit_view` | `AppAuditView` | none | closed-state<br>requires `read` |
+| `get_runtime_profile` | `OpenDocRuntimeProfile` | `mode: string`<br>`storageBackends: object[]`<br>`signingEnabled: boolean|null` | closed-state<br>requires `read` |
+| `get_runtime_session` | `OpenDocRuntimeSession` | `mode: string`<br>`storageBackends: object[]`<br>`signingEnabled: boolean|null`<br>`subject: string|null`<br>`documentUuid: string|null`<br>`presence: object[]`<br>`permissions: object[]` | closed-state<br>requires `read` |
+| `authorize_runtime_command` | `OpenDocAuthorizationDecision` | `mode: string`<br>`storageBackends: object[]`<br>`signingEnabled: boolean|null`<br>`subject: string|null`<br>`documentUuid: string|null`<br>`commandName: string`<br>`permissions: object[]` | closed-state<br>requires `read` |
+| `create_runtime_share_invite` | `OpenDocShareInvite` | `mode: string`<br>`storageBackends: object[]`<br>`signingEnabled: boolean|null`<br>`subject: string|null`<br>`documentUuid: string|null`<br>`targetSubject: string|null`<br>`actions: string[]`<br>`permissions: object[]` | closed-state<br>requires `share` |
+| `relay_runtime_sync` | `OpenDocSyncRelayResult` | `mode: string`<br>`storageBackends: object[]`<br>`signingEnabled: boolean|null`<br>`subject: string|null`<br>`documentUuid: string|null`<br>`baseManifest: string|null`<br>`operations: object[]`<br>`permissions: object[]`<br>`presence: object[]` | closed-state<br>requires `write` |
+| `resolve_runtime_document_lookup` | `OpenDocRuntimeLookupResult` | `mode: string`<br>`storageBackends: object[]`<br>`signingEnabled: boolean|null`<br>`subject: string|null`<br>`documentUuid: string|null`<br>`doi: string|null`<br>`permissions: object[]`<br>`serviceIndex: object[]`<br>`scannedDocuments: object[]` | closed-state<br>requires `read` |
+| `undo_current_edit` | `AppDocument` | none | requires `write` |
+| `redo_current_edit` | `AppDocument` | none | requires `write` |
+| `import_google_docs_json` | `AppDocument` | `title: string`<br>`jsonText: string` | closed-state<br>requires `write` |
+| `import_doc_or_docx_path` | `AppDocument` | `path: string` | closed-state<br>requires `write` |
+| `export_google_docs_json` | `string` | none | requires `read` |
+| `import_google_sheets_json` | `AppDocument` | `jsonText: string` | requires `write` |
+| `export_google_sheets_json` | `string` | none | requires `read` |
+| `add_binary_blob` | `AppDocument` | `name: string`<br>`mediaType: string`<br>`bytes: number[]` | undoable<br>requires `write` |
+| `update_binary_blob_metadata` | `AppDocument` | `blobHash: string`<br>`name: string`<br>`mediaType: string` | undoable<br>requires `write` |
+| `add_image_block` | `AppDocument` | `blobHash: string`<br>`altText: string` | undoable<br>requires `write` |
+| `insert_image_block_after` | `AppDocument` | `afterBlockId: string`<br>`blobHash: string`<br>`altText: string` | undoable<br>requires `write` |
+| `sign_blob_with_openssh_private_key` | `AppDocument` | `blobHash: string`<br>`privateKeyPem: string`<br>`signerDisplay: string` | requires `write` |
+| `sign_fastq_blob_with_openssh_private_key` | `AppDocument` | `blobHash: string`<br>`profile: string`<br>`privateKeyPem: string`<br>`signerDisplay: string` | requires `write` |
+| `sign_image_pixels_blob_with_openssh_private_key` | `AppDocument` | `blobHash: string`<br>`width: number`<br>`height: number`<br>`pixels: number[]`<br>`privateKeyPem: string`<br>`signerDisplay: string` | requires `write` |
+| `delete_binary_blob` | `AppDocument` | `blobHash: string` | undoable<br>requires `write` |
+| `restore_binary_blob` | `AppDocument` | `blobHash: string` | undoable<br>requires `write` |
+| `simulate_shallow_clone` | `AppDocument` | none | requires `write` |
+| `record_blob_archive_tombstone` | `AppDocument` | `blobHash: string`<br>`archiveLocator: string`<br>`restoreHint: string`<br>`signer: string`<br>`signature: number[]` | undoable<br>requires `write` |
+| `set_document_doi` | `AppDocument` | `doi: string` | undoable<br>requires `write` |
+| `set_document_title` | `AppDocument` | `title: string` | undoable<br>requires `write` |
+| `set_document_locale` | `AppDocument` | `locale: string` | undoable<br>requires `write` |
+| `add_paragraph` | `AppDocument` | `text: string` | undoable<br>requires `write` |
+| `insert_paragraph_after` | `AppDocument` | `afterBlockId: string|null`<br>`text: string` | undoable<br>requires `write` |
+| `split_paragraph_at_inline` | `AppDocument` | `inlineId: string` | undoable<br>requires `write` |
+| `split_paragraph_at_text_offset` | `AppDocument` | `blockId: string`<br>`inlineId: string`<br>`offset: number` | undoable<br>requires `write` |
+| `join_paragraph_with_previous` | `AppDocument` | `blockId: string` | undoable<br>requires `write` |
+| `delete_block` | `AppDocument` | `blockId: string` | undoable<br>requires `write` |
+| `set_block_text_style` | `AppDocument` | `blockId: string`<br>`style: string`<br>`level: number`<br>`ordered: boolean` | undoable<br>requires `write` |
+| `set_editor_selection_block_style` | `AppDocument` | `selection: EditorSelection`<br>`style: string`<br>`level: number`<br>`ordered: boolean` | undoable<br>requires `write` |
+| `add_heading` | `AppDocument` | `text: string`<br>`level: number` | undoable<br>requires `write` |
+| `update_heading_level` | `AppDocument` | `blockId: string`<br>`level: number` | undoable<br>requires `write` |
+| `add_link` | `AppDocument` | `text: string`<br>`href: string` | undoable<br>requires `write` |
+| `add_mention` | `AppDocument` | `label: string` | undoable<br>requires `write` |
+| `insert_mention_after` | `AppDocument` | `blockId: string`<br>`afterInlineId: string|null`<br>`label: string` | undoable<br>requires `write` |
+| `update_mention_label` | `AppDocument` | `inlineId: string`<br>`label: string` | undoable<br>requires `write` |
+| `add_footnote_ref` | `AppDocument` | none | undoable<br>requires `write` |
+| `insert_footnote_ref_after` | `AppDocument` | `blockId: string`<br>`afterInlineId: string|null` | undoable<br>requires `write` |
+| `update_footnote_body` | `AppDocument` | `footnoteId: string`<br>`body: string` | undoable<br>requires `write` |
+| `add_equation` | `AppDocument` | `source: string` | undoable<br>requires `write` |
+| `insert_equation_after` | `AppDocument` | `blockId: string`<br>`afterInlineId: string|null`<br>`source: string` | undoable<br>requires `write` |
+| `add_equation_block` | `AppDocument` | `source: string` | undoable<br>requires `write` |
+| `insert_equation_block_after` | `AppDocument` | `afterBlockId: string`<br>`source: string` | undoable<br>requires `write` |
+| `add_list_item` | `AppDocument` | `text: string`<br>`level: number`<br>`ordered: boolean` | undoable<br>requires `write` |
+| `insert_list_item_after` | `AppDocument` | `afterBlockId: string`<br>`text: string`<br>`level: number`<br>`ordered: boolean` | undoable<br>requires `write` |
+| `update_list_item` | `AppDocument` | `blockId: string`<br>`level: number`<br>`ordered: boolean` | undoable<br>requires `write` |
+| `adjust_editor_selection_list_indent` | `AppDocument` | `selection: EditorSelection`<br>`delta: number` | undoable<br>requires `write` |
+| `insert_page_break_after` | `AppDocument` | `afterBlockId: string` | undoable<br>requires `write` |
+| `add_page_break` | `AppDocument` | none | undoable<br>requires `write` |
+| `insert_table_after` | `AppDocument` | `afterBlockId: string`<br>`rows: number?`<br>`columns: number?` | undoable<br>requires `write` |
+| `add_table` | `AppDocument` | none | undoable<br>requires `write` |
+| `add_table_row` | `AppDocument` | `tableBlockId: string`<br>`afterRow: string|null`<br>`text: string` | undoable<br>requires `write` |
+| `delete_table_row` | `AppDocument` | `tableBlockId: string`<br>`rowId: string` | undoable<br>requires `write` |
+| `add_table_cell` | `AppDocument` | `tableBlockId: string`<br>`rowId: string`<br>`afterCell: string|null`<br>`text: string` | undoable<br>requires `write` |
+| `delete_table_cell` | `AppDocument` | `tableBlockId: string`<br>`rowId: string`<br>`cellId: string` | undoable<br>requires `write` |
+| `add_citation` | `AppDocument` | none | undoable<br>requires `write` |
+| `insert_citation` | `AppDocument` | `referenceId: string`<br>`afterInlineId: string|null`<br>`locator: string|null`<br>`label: string|null`<br>`prefix: string|null`<br>`suffix: string|null`<br>`suppressAuthor: boolean` | undoable<br>requires `write` |
+| `insert_citation_group` | `AppDocument` | `items: AppCitationItem[]`<br>`afterInlineId: string|null` | undoable<br>requires `write` |
+| `insert_footnote_citation_group` | `AppDocument` | `footnoteId: string`<br>`items: AppCitationItem[]` | undoable<br>requires `write` |
+| `insert_footnote_citation_after` | `AppDocument` | `blockId: string`<br>`afterInlineId: string|null`<br>`items: AppCitationItem[]` | undoable<br>requires `write` |
+| `update_citation_group_items` | `AppDocument` | `citationId: string`<br>`items: AppCitationItem[]` | undoable<br>requires `write` |
+| `set_citation_style` | `AppDocument` | `style: string`<br>`locale: string` | undoable<br>requires `write` |
+| `add_comment` | `AppDocument` | `author: string`<br>`body: string` | undoable<br>requires `comment` |
+| `add_text_range_comment` | `AppDocument` | `startInlineId: string`<br>`endInlineId: string`<br>`author: string`<br>`body: string` | undoable<br>requires `comment` |
+| `add_block_comment` | `AppDocument` | `blockId: string`<br>`author: string`<br>`body: string` | undoable<br>requires `comment` |
+| `add_comment_reply` | `AppDocument` | `threadId: string`<br>`author: string`<br>`body: string` | undoable<br>requires `comment` |
+| `add_suggestion` | `AppDocument` | `author: string`<br>`text: string` | undoable<br>requires `write` |
+| `add_text_range_suggestion` | `AppDocument` | `startInlineId: string`<br>`endInlineId: string`<br>`author: string`<br>`text: string` | undoable<br>requires `write` |
+| `add_block_suggestion` | `AppDocument` | `blockId: string`<br>`author: string`<br>`text: string` | undoable<br>requires `write` |
+| `add_delete_suggestion` | `AppDocument` | `author: string`<br>`inlineId: string` | undoable<br>requires `write` |
+| `add_text_range_delete_suggestion` | `AppDocument` | `startInlineId: string`<br>`endInlineId: string`<br>`author: string` | undoable<br>requires `write` |
+| `add_format_suggestion` | `AppDocument` | `author: string`<br>`inlineId: string`<br>`markKind: string`<br>`value: string|null` | undoable<br>requires `write` |
+| `add_text_range_format_suggestion` | `AppDocument` | `startInlineId: string`<br>`endInlineId: string`<br>`author: string`<br>`markKind: string`<br>`value: string|null` | undoable<br>requires `write` |
+| `update_suggestion` | `AppDocument` | `suggestionId: string`<br>`text: string` | undoable<br>requires `write` |
+| `update_inline_text` | `AppDocument` | `inlineId: string`<br>`text: string` | undoable<br>requires `write` |
+| `update_inline_equation_source` | `AppDocument` | `inlineId: string`<br>`source: string` | undoable<br>requires `write` |
+| `update_link_href` | `AppDocument` | `inlineId: string`<br>`href: string` | undoable<br>requires `write` |
+| `insert_inline_text` | `AppDocument` | `blockId: string`<br>`afterInlineId: string|null`<br>`text: string` | undoable<br>requires `write` |
+| `insert_link_after` | `AppDocument` | `blockId: string`<br>`afterInlineId: string|null`<br>`text: string`<br>`href: string` | undoable<br>requires `write` |
+| `delete_inline` | `AppDocument` | `inlineId: string` | undoable<br>requires `write` |
+| `delete_comment_thread` | `AppDocument` | `threadId: string` | undoable<br>requires `comment` |
+| `restore_comment_thread` | `AppDocument` | `threadId: string` | undoable<br>requires `comment` |
+| `delete_comment` | `AppDocument` | `threadId: string`<br>`commentId: string` | undoable<br>requires `comment` |
+| `restore_comment` | `AppDocument` | `threadId: string`<br>`commentId: string` | undoable<br>requires `comment` |
+| `update_comment` | `AppDocument` | `threadId: string`<br>`commentId: string`<br>`body: string` | undoable<br>requires `comment` |
+| `accept_suggestion` | `AppDocument` | `suggestionId: string`<br>`acceptedBy: string` | undoable<br>requires `write` |
+| `accept_all_suggestions` | `AppDocument` | `acceptedBy: string` | undoable<br>requires `write` |
+| `reject_suggestion` | `AppDocument` | `suggestionId: string`<br>`rejectedBy: string` | undoable<br>requires `write` |
+| `reject_all_suggestions` | `AppDocument` | `rejectedBy: string` | undoable<br>requires `write` |
+| `add_text_mark` | `AppDocument` | `inlineId: string`<br>`markKind: string`<br>`value: string|null` | undoable<br>requires `write` |
+| `add_text_mark_range` | `AppDocument` | `startInlineId: string`<br>`endInlineId: string`<br>`markKind: string`<br>`value: string|null` | undoable<br>requires `write` |
+| `remove_text_mark` | `AppDocument` | `inlineId: string`<br>`markKind: string`<br>`value: string|null` | undoable<br>requires `write` |
+| `remove_text_mark_range` | `AppDocument` | `startInlineId: string`<br>`endInlineId: string`<br>`markKind: string`<br>`value: string|null` | undoable<br>requires `write` |
+| `update_block_equation_source` | `AppDocument` | `blockId: string`<br>`source: string` | undoable<br>requires `write` |
+| `update_image_alt_text` | `AppDocument` | `blockId: string`<br>`altText: string` | undoable<br>requires `write` |
+| `update_image_blob_hash` | `AppDocument` | `blockId: string`<br>`blobHash: string` | undoable<br>requires `write` |
+| `set_spreadsheet_cell` | `AppDocument` | `address: string`<br>`value: string` | undoable<br>requires `write` |
+| `describe_spreadsheet_selection` | `AppSpreadsheetSelection` | `sheetId: string`<br>`anchor: string`<br>`focus: string` | requires `read` |
+| `reduce_spreadsheet_selection` | `AppSpreadsheetSelection` | `sheetId: string`<br>`anchor: string`<br>`focus: string`<br>`action: string`<br>`value: string`<br>`extend: boolean` | requires `read` |
+| `copy_spreadsheet_selection_tsv` | `string` | `sheetId: string`<br>`anchor: string`<br>`focus: string` | requires `read` |
+| `paste_spreadsheet_tsv` | `AppDocument` | `sheetId: string`<br>`origin: string`<br>`text: string` | undoable<br>requires `write` |
+| `clear_spreadsheet_selection` | `AppDocument` | `sheetId: string`<br>`anchor: string`<br>`focus: string` | undoable<br>requires `write` |
+| `set_spreadsheet_selection_format` | `AppDocument` | `sheetId: string`<br>`anchor: string`<br>`focus: string`<br>`property: string`<br>`value: string` | undoable<br>requires `write` |
+| `add_spreadsheet_row_after_selection` | `AppDocument` | `sheetId: string`<br>`anchor: string`<br>`focus: string` | undoable<br>requires `write` |
+| `add_spreadsheet_column_after_selection` | `AppDocument` | `sheetId: string`<br>`anchor: string`<br>`focus: string` | undoable<br>requires `write` |
+| `delete_spreadsheet_selection_row` | `AppDocument` | `sheetId: string`<br>`anchor: string`<br>`focus: string` | undoable<br>requires `write` |
+| `delete_spreadsheet_selection_column` | `AppDocument` | `sheetId: string`<br>`anchor: string`<br>`focus: string` | undoable<br>requires `write` |
+| `merge_spreadsheet_selection` | `AppDocument` | `sheetId: string`<br>`anchor: string`<br>`focus: string` | undoable<br>requires `write` |
+| `freeze_spreadsheet_selection` | `AppDocument` | `sheetId: string`<br>`anchor: string`<br>`focus: string` | undoable<br>requires `write` |
+| `set_spreadsheet_selection_filter` | `AppDocument` | `sheetId: string`<br>`anchor: string`<br>`focus: string` | undoable<br>requires `write` |
+| `set_spreadsheet_workbook_metadata` | `AppDocument` | `title: string`<br>`locale: string`<br>`timezone: string` | undoable<br>requires `write` |
+| `set_spreadsheet_cells` | `AppDocument` | `cells: SpreadsheetCellEdit[]` | undoable<br>requires `write` |
+| `add_spreadsheet_sheet` | `AppDocument` | `title: string` | undoable<br>requires `write` |
+| `rename_spreadsheet_sheet` | `AppDocument` | `sheetId: string`<br>`title: string` | undoable<br>requires `write` |
+| `delete_spreadsheet_sheet` | `AppDocument` | `sheetId: string` | undoable<br>requires `write` |
+| `restore_spreadsheet_sheet` | `AppDocument` | `sheetId: string` | undoable<br>requires `write` |
+| `add_spreadsheet_row` | `AppDocument` | `sheetId: string`<br>`row: string` | undoable<br>requires `write` |
+| `delete_spreadsheet_row` | `AppDocument` | `sheetId: string`<br>`row: string` | undoable<br>requires `write` |
+| `restore_spreadsheet_row` | `AppDocument` | `sheetId: string`<br>`row: string` | undoable<br>requires `write` |
+| `add_spreadsheet_column` | `AppDocument` | `sheetId: string`<br>`column: string` | undoable<br>requires `write` |
+| `delete_spreadsheet_column` | `AppDocument` | `sheetId: string`<br>`column: string` | undoable<br>requires `write` |
+| `restore_spreadsheet_column` | `AppDocument` | `sheetId: string`<br>`column: string` | undoable<br>requires `write` |
+| `add_spreadsheet_cell_comment` | `AppDocument` | `sheetId: string`<br>`address: string`<br>`author: string`<br>`body: string` | undoable<br>requires `comment` |
+| `update_spreadsheet_cell_comment` | `AppDocument` | `commentId: string`<br>`body: string` | undoable<br>requires `comment` |
+| `delete_spreadsheet_cell_comment` | `AppDocument` | `commentId: string` | undoable<br>requires `comment` |
+| `restore_spreadsheet_cell_comment` | `AppDocument` | `commentId: string` | undoable<br>requires `comment` |
+| `set_spreadsheet_frozen_axes` | `AppDocument` | `sheetId: string`<br>`frozenRows: number`<br>`frozenColumns: number` | undoable<br>requires `write` |
+| `set_spreadsheet_cell_validation` | `AppDocument` | `sheetId: string`<br>`address: string`<br>`kind: string`<br>`values: string[]`<br>`strict: boolean` | undoable<br>requires `write` |
+| `clear_spreadsheet_cell_validation` | `AppDocument` | `sheetId: string`<br>`address: string` | undoable<br>requires `write` |
+| `restore_spreadsheet_cell_validation` | `AppDocument` | `sheetId: string`<br>`address: string` | undoable<br>requires `write` |
+| `merge_spreadsheet_cells` | `AppDocument` | `sheetId: string`<br>`range: string` | undoable<br>requires `write` |
+| `unmerge_spreadsheet_cells` | `AppDocument` | `sheetId: string`<br>`range: string` | undoable<br>requires `write` |
+| `restore_spreadsheet_merge` | `AppDocument` | `sheetId: string`<br>`range: string` | undoable<br>requires `write` |
+| `set_spreadsheet_basic_filter` | `AppDocument` | `sheetId: string`<br>`range: string` | undoable<br>requires `write` |
+| `set_spreadsheet_basic_filter_options` | `AppDocument` | `sheetId: string`<br>`criteria: object[]`<br>`sortSpecs: object[]` | undoable<br>requires `write` |
+| `clear_spreadsheet_basic_filter` | `AppDocument` | `sheetId: string` | undoable<br>requires `write` |
+| `restore_spreadsheet_basic_filter` | `AppDocument` | `sheetId: string` | undoable<br>requires `write` |
+| `add_spreadsheet_protected_range` | `AppDocument` | `sheetId: string`<br>`range: string`<br>`description: string`<br>`warningOnly: boolean` | undoable<br>requires `write` |
+| `update_spreadsheet_protected_range` | `AppDocument` | `sheetId: string`<br>`range: string`<br>`description: string`<br>`warningOnly: boolean` | undoable<br>requires `write` |
+| `delete_spreadsheet_protected_range` | `AppDocument` | `sheetId: string`<br>`range: string` | undoable<br>requires `write` |
+| `restore_spreadsheet_protected_range` | `AppDocument` | `sheetId: string`<br>`range: string` | undoable<br>requires `write` |
+| `set_spreadsheet_cell_in_sheet` | `AppDocument` | `sheetId: string`<br>`address: string`<br>`value: string` | undoable<br>requires `write` |
+| `set_spreadsheet_cells_in_sheet` | `AppDocument` | `sheetId: string`<br>`cells: SpreadsheetCellEdit[]` | undoable<br>requires `write` |
+| `set_spreadsheet_cell_format` | `AppDocument` | `sheetId: string`<br>`address: string`<br>`property: string`<br>`value: string` | undoable<br>requires `write` |
+| `copy_spreadsheet_range` | `AppDocument` | `sheetId: string`<br>`sourceRange: string`<br>`targetAddress: string` | undoable<br>requires `write` |
+| `add_spreadsheet_named_range` | `AppDocument` | `sheetId: string`<br>`name: string`<br>`range: string` | undoable<br>requires `write` |
+| `update_spreadsheet_named_range` | `AppDocument` | `sheetId: string`<br>`name: string`<br>`range: string` | undoable<br>requires `write` |
+| `delete_spreadsheet_named_range` | `AppDocument` | `name: string` | undoable<br>requires `write` |
+| `restore_spreadsheet_named_range` | `AppDocument` | `name: string` | undoable<br>requires `write` |
+| `update_bibliography_reference` | `AppDocument` | `referenceId: string`<br>`title: string`<br>`issued: string|null` | undoable<br>requires `write` |
+| `update_bibliography_reference_metadata` | `AppDocument` | `referenceId: string`<br>`title: string`<br>`authors: string[]`<br>`issued: string|null`<br>`doi: string|null`<br>`url: string|null` | undoable<br>requires `write` |
+| `add_bibliography_reference` | `AppDocument` | `title: string`<br>`authors: string[]`<br>`issued: string|null`<br>`doi: string|null`<br>`url: string|null` | undoable<br>requires `write` |
+| `delete_bibliography_reference` | `AppDocument` | `referenceId: string` | undoable<br>requires `write` |
+| `restore_bibliography_reference` | `AppDocument` | `referenceId: string` | undoable<br>requires `write` |
+| `delete_citation_group` | `AppDocument` | `citationId: string` | undoable<br>requires `write` |
+| `restore_citation_group` | `AppDocument` | `citationId: string` | undoable<br>requires `write` |
+| `save_local_repository` | `AppDocument` | `path: string` | requires `write` |
+| `save_local_repository_or_candidate` | `AppDocument` | `path: string` | requires `write` |
+| `save_flat_repository` | `AppDocument` | `path: string`<br>`namespace: string` | requires `write` |
+| `save_flat_repository_or_candidate` | `AppDocument` | `path: string`<br>`namespace: string` | requires `write` |
+| `save_opendal_fs_repository` | `AppDocument` | `path: string`<br>`namespace: string` | requires `write` |
+| `save_opendal_fs_repository_or_candidate` | `AppDocument` | `path: string`<br>`namespace: string` | requires `write` |
+| `autosave_current_repository` | `AppDocument` | none | requires `write` |
+| `open_local_repository` | `AppDocument` | `path: string`<br>`documentUuid: string` | closed-state<br>requires `read` |
+| `scan_local_repository` | `AppDocument` | `path: string` | no runtime action |
+| `open_flat_repository` | `AppDocument` | `path: string`<br>`namespace: string`<br>`documentUuid: string` | closed-state<br>requires `read` |
+| `open_opendal_fs_repository` | `AppDocument` | `path: string`<br>`namespace: string`<br>`documentUuid: string` | closed-state<br>requires `read` |
+| `merge_local_repository_candidates` | `AppDocument` | `path: string`<br>`documentUuid: string` | closed-state<br>requires `write` |
+| `compact_local_repository` | `AppDocument` | `path: string`<br>`packName: string` | closed-state<br>requires `write` |
+| `merge_flat_repository_candidates` | `AppDocument` | `path: string`<br>`namespace: string`<br>`documentUuid: string` | closed-state<br>requires `write` |
+| `merge_opendal_fs_repository_candidates` | `AppDocument` | `path: string`<br>`namespace: string`<br>`documentUuid: string` | closed-state<br>requires `write` |
+| `open_local_repository_by_doi` | `AppDocument` | `path: string`<br>`doi: string` | closed-state<br>requires `read` |
+| `open_flat_repository_by_doi` | `AppDocument` | `path: string`<br>`namespace: string`<br>`doi: string` | closed-state<br>requires `read` |
+| `open_opendal_fs_repository_by_doi` | `AppDocument` | `path: string`<br>`namespace: string`<br>`doi: string` | closed-state<br>requires `read` |
+| `sign_with_openssh_private_key` | `AppDocument` | `privateKeyPem: string`<br>`signerDisplay: string` | requires `write` |
+| `verify_current_signature` | `string` | `privateKeyPem: string` | requires `read` |
+| `verify_current_signatures` | `string` | none | requires `read` |
+| `describe_editor_selection` | `AppEditorSelection` | `selection: EditorSelection` | requires `read` |
+| `select_all_editor_content` | `EditorResult` | none | requires `read` |
+| `apply_editor_input` | `EditorResult` | `selection: EditorSelection`<br>`input_type: string`<br>`data: string|null`<br>`html: string|null` | undoable<br>no runtime action |
+| `render_document_html` | `string` | none | no runtime action |
+| `apply_editor_mark` | `EditorResult` | `selection: EditorSelection`<br>`mark_kind: string`<br>`value: string|null`<br>`action: string?` | undoable<br>no runtime action |
+| `render_workbook_html` | `string` | `sheetId: string` | no runtime action |
+| `import_docx_base64` | `AppDocument` | `name: string`<br>`base64: string` | undoable<br>no runtime action |
+
+<!-- END GENERATED COMMAND REFERENCE -->
 
 ## Top-Level Document
 
@@ -150,9 +355,9 @@ model work.
 - `export_google_docs_json` exports the current v0 rich document subset as
   Google Docs-shaped JSON text.
 - `import_doc_or_docx_path` imports a local `.doc` or `.docx` file through the
-  native converter path in Tauri/local mode. Browser mock mode returns an
-  explicit placeholder warning because browsers cannot read arbitrary local
-  paths directly.
+  native converter path in Tauri/local mode. Browser/WASM imports should use
+  byte-oriented commands such as `import_docx_base64`; path-based import is a
+  native/runtime capability, not browser document logic.
 - `import_google_sheets_json` imports a constrained Google Sheets API-shaped
   workbook into the spreadsheet schema.
 - `export_google_sheets_json` exports the current v0 workbook subset as Google

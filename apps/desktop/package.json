@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0 --port 10084 --strictPort",
     "build": "node scripts/build.mjs",
+    "build:app": "npm run build:wasm && npm run build",
     "build:wasm": "node scripts/build-wasm.mjs",
+    "generate:commands": "cargo run -p opendoc-api --bin generate_command_contract --",
     "native-check": "node scripts/native-check.mjs",
     "preflight": "node scripts/preflight.mjs",
     "tauri": "tauri",

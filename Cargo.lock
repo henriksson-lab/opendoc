@@ -1616,22 +1616,29 @@ dependencies = [
 ]
 
 [[package]]
-name = "opendoc-app-api"
+name = "opendoc-api"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
- "calamine",
- "csv",
+ "opendoc-spreadsheet",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "opendoc-app"
+version = "0.1.0"
+dependencies = [
  "js-sys",
+ "opendoc-api",
  "opendoc-citations",
  "opendoc-core",
  "opendoc-format",
  "opendoc-import",
  "opendoc-merge",
+ "opendoc-render",
  "opendoc-sign",
+ "opendoc-spreadsheet",
  "opendoc-store",
- "regex",
- "rust_xlsxwriter",
  "serde",
  "serde_json",
  "unicode-segmentation",
@@ -1686,6 +1693,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "opendoc-render"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "opendoc-core",
+ "opendoc-spreadsheet",
+]
+
+[[package]]
 name = "opendoc-sign"
 version = "0.1.0"
 dependencies = [
@@ -1693,6 +1709,20 @@ dependencies = [
  "opendoc-core",
  "opendoc-format",
  "ssh-key",
+]
+
+[[package]]
+name = "opendoc-spreadsheet"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "calamine",
+ "csv",
+ "js-sys",
+ "regex",
+ "rust_xlsxwriter",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1712,7 +1742,7 @@ dependencies = [
  "console_error_panic_hook",
  "getrandom 0.2.17",
  "js-sys",
- "opendoc-app-api",
+ "opendoc-app",
  "serde_json",
  "wasm-bindgen",
 ]

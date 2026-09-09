@@ -5,10 +5,10 @@ Prototype Tauri shell for the hybrid TypeScript frontend plus Rust core API.
 ## Layout
 
 - `src/`: TypeScript UI.
-- `src/types.ts`: shared TypeScript projection types for the UI and browser-demo backend.
+- `src/types.ts`: compatibility barrel over generated Rust-owned projection types plus frontend-only runtime config.
 - `src/commands.ts`: shared TypeScript command argument/result types for the UI and invoke layer.
 - `src-tauri/`: Tauri backend and command handlers.
-- `../../crates/opendoc-app-api`: app-facing Rust API used by the Tauri backend.
+- `../../crates/opendoc-app`: runtime-facing Rust app facade used by Tauri and WASM.
 
 ## Run
 
@@ -102,11 +102,12 @@ The app is a schema-surface prototype:
 
 Full production selection mapping and production citation rendering are intentionally behind future API work.
 
-## Browser Demo Backend
+## Browser WASM Runtime
 
-The TypeScript frontend uses `src/invoke.ts` instead of importing `@tauri-apps/api` directly. In Tauri it calls the global Tauri invoke API. Outside Tauri it uses an in-memory browser-demo backend that exercises the same rendering and button flow.
-
-This keeps the UI source usable before all native Tauri packages are installed. The demo backend is not persistence/signing truth; the Rust commands remain authoritative for the desktop app.
+The TypeScript frontend uses `src/invoke.ts` instead of importing
+`@tauri-apps/api` directly. In Tauri it calls the global Tauri invoke API.
+Outside Tauri it loads `src/wasm/opendoc_wasm.js`, which dispatches to the same
+Rust `OpenDocApp` command surface compiled to WebAssembly.
 
 Web deployments can set `window.__OPENDOC_RUNTIME__` before loading the
 frontend bundle to identify the shell flavour without changing the command
@@ -119,39 +120,22 @@ The same host config can provide `defaultRepositoryRoot`,
 and service shells can present appropriate defaults and visible capability
 warnings while still using the same command names and source schema.
 
-The no-registry smoke check verifies that the frontend source has no external runtime import and that the mock backend covers the Tauri commands:
+Build the browser WASM adapter before building the static frontend:
 
 ```sh
-npm run verify
+npm run build:wasm
+npm run build
 npm run smoke
-npm run runtime-contract
-npm run runtime-capability-smoke
-npm run workflow-check
-npm run mock-contract
-npm run gui-smoke
 ```
 
 `npm run verify` includes the default workspace Rust tests and the
-feature-gated OpenDAL filesystem app API tests:
-`cargo test -p opendoc-app-api --features opendal-store opendal_fs`.
+feature-gated OpenDAL filesystem app tests:
+`cargo test -p opendoc-app --features opendal-store`.
 
-It also checks that every command in `commands.v0.json` is implemented by the Rust `#[tauri::command]` layer, registered in `tauri::generate_handler!`, listed in the Tauri build manifest, covered by generated Tauri allow/deny permission files and the default capability allow list, covered by the reusable `opendoc-app-api` dispatcher, covered by the browser-demo mock backend, represented in `src/commands.ts`, called by the frontend with matching argument names, that `src/types.ts` matches the documented top-level app projection fields, that `dist/` exists, and that generated JavaScript is syntactically valid.
-
-The GUI smoke check loads the generated browser bundle under a small fake DOM,
-renders the full sample schema surface through the mock invoke backend, and
-exercises representative document, mark, equation, spreadsheet, citation,
-comment, suggestion, Google Docs JSON import/export, attachment and attachment
-signing, DOI lookup, repository, signing, verification, and command-error
-recovery flows.
-
-The runtime capability smoke check loads the same bundle with a browser-local
-host config that lacks local storage and private-key signing, then verifies
-visible warnings and graceful command failures while flat storage remains
-available.
+It also runs clippy with warnings denied, TypeScript type checking, the WASM
+build, the static frontend build, and the jsdom smoke test against the real
+Rust/WASM dispatcher.
 
 The workflow check verifies that `.github/workflows/desktop.yml` keeps the
 Linux desktop CI gate wired to the no-registry desktop verification command,
 the native Tauri backend check, and the required GTK/WebKit system packages.
-
-The mock contract check calls every generated mock command and recursively
-validates the returned `AppDocument` projection shape.

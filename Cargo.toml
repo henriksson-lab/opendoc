@@ -7,7 +7,10 @@ members = [
     "crates/opendoc-merge",
     "crates/opendoc-sign",
     "crates/opendoc-import",
-    "crates/opendoc-app-api",
+    "crates/opendoc-api",
+    "crates/opendoc-render",
+    "crates/opendoc-spreadsheet",
+    "crates/opendoc-app",
     "crates/opendoc-wasm",
 ]
 exclude = [
