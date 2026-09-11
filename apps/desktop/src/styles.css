@@ -840,18 +840,39 @@ button.primary {
 .sheet-grid {
   border-collapse: collapse;
   table-layout: fixed;
+  /* Size to the sum of the column widths instead of the scroll container: a
+     stretched table makes the fixed layout scale every specified <col> width
+     down to fit, so a resized column would not keep the size it was given.
+     .grid-scroll scrolls instead. */
+  width: max-content;
   font-size: 13px;
 }
 
 .sheet-grid th,
 .sheet-grid td {
   border: 1px solid var(--border);
-  height: 22px;
   padding: 0 4px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   position: relative;
+}
+
+/* Default axis sizes. These mirror APP_DEFAULT_ROW_HEIGHT_PX /
+   APP_DEFAULT_COLUMN_WIDTH_PX, so a row or column without a stored size
+   renders at exactly the size the core reports as effective. Stored sizes
+   arrive as an inline height on <tr> and a <colgroup> width, both of which
+   win over these. */
+.sheet-grid thead tr {
+  height: 22px;
+}
+
+.sheet-grid tbody tr {
+  height: 24px;
+}
+
+.sheet-grid thead th.column-header {
+  width: 100px;
 }
 
 .sheet-grid th {
@@ -870,7 +891,26 @@ button.primary {
 
 .sheet-grid th.row-header {
   left: 0;
+  width: 46px;
   min-width: 46px;
+}
+
+/* Resize affordances on the header edges. The hit zone is computed from the
+   pointer position rather than from handle elements, so nothing here has to
+   survive a grid morph. */
+.grid-scroll.resize-column,
+.grid-scroll.resize-column .sheet-grid th {
+  cursor: col-resize;
+}
+
+.grid-scroll.resize-row,
+.grid-scroll.resize-row .sheet-grid th {
+  cursor: row-resize;
+}
+
+.grid-scroll.resizing,
+.grid-scroll.resizing .sheet-grid {
+  user-select: none;
 }
 
 .sheet-grid td.selected {

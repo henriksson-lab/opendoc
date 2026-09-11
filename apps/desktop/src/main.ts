@@ -25,6 +25,12 @@ import type {
   EditorSelection,
   OpenDocRuntimeProfile,
 } from "./types";
+import {
+  APP_DEFAULT_COLUMN_WIDTH_PX,
+  APP_DEFAULT_ROW_HEIGHT_PX,
+  APP_MAX_AXIS_SIZE_PX,
+  APP_MIN_AXIS_SIZE_PX,
+} from "./generated/spreadsheet";
 import { confirmDialog, escapeHtml, focusFieldAtEnd, promptDialog, setDialogAfterClose, toast } from "./ui";
 
 // ---- State -----------------------------------------------------------------
@@ -291,6 +297,8 @@ const MENUS: { label: string; items: { action: string; label: string; shortcut?:
       { action: "add-sheet", label: "Sheet", scope: "sheets" },
       { action: "add-row", label: "Row below", scope: "sheets" },
       { action: "add-column", label: "Column right", scope: "sheets" },
+      { action: "row-height", label: "Row height…", scope: "sheets" },
+      { action: "column-width", label: "Column width…", scope: "sheets" },
     ],
   },
   {
@@ -1023,6 +1031,11 @@ async function moveFocus(direction: string, extend: boolean, edge = false): Prom
 function bindSheetEvents(root: HTMLElement): void {
   const grid = query("[data-grid]", root) as HTMLElement;
   grid.addEventListener("mousedown", (event) => {
+    const resizing = axisTargetAt(event);
+    if (resizing) {
+      startAxisResize(event, resizing);
+      return;
+    }
     const target = (event.target as Element).closest<HTMLElement>("[data-address]");
     if (!target?.dataset.address) return;
     if (cellEditing && target.dataset.address !== cellEditing.address) {
@@ -1043,10 +1056,28 @@ function bindSheetEvents(root: HTMLElement): void {
     window.addEventListener("mouseup", stop);
   });
   grid.addEventListener("dblclick", (event) => {
+    const resizing = axisTargetAt(event);
+    if (resizing) {
+      // Conventional "reset to default": 0 clears the stored size.
+      event.preventDefault();
+      void applyAxisSize(resizing.axis, resizing.label, 0);
+      return;
+    }
     const target = (event.target as Element).closest<HTMLElement>("[data-address]");
     if (!target?.dataset.address) return;
     startCellEdit(target.dataset.address, null);
   });
+  // Assignment, not addEventListener: re-binding a grid can only ever replace
+  // this handler, never stack a second one.
+  grid.onmousemove = (event) => {
+    if (axisResize) return;
+    const target = axisTargetAt(event);
+    grid.classList.toggle("resize-column", target?.axis === "column");
+    grid.classList.toggle("resize-row", target?.axis === "row");
+  };
+  grid.onmouseleave = () => {
+    if (!axisResize) grid.classList.remove("resize-column", "resize-row");
+  };
   grid.addEventListener("keydown", (event) => void onGridKey(event));
   grid.addEventListener("paste", (event) => {
     event.preventDefault();
@@ -1172,6 +1203,181 @@ async function setCellFormat(property: string, value: string): Promise<void> {
   if (!sheetId) return;
   await edit("set_spreadsheet_selection_format", { sheetId, anchor: cellAnchor, focus: cellFocus, property, value });
   await renderSheets(query("[data-main]") as HTMLElement);
+}
+
+// ---- Row heights and column widths ------------------------------------------
+//
+// The grid is re-rendered through `morphChildren`, so nothing here may depend on
+// DOM state the renderer does not own. There are no handle elements: the hit
+// zone is derived from the pointer position inside a header cell, and the drag
+// preview is written to the very attributes the renderer emits (`<tr
+// style="height">` / `<col style="width">`), which the next morph overwrites or
+// removes on its own. The hover listener is an assignment, and the drag
+// listeners are added on mousedown and removed on mouseup, so neither can stack.
+
+/** How close to the trailing header edge the pointer starts a resize. */
+const AXIS_HANDLE_PX = 5;
+
+type AxisKind = "row" | "column";
+type AxisTarget = { axis: AxisKind; label: string };
+
+let axisResize: (AxisTarget & { sheetId: string; origin: number; base: number; size: number }) | null = null;
+
+/** Stored size of a row/column, or `undefined` when it uses the default. */
+function storedAxisSize(axis: AxisKind, label: string): number | undefined {
+  const sheet = currentSheet();
+  return axis === "row" ? sheet?.row_heights[label] : sheet?.column_widths[label];
+}
+
+/** Effective size in px: the stored one, else the core's default. */
+function effectiveAxisSize(axis: AxisKind, label: string): number {
+  return storedAxisSize(axis, label) ?? (axis === "row" ? APP_DEFAULT_ROW_HEIGHT_PX : APP_DEFAULT_COLUMN_WIDTH_PX);
+}
+
+function clampAxisSize(size: number): number {
+  return Math.min(APP_MAX_AXIS_SIZE_PX, Math.max(APP_MIN_AXIS_SIZE_PX, Math.round(size)));
+}
+
+/** The row/column the pointer would resize, when it sits on a header edge. */
+function axisTargetAt(event: MouseEvent): AxisTarget | null {
+  const header = (event.target as Element | null)?.closest<HTMLElement>("th");
+  if (!header) return null;
+  const rect = header.getBoundingClientRect();
+  const column = header.dataset.column;
+  if (column) {
+    return rect.width > 0 && event.clientX >= rect.right - AXIS_HANDLE_PX ? { axis: "column", label: column } : null;
+  }
+  if (!header.classList.contains("row-header")) return null;
+  const row = header.closest<HTMLElement>("tr")?.dataset.row;
+  if (!row) return null;
+  return rect.height > 0 && event.clientY >= rect.bottom - AXIS_HANDLE_PX ? { axis: "row", label: row } : null;
+}
+
+/**
+ * Finds the `<col>` for a column, building the `<colgroup>` when the sheet has
+ * no stored width yet (the renderer omits it then). A hand-made colgroup is
+ * transient: the next morph replaces it with the rendered one, or drops it.
+ */
+function columnElement(grid: HTMLElement, label: string): HTMLElement | null {
+  const table = grid.querySelector("table.sheet-grid");
+  if (!table) return null;
+  let group = table.querySelector("colgroup");
+  if (!group) {
+    group = document.createElement("colgroup");
+    const corner = document.createElement("col");
+    corner.className = "row-header-col";
+    group.appendChild(corner);
+    for (const column of currentSheet()?.columns ?? []) {
+      const col = document.createElement("col");
+      col.setAttribute("data-column", column);
+      group.appendChild(col);
+    }
+    table.insertBefore(group, table.firstChild);
+  }
+  return group.querySelector<HTMLElement>(`col[data-column="${label}"]`);
+}
+
+/** Paints a size onto the live grid; `null` restores what the renderer emits. */
+function previewAxisSize(axis: AxisKind, label: string, size: number | null): void {
+  const grid = query("[data-grid]");
+  if (!grid) return;
+  const stored = storedAxisSize(axis, label);
+  const css = size !== null ? `${size}px` : stored !== undefined ? `${stored}px` : "";
+  if (axis === "row") {
+    const row = grid.querySelector<HTMLElement>(`tr[data-row="${label}"]`);
+    if (row) row.style.height = css;
+    return;
+  }
+  const col = columnElement(grid, label);
+  if (col) col.style.width = css;
+}
+
+function startAxisResize(event: MouseEvent, target: AxisTarget): void {
+  if (!sheetId) return;
+  event.preventDefault();
+  const base = effectiveAxisSize(target.axis, target.label);
+  axisResize = { ...target, sheetId, origin: target.axis === "column" ? event.clientX : event.clientY, base, size: base };
+  query("[data-grid]")?.classList.add("resizing");
+  window.addEventListener("mousemove", onAxisResizeMove);
+  window.addEventListener("mouseup", onAxisResizeEnd);
+  window.addEventListener("keydown", onAxisResizeKey);
+}
+
+function onAxisResizeMove(event: MouseEvent): void {
+  if (!axisResize) return;
+  const pointer = axisResize.axis === "column" ? event.clientX : event.clientY;
+  axisResize.size = clampAxisSize(axisResize.base + (pointer - axisResize.origin));
+  previewAxisSize(axisResize.axis, axisResize.label, axisResize.size);
+}
+
+function onAxisResizeKey(event: KeyboardEvent): void {
+  if (event.key === "Escape") finishAxisResize(true);
+}
+
+function onAxisResizeEnd(): void {
+  finishAxisResize(false);
+}
+
+/** Ends a drag with exactly one command — never one per mousemove. */
+function finishAxisResize(cancelled: boolean): void {
+  const resize = axisResize;
+  axisResize = null;
+  window.removeEventListener("mousemove", onAxisResizeMove);
+  window.removeEventListener("mouseup", onAxisResizeEnd);
+  window.removeEventListener("keydown", onAxisResizeKey);
+  query("[data-grid]")?.classList.remove("resizing", "resize-row", "resize-column");
+  if (!resize) return;
+  if (cancelled || resize.size === resize.base) {
+    previewAxisSize(resize.axis, resize.label, null);
+    return;
+  }
+  // Leave the preview in place: the re-render that follows the command either
+  // confirms it or morphs it back to the stored value.
+  void applyAxisSize(resize.axis, resize.label, resize.size, resize.sheetId);
+}
+
+/** `size === 0` clears the explicit size and restores the default. */
+async function applyAxisSize(axis: AxisKind, label: string, size: number, sheet: string | null = sheetId): Promise<void> {
+  if (!sheet) return;
+  if (axis === "row") await edit("set_spreadsheet_row_height", { sheetId: sheet, row: label, height: size });
+  else await edit("set_spreadsheet_column_width", { sheetId: sheet, column: label, width: size });
+}
+
+/** Row/column label of the focused cell, from the Rust-computed selection. */
+async function selectedAxisLabel(axis: AxisKind): Promise<string | null> {
+  if (!spreadsheetSelection) await refreshSpreadsheetSelection();
+  const sheet = currentSheet();
+  const selected = spreadsheetSelection;
+  if (!sheet || !selected) return null;
+  return (axis === "row" ? sheet.rows[selected.from_row - 1] : sheet.columns[selected.from_col - 1]) ?? null;
+}
+
+/** Menu path: prefill the current effective size and apply what comes back. */
+async function promptAxisSize(axis: AxisKind): Promise<void> {
+  const label = await selectedAxisLabel(axis);
+  if (!label) {
+    showError("Select a cell first.");
+    return;
+  }
+  const result = await promptDialog({
+    title: axis === "row" ? "Row height" : "Column width",
+    fields: [
+      {
+        name: "size",
+        label: `${axis === "row" ? "Row" : "Column"} ${label} in pixels (0 restores the default)`,
+        type: "number",
+        value: String(effectiveAxisSize(axis, label)),
+      },
+    ],
+    submit: "Apply",
+  });
+  if (!result) return;
+  const requested = Number(result.size.trim());
+  if (!Number.isFinite(requested)) {
+    showError(`"${result.size}" is not a size in pixels.`);
+    return;
+  }
+  await applyAxisSize(axis, label, requested <= 0 ? 0 : clampAxisSize(requested));
 }
 
 function currentSpreadsheetSelectionArgs(): { sheetId: string; anchor: string; focus: string } | null {
@@ -1740,6 +1946,12 @@ async function runAction(action: string, data: DOMStringMap = {}): Promise<void>
       if (action === "delete-column") await edit("delete_spreadsheet_selection_column", args);
       break;
     }
+    case "row-height":
+      await promptAxisSize("row");
+      break;
+    case "column-width":
+      await promptAxisSize("column");
+      break;
     case "merge-cells": {
       const args = currentSpreadsheetSelectionArgs();
       if (args) await edit("merge_spreadsheet_selection", args);

@@ -15,11 +15,20 @@ const ts = (await import("typescript")).default;
 rmSync(assets, { recursive: true, force: true });
 mkdirSync(assets, { recursive: true });
 
-for (const entry of readdirSync(src)) {
+// `src/generated/` is transpiled too: the generated DTO modules also export
+// runtime constants (default/min/max axis sizes), so they must exist as real
+// modules in dist/, not only as erased type imports.
+const modules = [
+  ...readdirSync(src).map((entry) => ({ entry, dir: src, out: assets })),
+  ...readdirSync(join(src, "generated")).map((entry) => ({ entry, dir: join(src, "generated"), out: join(assets, "generated") })),
+];
+mkdirSync(join(assets, "generated"), { recursive: true });
+
+for (const { entry, dir, out: outDir } of modules) {
   if (!entry.endsWith(".ts") || entry.endsWith(".d.ts")) {
     continue;
   }
-  const source = readFileSync(join(src, entry), "utf8");
+  const source = readFileSync(join(dir, entry), "utf8");
   const output = ts.transpileModule(source, {
     fileName: entry,
     reportDiagnostics: true,
@@ -40,7 +49,7 @@ for (const entry of readdirSync(src)) {
     .replace(/from "(\.\/[a-zA-Z0-9_/-]+)";/g, (match, path) => (path.endsWith(".js") ? match : `from "${path}.js";`))
     .replace(/import\("(\.\/[a-zA-Z0-9_/-]+)"\)/g, (match, path) => (path.endsWith(".js") ? match : `import("${path}.js")`))
     .replace(/^import "\.\/styles\.css";\n?/m, "");
-  writeFileSync(join(assets, entry.replace(/\.ts$/, ".js")), js);
+  writeFileSync(join(outDir, entry.replace(/\.ts$/, ".js")), js);
 }
 
 writeFileSync(join(assets, "styles.css"), readFileSync(join(src, "styles.css"), "utf8"));
