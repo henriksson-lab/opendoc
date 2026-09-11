@@ -280,11 +280,8 @@ impl OpenDocApp {
     ) -> Result<AppDocument, AppApiError> {
         let sheet_id = normalize_sheet_id(sheet_id.as_ref())?;
         let row = normalize_row_label(row.as_ref())?;
-        if self.workbook.has_row(&sheet_id, &row) {
-            return Err(AppApiError::Conflict(format!(
-                "row {sheet_id}!{row} already exists"
-            )));
-        }
+        // Deletes shift the following rows up, so the label is always back
+        // in use; restoring re-opens the position and refills it.
         let payload = self
             .deleted_row_restore_payload(&sheet_id, &row)
             .ok_or_else(|| {
@@ -371,11 +368,6 @@ impl OpenDocApp {
     ) -> Result<AppDocument, AppApiError> {
         let sheet_id = normalize_sheet_id(sheet_id.as_ref())?;
         let column = normalize_column_label(column.as_ref())?;
-        if self.workbook.has_column(&sheet_id, &column) {
-            return Err(AppApiError::Conflict(format!(
-                "column {sheet_id}!{column} already exists"
-            )));
-        }
         let payload = self
             .deleted_column_restore_payload(&sheet_id, &column)
             .ok_or_else(|| {
@@ -1052,6 +1044,68 @@ impl OpenDocApp {
                 address,
                 property,
                 value,
+            },
+        );
+        Ok(self.document())
+    }
+
+    /// Stores an explicit row height in pixels. `height == 0` clears the
+    /// explicit height so the row falls back to the default.
+    pub fn set_spreadsheet_row_height(
+        &mut self,
+        sheet_id: impl AsRef<str>,
+        row: impl AsRef<str>,
+        height: u32,
+    ) -> Result<AppDocument, AppApiError> {
+        let sheet_id = normalize_sheet_id(sheet_id.as_ref())?;
+        let row = normalize_row_label(row.as_ref())?;
+        self.mutate_spreadsheet(SpreadsheetEvaluationPolicy::RespectDeferred, |workbook| {
+            workbook
+                .set_row_height(&sheet_id, &row, height)
+                .ok_or_else(|| {
+                    AppApiError::NotFound(format!("sheet {sheet_id} or row {row} was not found"))
+                })??;
+            Ok(())
+        })?;
+        self.push_spreadsheet_operation(
+            "set-spreadsheet-row-height",
+            &format!("set row height {sheet_id}!{row} {height}"),
+            AppSpreadsheetOperation::SetRowHeight {
+                sheet_id,
+                row,
+                height,
+            },
+        );
+        Ok(self.document())
+    }
+
+    /// Stores an explicit column width in pixels. `width == 0` clears the
+    /// explicit width so the column falls back to the default.
+    pub fn set_spreadsheet_column_width(
+        &mut self,
+        sheet_id: impl AsRef<str>,
+        column: impl AsRef<str>,
+        width: u32,
+    ) -> Result<AppDocument, AppApiError> {
+        let sheet_id = normalize_sheet_id(sheet_id.as_ref())?;
+        let column = normalize_column_label(column.as_ref())?;
+        self.mutate_spreadsheet(SpreadsheetEvaluationPolicy::RespectDeferred, |workbook| {
+            workbook
+                .set_column_width(&sheet_id, &column, width)
+                .ok_or_else(|| {
+                    AppApiError::NotFound(format!(
+                        "sheet {sheet_id} or column {column} was not found"
+                    ))
+                })??;
+            Ok(())
+        })?;
+        self.push_spreadsheet_operation(
+            "set-spreadsheet-column-width",
+            &format!("set column width {sheet_id}!{column} {width}"),
+            AppSpreadsheetOperation::SetColumnWidth {
+                sheet_id,
+                column,
+                width,
             },
         );
         Ok(self.document())

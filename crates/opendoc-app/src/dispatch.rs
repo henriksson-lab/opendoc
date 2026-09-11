@@ -829,6 +829,12 @@ impl OpenDocApp {
                     args.value,
                 )?,
             )),
+            AppCommand::SetSpreadsheetRowHeight(args) => Ok(AppCommandResult::Document(
+                self.set_spreadsheet_row_height(args.sheet_id, args.row, args.height)?,
+            )),
+            AppCommand::SetSpreadsheetColumnWidth(args) => Ok(AppCommandResult::Document(
+                self.set_spreadsheet_column_width(args.sheet_id, args.column, args.width)?,
+            )),
             AppCommand::CopySpreadsheetRange(args) => Ok(AppCommandResult::Document(
                 self.copy_spreadsheet_range(args.sheet_id, args.source_range, args.target_address)?,
             )),

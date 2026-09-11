@@ -1322,6 +1322,20 @@ pub fn parse_json_command(
                 value: arg_string(args, "value")?,
             },
         ))),
+        "set_spreadsheet_row_height" => Ok(Some(OpenDocCommand::SetSpreadsheetRowHeight(
+            SheetRowHeightArgs {
+                sheet_id: arg_string(args, "sheetId")?,
+                row: arg_string(args, "row")?,
+                height: arg_u32(args, "height")?,
+            },
+        ))),
+        "set_spreadsheet_column_width" => Ok(Some(OpenDocCommand::SetSpreadsheetColumnWidth(
+            SheetColumnWidthArgs {
+                sheet_id: arg_string(args, "sheetId")?,
+                column: arg_string(args, "column")?,
+                width: arg_u32(args, "width")?,
+            },
+        ))),
         "copy_spreadsheet_range" => Ok(Some(OpenDocCommand::CopySpreadsheetRange(CopyRangeArgs {
             sheet_id: arg_string(args, "sheetId")?,
             source_range: arg_string(args, "sourceRange")?,

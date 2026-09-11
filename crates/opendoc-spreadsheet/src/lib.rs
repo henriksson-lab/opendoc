@@ -19,6 +19,8 @@ mod recalc;
 mod selection;
 #[allow(dead_code)]
 mod structure;
+#[cfg(test)]
+mod structure_tests;
 mod value;
 mod workbook;
 
@@ -36,8 +38,12 @@ pub use model::{
     CellValidation, DeletedCellComment, NamedRange, Sheet, SheetAxis, SheetFilter,
     SheetFilterCriterion, SheetFilterSortSpec, SheetMerge, SheetProtectedRange,
 };
+pub use model::{
+    DEFAULT_COLUMN_WIDTH_PX, DEFAULT_ROW_HEIGHT_PX, MAX_AXIS_SIZE_PX, MIN_AXIS_SIZE_PX,
+};
 pub use recalc::SpreadsheetEvaluationContext;
 pub use selection::SpreadsheetSelectionSummary;
+pub use structure::Axis;
 pub use value::{FormulaError, FormulaValue};
 pub use workbook::SpreadsheetWorkbook;
 
@@ -69,6 +75,9 @@ pub struct SpreadsheetWarning {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct DeletedRowPayload {
     pub row_axis: SheetAxis,
+    /// Explicit height of the deleted row, when it had one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_height: Option<u32>,
     pub cells: Vec<Cell>,
     pub merges: Vec<SheetMerge>,
     pub filters: Vec<SheetFilter>,
@@ -89,6 +98,9 @@ impl DeletedRowPayload {
             return Err(SpreadsheetError::Format(
                 "deleted row payload axis id is empty".to_string(),
             ));
+        }
+        if let Some(height) = self.row_height {
+            model::validate_axis_size_px("deleted row payload height", height)?;
         }
         for cell in &self.cells {
             let (_, cell_row) = address::split_cell_address(&cell.address);
@@ -152,6 +164,9 @@ impl DeletedRowPayload {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct DeletedColumnPayload {
     pub column_axis: SheetAxis,
+    /// Explicit width of the deleted column, when it had one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column_width: Option<u32>,
     pub cells: Vec<Cell>,
     pub merges: Vec<SheetMerge>,
     pub filters: Vec<SheetFilter>,
@@ -172,6 +187,9 @@ impl DeletedColumnPayload {
             return Err(SpreadsheetError::Format(
                 "deleted column payload axis id is empty".to_string(),
             ));
+        }
+        if let Some(width) = self.column_width {
+            model::validate_axis_size_px("deleted column payload width", width)?;
         }
         for cell in &self.cells {
             let (cell_column, _) = address::split_cell_address(&cell.address);

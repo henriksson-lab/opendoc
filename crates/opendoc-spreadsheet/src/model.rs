@@ -303,6 +303,64 @@ pub fn graph_dependent_label(
         .unwrap_or_else(|| format!("{dependent_sheet_id}!{address}"))
 }
 
+/// Default rendered row height in CSS pixels for rows without an
+/// explicit `row_heights` entry.
+pub const DEFAULT_ROW_HEIGHT_PX: u32 = 24;
+/// Default rendered column width in CSS pixels for columns without an
+/// explicit `column_widths` entry.
+pub const DEFAULT_COLUMN_WIDTH_PX: u32 = 100;
+/// Smallest storable explicit row height / column width in pixels.
+pub const MIN_AXIS_SIZE_PX: u32 = 1;
+/// Largest storable explicit row height / column width in pixels.
+pub const MAX_AXIS_SIZE_PX: u32 = 2_000;
+
+/// Validates a stored row height or column width in pixels.
+pub fn validate_axis_size_px(label: &str, size: u32) -> Result<(), SpreadsheetError> {
+    if !(MIN_AXIS_SIZE_PX..=MAX_AXIS_SIZE_PX).contains(&size) {
+        return Err(SpreadsheetError::Format(format!(
+            "{label} {size} is outside {MIN_AXIS_SIZE_PX}..={MAX_AXIS_SIZE_PX} pixels"
+        )));
+    }
+    Ok(())
+}
+
+/// Validates the explicit row height / column width maps of a sheet.
+pub fn validate_sheet_axis_sizes(sheet: &Sheet) -> Result<(), SpreadsheetError> {
+    for (label, height) in &sheet.row_heights {
+        let normalized = normalize_row_label(label)?;
+        if normalized != *label {
+            return Err(SpreadsheetError::Format(format!(
+                "sheet {} row height label {label} is not canonical",
+                sheet.id
+            )));
+        }
+        if !sheet.rows.iter().any(|row| row == label) {
+            return Err(SpreadsheetError::Format(format!(
+                "sheet {} has a height for missing row {label}",
+                sheet.id
+            )));
+        }
+        validate_axis_size_px("row height", *height)?;
+    }
+    for (label, width) in &sheet.column_widths {
+        let normalized = normalize_column_label(label)?;
+        if normalized != *label {
+            return Err(SpreadsheetError::Format(format!(
+                "sheet {} column width label {label} is not canonical",
+                sheet.id
+            )));
+        }
+        if !sheet.columns.iter().any(|column| column == label) {
+            return Err(SpreadsheetError::Format(format!(
+                "sheet {} has a width for missing column {label}",
+                sheet.id
+            )));
+        }
+        validate_axis_size_px("column width", *width)?;
+    }
+    Ok(())
+}
+
 pub fn row_axis(label: String) -> SheetAxis {
     SheetAxis {
         id: format!("row-{label}"),
@@ -657,6 +715,7 @@ impl Sheet {
         }
         validate_google_sheets_export_axis_labels(self)?;
         validate_sheet_axis_metadata(self)?;
+        validate_sheet_axis_sizes(self)?;
         validate_google_sheets_export_ranges(self)?;
         validate_google_sheets_export_cells(self)
     }

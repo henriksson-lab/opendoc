@@ -1555,6 +1555,30 @@ pub static COMMANDS: &[CommandSpec] = &[
         Some("write")
     ),
     command!(
+        "set_spreadsheet_row_height",
+        AppDocument,
+        [
+            arg!("sheetId", String),
+            arg!("row", String),
+            arg!("height", Number)
+        ],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
+        "set_spreadsheet_column_width",
+        AppDocument,
+        [
+            arg!("sheetId", String),
+            arg!("column", String),
+            arg!("width", Number)
+        ],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
         "copy_spreadsheet_range",
         AppDocument,
         [

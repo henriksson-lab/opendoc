@@ -37,6 +37,8 @@ mod signing_service;
 mod spreadsheet_commands;
 mod spreadsheet_replay;
 mod spreadsheet_service;
+#[cfg(test)]
+mod spreadsheet_tests;
 mod spreadsheet_ui;
 mod state;
 mod warning;
@@ -89,9 +91,10 @@ pub use opendoc_api::{
 pub use opendoc_spreadsheet::{FormulaError, FormulaValue};
 pub use operation::AppOperationRecord;
 pub(crate) use operation::{
-    normalize_filter_criteria, normalize_filter_sort_specs, validate_filter_option_payload,
-    validate_operation_envelopes, validate_operation_segment_envelopes, AppBlobOperation,
-    AppOperationEnvelope, AppSpreadsheetOperation,
+    normalize_filter_criteria, normalize_filter_sort_specs, rich_document_operation_kind,
+    validate_filter_option_payload, validate_operation_envelopes,
+    validate_operation_segment_envelopes, AppBlobOperation, AppOperationEnvelope,
+    AppSpreadsheetOperation,
 };
 pub(crate) use projection_service::AppProjectionService;
 pub(crate) use projection_support::{
@@ -139,7 +142,7 @@ pub(crate) use opendoc_spreadsheet::{
     normalize_sheet_id, normalize_sheet_title, parse_format_bool, validate_canonical_cell_address,
     validate_canonical_cell_range, validate_canonical_column_label, validate_canonical_merge_range,
     validate_canonical_row_label, validate_canonical_sheet_id, validate_filter_condition,
-    validate_protected_range_description, validate_sheet_color,
+    validate_protected_range_description, validate_sheet_color, MAX_AXIS_SIZE_PX,
 };
 
 use opendoc_citations::{citation_source_bytes, render_bibliography};

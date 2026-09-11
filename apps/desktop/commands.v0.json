@@ -1284,6 +1284,24 @@
       }
     },
     {
+      "name": "set_spreadsheet_row_height",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string",
+        "row": "string",
+        "height": "number"
+      }
+    },
+    {
+      "name": "set_spreadsheet_column_width",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string",
+        "column": "string",
+        "width": "number"
+      }
+    },
+    {
       "name": "copy_spreadsheet_range",
       "returns": "AppDocument",
       "args": {

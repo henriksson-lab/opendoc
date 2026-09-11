@@ -962,6 +962,56 @@ pub(crate) fn apply_spreadsheet_envelopes(
                     },
                 );
             }
+            Some(AppSpreadsheetOperation::SetRowHeight {
+                sheet_id,
+                row,
+                height,
+            }) => {
+                let sheet_id = replay_sheet_id!(sheet_id, "row height set");
+                match normalize_row_label(row) {
+                    Ok(row) => apply_spreadsheet_result(
+                        workbook,
+                        &mut warnings,
+                        "missing-spreadsheet-row",
+                        format!(
+                            "spreadsheet row height {sheet_id}!{row} was ignored because the row was missing"
+                        ),
+                        "invalid-spreadsheet-row-height",
+                        format!("spreadsheet row height {sheet_id}!{row} was ignored"),
+                        |candidate| candidate.set_row_height(&sheet_id, &row, *height),
+                    ),
+                    Err(err) => push_spreadsheet_warning(
+                        &mut warnings,
+                        "invalid-spreadsheet-row",
+                        format!("spreadsheet row height {sheet_id}!{row} was ignored: {err}"),
+                    ),
+                }
+            }
+            Some(AppSpreadsheetOperation::SetColumnWidth {
+                sheet_id,
+                column,
+                width,
+            }) => {
+                let sheet_id = replay_sheet_id!(sheet_id, "column width set");
+                match normalize_column_label(column) {
+                    Ok(column) => apply_spreadsheet_result(
+                        workbook,
+                        &mut warnings,
+                        "missing-spreadsheet-column",
+                        format!(
+                            "spreadsheet column width {sheet_id}!{column} was ignored because the column was missing"
+                        ),
+                        "invalid-spreadsheet-column-width",
+                        format!("spreadsheet column width {sheet_id}!{column} was ignored"),
+                        |candidate| candidate.set_column_width(&sheet_id, &column, *width),
+                    ),
+                    Err(err) => push_spreadsheet_warning(
+                        &mut warnings,
+                        "invalid-spreadsheet-column",
+                        format!("spreadsheet column width {sheet_id}!{column} was ignored: {err}"),
+                    ),
+                }
+            }
             Some(AppSpreadsheetOperation::CopyRange {
                 sheet_id,
                 source_range,

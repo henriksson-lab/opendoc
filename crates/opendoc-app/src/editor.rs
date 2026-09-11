@@ -1277,6 +1277,61 @@ mod tests {
     }
 
     #[test]
+    fn enter_in_a_list_item_continues_the_list() {
+        for ordered in [false, true] {
+            let mut app = app_with(&["first item", "after"]);
+            let list_id = StableId::new("list");
+            app.document.blocks[0].kind = BlockKind::ListItem {
+                list_id: list_id.clone(),
+                level: 1,
+                ordered,
+            };
+            let result = app
+                .apply_editor_input(input(
+                    EditorSelection::collapsed(pos(&app, 0, char_len("first item"))),
+                    "insertParagraph",
+                    None,
+                ))
+                .unwrap();
+            assert!(result.handled);
+            assert_eq!(texts(&app), vec!["first item", "", "after"]);
+            // The continuation stays in the same list, at the same level and
+            // with the same numbering, so ordered lists keep counting.
+            match &app.document.blocks[1].kind {
+                BlockKind::ListItem {
+                    list_id: next_list,
+                    level,
+                    ordered: next_ordered,
+                } => {
+                    assert_eq!(next_list, &list_id);
+                    assert_eq!(*level, 1);
+                    assert_eq!(*next_ordered, ordered);
+                }
+                other => panic!("expected a list item, got {other:?}"),
+            }
+            assert_eq!(
+                result.selection.focus.block_id,
+                app.document.blocks[1].id.to_string()
+            );
+            assert_eq!(result.selection.focus.offset, 0);
+
+            // Enter on the now-empty continuation leaves the list instead of
+            // adding another empty bullet.
+            let result = app
+                .apply_editor_input(input(
+                    EditorSelection::collapsed(pos(&app, 1, 0)),
+                    "insertParagraph",
+                    None,
+                ))
+                .unwrap();
+            assert!(result.handled);
+            assert_eq!(texts(&app), vec!["first item", "", "after"]);
+            assert!(matches!(app.document.blocks[1].kind, BlockKind::Paragraph));
+            assert_eq!(list_levels(&app), vec![(1, ordered)]);
+        }
+    }
+
+    #[test]
     fn backspace_deletes_whole_grapheme_and_atomic_inlines() {
         let mut app = app_with(&["ok 👨‍👩‍👧"]);
         let len = char_len("ok 👨‍👩‍👧");

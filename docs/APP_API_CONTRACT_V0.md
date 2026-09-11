@@ -170,6 +170,8 @@ This section is generated from `opendoc-api` Rust command metadata. Do not edit 
 | `set_spreadsheet_cell_in_sheet` | `AppDocument` | `sheetId: string`<br>`address: string`<br>`value: string` | undoable<br>requires `write` |
 | `set_spreadsheet_cells_in_sheet` | `AppDocument` | `sheetId: string`<br>`cells: SpreadsheetCellEdit[]` | undoable<br>requires `write` |
 | `set_spreadsheet_cell_format` | `AppDocument` | `sheetId: string`<br>`address: string`<br>`property: string`<br>`value: string` | undoable<br>requires `write` |
+| `set_spreadsheet_row_height` | `AppDocument` | `sheetId: string`<br>`row: string`<br>`height: number` | undoable<br>requires `write` |
+| `set_spreadsheet_column_width` | `AppDocument` | `sheetId: string`<br>`column: string`<br>`width: number` | undoable<br>requires `write` |
 | `copy_spreadsheet_range` | `AppDocument` | `sheetId: string`<br>`sourceRange: string`<br>`targetAddress: string` | undoable<br>requires `write` |
 | `add_spreadsheet_named_range` | `AppDocument` | `sheetId: string`<br>`name: string`<br>`range: string` | undoable<br>requires `write` |
 | `update_spreadsheet_named_range` | `AppDocument` | `sheetId: string`<br>`name: string`<br>`range: string` | undoable<br>requires `write` |

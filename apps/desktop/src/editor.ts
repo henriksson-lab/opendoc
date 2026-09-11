@@ -50,7 +50,15 @@ export class DocumentEditor {
   private modelSelection: EditorSelection | null = null;
   private composing = false;
   private compositionSelection: EditorSelection | null = null;
-  private selectionListener: () => void;
+  /**
+   * Undo callbacks for every listener this instance registered. The host
+   * element outlives the instance (it is re-parented whenever the page is
+   * rebuilt), so a `destroy()` that left listeners behind meant the next
+   * instance saw each gesture twice: one Enter split the paragraph twice,
+   * one keystroke typed the character twice.
+   */
+  private cleanups: (() => void)[] = [];
+  private destroyed = false;
 
   constructor(
     private host: HTMLElement,
@@ -60,24 +68,32 @@ export class DocumentEditor {
     host.setAttribute("spellcheck", "true");
     host.setAttribute("role", "textbox");
     host.setAttribute("aria-multiline", "true");
-    host.addEventListener("beforeinput", (event) => this.onBeforeInput(event as InputEvent));
-    host.addEventListener("compositionstart", () => this.onCompositionStart());
-    host.addEventListener("compositionend", (event) => this.onCompositionEnd(event as CompositionEvent));
-    host.addEventListener("keydown", (event) => void this.onKeydown(event));
-    host.addEventListener("paste", (event) => this.onPaste(event));
-    host.addEventListener("drop", (event) => event.preventDefault());
-    host.addEventListener("click", (event) => this.onClick(event));
-    this.selectionListener = () => {
+    this.listen(host, "beforeinput", (event) => this.onBeforeInput(event as InputEvent));
+    this.listen(host, "compositionstart", () => this.onCompositionStart());
+    this.listen(host, "compositionend", (event) => this.onCompositionEnd(event as CompositionEvent));
+    this.listen(host, "keydown", (event) => void this.onKeydown(event as KeyboardEvent));
+    this.listen(host, "paste", (event) => this.onPaste(event as ClipboardEvent));
+    this.listen(host, "drop", (event) => event.preventDefault());
+    this.listen(host, "click", (event) => this.onClick(event as MouseEvent));
+    this.listen(document, "selectionchange", () => {
       if (this.composing || this.inFlight) {
         return;
       }
       this.hooks.onSelectionChange(this.selection());
-    };
-    document.addEventListener("selectionchange", this.selectionListener);
+    });
+  }
+
+  private listen(target: EventTarget, type: string, handler: (event: Event) => void): void {
+    target.addEventListener(type, handler);
+    this.cleanups.push(() => target.removeEventListener(type, handler));
   }
 
   destroy(): void {
-    document.removeEventListener("selectionchange", this.selectionListener);
+    this.destroyed = true;
+    this.queue.length = 0;
+    for (const cleanup of this.cleanups.splice(0)) {
+      cleanup();
+    }
   }
 
   /** Patch the host so it matches `html`, preserving unchanged nodes. */
@@ -299,12 +315,12 @@ export class DocumentEditor {
   }
 
   private async pump(): Promise<void> {
-    if (this.inFlight) {
+    if (this.inFlight || this.destroyed) {
       return;
     }
     this.inFlight = true;
     try {
-      while (this.queue.length > 0) {
+      while (this.queue.length > 0 && !this.destroyed) {
         const gesture = this.queue.shift() as Gesture & { html?: string };
         const selection = gesture.selection ?? this.modelSelection ?? this.selection();
         if (!selection) {
@@ -332,7 +348,9 @@ export class DocumentEditor {
       }
     } finally {
       this.inFlight = false;
-      this.hooks.onSelectionChange(this.selection());
+      if (!this.destroyed) {
+        this.hooks.onSelectionChange(this.selection());
+      }
     }
   }
 }

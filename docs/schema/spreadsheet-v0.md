@@ -37,12 +37,21 @@ racing deletes that would otherwise remove the final sheet so merged histories
 remain openable.
 
 Rows and columns have explicit lifecycle operations by stable sheet ID and
-visible label. Adding an axis creates durable axis metadata even before cells
-exist on that row or column. Deleting an axis removes current cells on that axis
-and removes named ranges that intersect it. v0 does not implement positional
-spreadsheet insertion semantics or formula-source shifting; formulas that still
-refer to deleted cells degrade through deterministic formula errors or range
-evaluation rules.
+visible label. Row and column edits are positional: inserting at a label opens
+that position and shifts the rows/columns at and after it away, and deleting a
+label shifts the following ones back so the axis stays a dense `1..n` /
+`A..Z` run with no gaps. Cells, formula sources, merges, filters, protected
+ranges, named ranges, frozen counts, hidden axes, and explicit axis sizes all
+move with the shift. References to cells that a delete removed outright degrade
+to `#REF!` in the formula source; references that merely moved are rewritten.
+
+Sheets carry optional explicit sizing: `row_heights` maps a row label to a
+height in CSS pixels and `column_widths` maps a column label to a width. Both
+are signed source state, both are sparse (a label with no entry renders at the
+default size), and both move with positional inserts and deletes. Sizes are
+stored per axis label, which is the same identity as the axis id
+(`row-<label>` / `col-<label>`). Storing `0` through the sizing commands clears
+the entry and restores the default.
 
 Sheet viewport metadata includes `frozen_rows` and `frozen_columns`, mapped to
 Google Sheets `gridProperties.frozenRowCount` and `frozenColumnCount` during

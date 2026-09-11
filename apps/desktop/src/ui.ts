@@ -9,8 +9,37 @@ export type DialogField = {
 
 let afterDialogClose: () => void = () => {};
 
+/** Titles of dialogs that are currently on screen, used to reject duplicates. */
+const openDialogTitles = new Set<string>();
+
+/**
+ * Input types that support text selection. `setSelectionRange` is not defined on
+ * `<select>` and throws on the other input types (number, color, date, ...).
+ */
+const CARET_INPUT_TYPES = new Set(["text", "search", "url", "tel", "password"]);
+
 export function setDialogAfterClose(handler: () => void): void {
   afterDialogClose = handler;
+}
+
+/**
+ * Focus a text field and put the caret after the last character, so that typing
+ * appends to a pre-filled value instead of prepending to it. Safe on every
+ * element type: non-text controls are only focused.
+ */
+export function focusFieldAtEnd(field: HTMLElement | null | undefined): void {
+  if (!field) return;
+  field.focus();
+  const tag = field.tagName;
+  if (tag !== "INPUT" && tag !== "TEXTAREA") return;
+  const control = field as HTMLInputElement | HTMLTextAreaElement;
+  if (tag === "INPUT" && !CARET_INPUT_TYPES.has((control as HTMLInputElement).type)) return;
+  const end = control.value.length;
+  try {
+    control.setSelectionRange(end, end);
+  } catch {
+    // Some engines still refuse selection on exotic input types; focus is enough.
+  }
 }
 
 export function escapeHtml(value: string): string {
@@ -38,6 +67,13 @@ export function promptDialog(options: {
   cancel?: string;
 }): Promise<Record<string, string> | null> {
   return new Promise((resolve) => {
+    // Defence in depth: a duplicate dialog can only come from a double-fired
+    // action, and stacking two of them makes the user dismiss each one.
+    if (openDialogTitles.has(options.title)) {
+      resolve(null);
+      return;
+    }
+    openDialogTitles.add(options.title);
     const dialog = document.createElement("dialog");
     dialog.className = "modal";
     dialog.innerHTML = `
@@ -79,12 +115,12 @@ export function promptDialog(options: {
     dialog.querySelector("[data-cancel]")?.addEventListener("click", () => dialog.close());
     dialog.addEventListener("close", () => {
       dialog.remove();
+      openDialogTitles.delete(options.title);
       resolve(result);
       afterDialogClose();
     });
     dialog.showModal();
-    const first = form.querySelector("input, textarea, select") as HTMLElement | null;
-    first?.focus();
+    focusFieldAtEnd(form.querySelector<HTMLElement>("input, textarea, select"));
   });
 }
 

@@ -506,7 +506,13 @@ fn validate_table_cell_payload(cell: &opendoc_core::TableCell) -> Result<(), App
     validate_table_row_payload(&row)
 }
 
-fn rich_document_operation_kind(kind: &OperationKind) -> &'static str {
+/// The single source of truth for the journal/envelope `kind` string of a
+/// rich-document operation.
+///
+/// Envelope validation compares `AppOperationRecord::kind` against this, and
+/// `DocumentOperationService` derives the record kind from the payload with
+/// this same function, so the two can never drift apart.
+pub(crate) fn rich_document_operation_kind(kind: &OperationKind) -> &'static str {
     match kind {
         OperationKind::SetDocumentTitle { .. } => "set-document-title",
         OperationKind::SetDocumentDoi { .. } => "set-document-doi",
@@ -843,6 +849,18 @@ pub(crate) enum AppSpreadsheetOperation {
         property: String,
         value: String,
     },
+    SetRowHeight {
+        sheet_id: String,
+        row: String,
+        /// Height in pixels; `0` clears the explicit height.
+        height: u32,
+    },
+    SetColumnWidth {
+        sheet_id: String,
+        column: String,
+        /// Width in pixels; `0` clears the explicit width.
+        width: u32,
+    },
     CopyRange {
         sheet_id: String,
         source_range: String,
@@ -903,6 +921,8 @@ impl AppSpreadsheetOperation {
             Self::RestoreProtectedRange { .. } => "restore-spreadsheet-protected-range",
             Self::SetCell { .. } => "set-spreadsheet-cell",
             Self::SetCellFormat { .. } => "set-spreadsheet-cell-format",
+            Self::SetRowHeight { .. } => "set-spreadsheet-row-height",
+            Self::SetColumnWidth { .. } => "set-spreadsheet-column-width",
             Self::CopyRange { .. } => "copy-spreadsheet-range",
             Self::AddNamedRange { .. } => "add-spreadsheet-named-range",
             Self::UpdateNamedRange { .. } => "update-spreadsheet-named-range",
@@ -1146,6 +1166,24 @@ impl AppSpreadsheetOperation {
                 validate_canonical_cell_address("spreadsheet format operation address", address)?;
                 validate_cell_format_operation_property(property, value)?;
             }
+            Self::SetRowHeight {
+                sheet_id,
+                row,
+                height,
+            } => {
+                validate_canonical_sheet_id(sheet_id)?;
+                validate_canonical_row_label(row)?;
+                validate_axis_size_operation_px("spreadsheet row height operation", *height)?;
+            }
+            Self::SetColumnWidth {
+                sheet_id,
+                column,
+                width,
+            } => {
+                validate_canonical_sheet_id(sheet_id)?;
+                validate_canonical_column_label(column)?;
+                validate_axis_size_operation_px("spreadsheet column width operation", *width)?;
+            }
             Self::CopyRange {
                 sheet_id,
                 source_range,
@@ -1308,6 +1346,16 @@ pub(crate) fn normalize_filter_sort_specs(
         .collect()
 }
 
+/// A stored axis size in pixels; `0` means "clear the explicit size".
+fn validate_axis_size_operation_px(label: &str, size: u32) -> Result<(), AppApiError> {
+    if size > MAX_AXIS_SIZE_PX {
+        return Err(AppApiError::Format(format!(
+            "{label} size {size} exceeds {MAX_AXIS_SIZE_PX} pixels"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_cell_format_operation_property(property: &str, value: &str) -> Result<(), AppApiError> {
     if property.trim() != property {
         return Err(AppApiError::Format(format!(
@@ -1342,4 +1390,156 @@ fn validate_cell_format_operation_property(property: &str, value: &str) -> Resul
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn caret(app: &OpenDocApp, block: usize, offset: usize) -> EditorSelection {
+        EditorSelection::collapsed(EditorPosition {
+            block_id: app.document.blocks[block].id.to_string(),
+            inline_id: None,
+            offset,
+        })
+    }
+
+    fn editor_input(selection: EditorSelection, input_type: &str) -> EditorInput {
+        EditorInput {
+            selection,
+            input_type: input_type.to_string(),
+            data: None,
+            html: None,
+        }
+    }
+
+    fn move_inline_envelope(app: &OpenDocApp) -> &AppOperationEnvelope {
+        app.operation_envelopes
+            .iter()
+            .find(|envelope| {
+                matches!(
+                    envelope.operation.as_ref().map(|operation| &operation.kind),
+                    Some(OperationKind::MoveInlineToBlock { .. })
+                )
+            })
+            .expect("editor join emits a MoveInlineToBlock operation")
+    }
+
+    /// Replay the journalled operations onto `base` exactly as the journal
+    /// records them, after a canonical CBOR encode/decode cycle.
+    fn round_trip_and_replay(app: &OpenDocApp, base: &Document) -> Document {
+        validate_operation_envelopes(&app.operation_envelopes)
+            .expect("live operation envelopes validate");
+
+        let decoded = app
+            .operation_envelopes
+            .iter()
+            .map(|envelope| {
+                let bytes = encode_canonical_cbor(envelope).expect("envelope encodes");
+                decode_cbor::<AppOperationEnvelope>(&bytes).expect("envelope decodes")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(decoded, app.operation_envelopes);
+        validate_operation_envelopes(&decoded).expect("decoded operation envelopes validate");
+
+        let mut stream = Vec::new();
+        for envelope in &decoded {
+            let Some(operation) = envelope.operation.clone() else {
+                continue;
+            };
+            assert_eq!(
+                envelope.record.kind,
+                rich_document_operation_kind(&operation.kind),
+                "journal kind drifted from its payload discriminant"
+            );
+            stream.push(operation);
+        }
+        merge_operations(base, &[stream])
+            .expect("journal replays")
+            .document
+    }
+
+    #[test]
+    fn move_inline_to_block_envelope_kind_matches_its_payload_and_round_trips() {
+        let mut app = OpenDocApp::new_sample();
+        app.new_document("Envelope kinds");
+        let base = app.document.clone();
+        app.add_paragraph("Hello");
+        app.add_paragraph("world");
+
+        // Backspace at the start of the last paragraph joins it into the
+        // previous one, which is the editor path that emits
+        // `OperationKind::MoveInlineToBlock`.
+        let last = app.document.blocks.len() - 1;
+        let result = app
+            .apply_editor_input(editor_input(caret(&app, last, 0), "deleteContentBackward"))
+            .expect("backspace join is handled");
+        assert!(result.handled);
+
+        let envelope = move_inline_envelope(&app);
+        assert_eq!(envelope.record.kind, "move-inline-to-block");
+        assert_eq!(
+            envelope.record.kind,
+            rich_document_operation_kind(&envelope.operation.as_ref().unwrap().kind)
+        );
+
+        let replayed = round_trip_and_replay(&app, &base);
+        assert_eq!(replayed, app.document);
+    }
+
+    #[test]
+    fn split_paragraph_move_inline_envelope_kind_matches_its_payload_and_round_trips() {
+        let mut app = OpenDocApp::new_sample();
+        app.new_document("Envelope kinds");
+        let base = app.document.clone();
+        app.add_paragraph("Hello world");
+        let last = app.document.blocks.len() - 1;
+
+        // Bolding the first word splits the paragraph into two runs, so the
+        // split below has a trailing inline to carry over.
+        app.apply_editor_mark(EditorMarkInput {
+            selection: EditorSelection {
+                anchor: caret(&app, last, 0).anchor,
+                focus: caret(&app, last, 5).focus,
+            },
+            mark_kind: "bold".to_string(),
+            value: None,
+            action: None,
+        })
+        .expect("bold is applied");
+
+        // Enter inside the first run carries the whole trailing run into the
+        // freshly inserted block, the second `MoveInlineToBlock` producer in
+        // the editor.
+        let result = app
+            .apply_editor_input(editor_input(caret(&app, last, 2), "insertParagraph"))
+            .expect("split is handled");
+        assert!(result.handled);
+
+        let envelope = move_inline_envelope(&app);
+        assert_eq!(envelope.record.kind, "move-inline-to-block");
+
+        let replayed = round_trip_and_replay(&app, &base);
+        assert_eq!(replayed, app.document);
+    }
+
+    #[test]
+    fn journalled_document_operations_carry_their_payload_discriminant() {
+        let mut app = OpenDocApp::new_sample();
+        app.new_document("Envelope kinds");
+        let base = app.document.clone();
+        app.add_paragraph("alpha");
+        app.add_heading("beta", 2).expect("heading is added");
+        app.add_table();
+        app.set_document_title("Renamed").expect("title is set");
+        let last = app.document.blocks.len() - 1;
+        let _ = app.apply_editor_input(editor_input(caret(&app, last, 0), "insertParagraph"));
+
+        assert!(app
+            .operation_envelopes
+            .iter()
+            .any(|envelope| envelope.operation.is_some()));
+        let replayed = round_trip_and_replay(&app, &base);
+        assert_eq!(replayed, app.document);
+    }
 }

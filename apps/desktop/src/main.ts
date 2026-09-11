@@ -25,7 +25,7 @@ import type {
   EditorSelection,
   OpenDocRuntimeProfile,
 } from "./types";
-import { confirmDialog, escapeHtml, promptDialog, setDialogAfterClose, toast } from "./ui";
+import { confirmDialog, escapeHtml, focusFieldAtEnd, promptDialog, setDialogAfterClose, toast } from "./ui";
 
 // ---- State -----------------------------------------------------------------
 
@@ -54,6 +54,7 @@ let cellEditing: { address: string; draft: string } | null = null;
 let findQuery = "";
 let findIndex = 0;
 let showFind = false;
+let staticBound = false;
 
 const app = document.getElementById("app") as HTMLElement;
 const editorHost = document.createElement("div");
@@ -144,6 +145,7 @@ function wordStats(): string {
 // ---- Rendering -------------------------------------------------------------
 
 function renderAll(): void {
+  bindStatic();
   if (!doc) {
     app.innerHTML = `<main class="shell"><p class="loading">Loading…</p></main>`;
     return;
@@ -182,7 +184,7 @@ function renderAll(): void {
           <aside class="side-panel" data-side-panel hidden></aside>
         </section>
       </main>`;
-    bindStatic();
+    bindShellControls();
   }
   renderMenus();
   renderToolbar();
@@ -222,9 +224,8 @@ function renderHome(): void {
         }
       </section>
     </main>`;
-  app.querySelectorAll<HTMLElement>("[data-action]").forEach((node) => {
-    node.addEventListener("click", () => void runAction(node.dataset.action ?? "", node.dataset));
-  });
+  // No per-node listeners here: bindStatic() delegates [data-action] clicks for
+  // the whole app. Binding both made every home action fire twice.
 }
 
 const MENUS: { label: string; items: { action: string; label: string; shortcut?: string; scope?: Mode }[] }[] = [
@@ -440,6 +441,14 @@ function renderToolbar(): void {
   const template = document.createElement("template");
   template.innerHTML = mode === "docs" ? docsToolbar : sheetsToolbar;
   morphChildren(bar, template.content);
+  // Toolbar buttons must not take focus: a focus change collapses the document
+  // selection in some browsers, and the mark commands then run against an empty
+  // range and do nothing. Assigned (not added) so re-rendering cannot stack it.
+  bar.onmousedown = (event) => {
+    if ((event.target as Element | null)?.closest("button[data-action]")) {
+      event.preventDefault();
+    }
+  };
   bar.querySelectorAll<HTMLSelectElement>("select[data-select]").forEach((select) => {
     select.onchange = () => void onSelectChange(select.dataset.select ?? "", select.value);
   });
@@ -563,6 +572,8 @@ function renderMain(): void {
       main.innerHTML = `<div class="page-stack" data-page-stack><article class="page" data-page></article><section class="footnote-area" data-footnotes></section></div>`;
       page = query("[data-page]", main) as HTMLElement;
       page.appendChild(editorHost);
+      // `editorHost` is a module-level element that survives every rebuild, so
+      // the old instance must let go of its listeners before a new one binds.
       editor?.destroy();
       editor = new DocumentEditor(editorHost, editorHooks);
     }
@@ -1396,7 +1407,7 @@ async function runAction(action: string, data: DOMStringMap = {}): Promise<void>
     case "find":
       showFind = true;
       renderFind();
-      query<HTMLInputElement>("[data-find-input]")?.focus();
+      focusFieldAtEnd(query<HTMLInputElement>("[data-find-input]"));
       break;
     case "find-close":
       showFind = false;
@@ -1751,14 +1762,11 @@ async function runAction(action: string, data: DOMStringMap = {}): Promise<void>
 
 // ---- Static bindings --------------------------------------------------------------
 
-function bindStatic(): void {
-  app.addEventListener("click", (event) => {
-    const target = (event.target as Element).closest<HTMLElement>("[data-action]");
-    if (!target || target.hasAttribute("disabled")) return;
-    const menu = target.closest("details.menu-group");
-    if (menu) menu.removeAttribute("open");
-    void runAction(target.dataset.action ?? "", target.dataset);
-  });
+/**
+ * Listeners on controls that are recreated with the editor shell. Rebinding them
+ * per shell build is safe: the previous nodes are discarded with their listeners.
+ */
+function bindShellControls(): void {
   const title = query<HTMLInputElement>("[data-doc-title]");
   title?.addEventListener("change", () => void edit("set_document_title", { title: title.value }));
   title?.addEventListener("keydown", (event) => {
@@ -1771,6 +1779,23 @@ function bindStatic(): void {
   const author = query<HTMLInputElement>("[data-author]");
   author?.addEventListener("change", () => {
     authorName = author.value.trim() || "Local user";
+  });
+}
+
+/**
+ * Listeners on nodes that outlive a render (`app`, `document`). `app` is never
+ * replaced, so these must be attached exactly once: re-attaching them on every
+ * shell rebuild made one click run its action N times.
+ */
+function bindStatic(): void {
+  if (staticBound) return;
+  staticBound = true;
+  app.addEventListener("click", (event) => {
+    const target = (event.target as Element).closest<HTMLElement>("[data-action]");
+    if (!target || target.hasAttribute("disabled")) return;
+    const menu = target.closest("details.menu-group");
+    if (menu) menu.removeAttribute("open");
+    void runAction(target.dataset.action ?? "", target.dataset);
   });
   app.addEventListener(
     "toggle",

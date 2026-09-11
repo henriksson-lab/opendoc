@@ -854,6 +854,22 @@ pub struct CellFormatArgs {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SheetRowHeightArgs {
+    pub sheet_id: String,
+    pub row: String,
+    /// Row height in pixels; `0` clears the explicit height.
+    pub height: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SheetColumnWidthArgs {
+    pub sheet_id: String,
+    pub column: String,
+    /// Column width in pixels; `0` clears the explicit width.
+    pub width: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CopyRangeArgs {
     pub sheet_id: String,
     pub source_range: String,

@@ -12,14 +12,15 @@ use super::address::{
     range_contains_row, rewrite_formula_sheet_title_references, split_cell_address,
 };
 use super::model::{
-    column_axis, row_axis, Cell, CellComment, CellDependency, CellValidation, DeletedCellComment,
-    NamedRange, Sheet, SheetFilter, SheetFilterCriterion, SheetFilterSortSpec, SheetMerge,
-    SheetProtectedRange,
+    column_axis, row_axis, validate_axis_size_px, Cell, CellComment, CellDependency,
+    CellValidation, DeletedCellComment, NamedRange, Sheet, SheetFilter, SheetFilterCriterion,
+    SheetFilterSortSpec, SheetMerge, SheetProtectedRange,
 };
 use super::recalc::SpreadsheetEvaluationContext;
 use super::structure::{
-    add_sheet_protected_range, copy_sheet_range, merge_sheet_cells, set_sheet_basic_filter,
-    set_sheet_basic_filter_options, set_sheet_cell, set_sheet_cell_format, upsert_sheet_cell,
+    add_sheet_protected_range, copy_sheet_range, delete_axis, insert_axis, merge_sheet_cells,
+    set_sheet_basic_filter, set_sheet_basic_filter_options, set_sheet_cell, set_sheet_cell_format,
+    upsert_sheet_cell, Axis,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -747,16 +748,95 @@ impl SpreadsheetWorkbook {
         Ok(())
     }
 
+    /// Inserts one row at the 1-based position named by `row`, shifting the
+    /// rows at and after it down. Cells, formulas, merges, filters,
+    /// protected ranges, named ranges, frozen counts, hidden axes, and
+    /// explicit row heights all move with the shift.
     pub fn add_row(&mut self, sheet_id: &str, row: &str) -> Option<()> {
+        let at = row.parse::<u32>().ok()?;
+        insert_axis(self, sheet_id, Axis::Row, at, 1).ok()?;
+        Some(())
+    }
+
+    /// Stores an explicit row height in pixels. `height == 0` clears the
+    /// explicit height so the row falls back to
+    /// [`crate::DEFAULT_ROW_HEIGHT_PX`]. `None` means the sheet or the row
+    /// was not found.
+    pub fn set_row_height(
+        &mut self,
+        sheet_id: &str,
+        row: &str,
+        height: u32,
+    ) -> Option<Result<(), SpreadsheetError>> {
         let sheet = self.sheets.iter_mut().find(|sheet| sheet.id == sheet_id)?;
         if !sheet.rows.iter().any(|item| item == row) {
-            sheet.rows.push(row.to_string());
-            sheet
-                .rows
-                .sort_by_key(|value| value.parse::<u32>().unwrap_or(0));
+            return None;
         }
-        sheet.ensure_axis_metadata();
-        Some(())
+        if height == 0 {
+            sheet.row_heights.remove(row);
+            return Some(Ok(()));
+        }
+        if let Err(err) = validate_axis_size_px("row height", height) {
+            return Some(Err(err));
+        }
+        sheet.row_heights.insert(row.to_string(), height);
+        Some(Ok(()))
+    }
+
+    /// Stores an explicit column width in pixels. `width == 0` clears the
+    /// explicit width so the column falls back to
+    /// [`crate::DEFAULT_COLUMN_WIDTH_PX`].
+    pub fn set_column_width(
+        &mut self,
+        sheet_id: &str,
+        column: &str,
+        width: u32,
+    ) -> Option<Result<(), SpreadsheetError>> {
+        let sheet = self.sheets.iter_mut().find(|sheet| sheet.id == sheet_id)?;
+        if !sheet.columns.iter().any(|item| item == column) {
+            return None;
+        }
+        if width == 0 {
+            sheet.column_widths.remove(column);
+            return Some(Ok(()));
+        }
+        if let Err(err) = validate_axis_size_px("column width", width) {
+            return Some(Err(err));
+        }
+        sheet.column_widths.insert(column.to_string(), width);
+        Some(Ok(()))
+    }
+
+    /// The effective row height in pixels: the explicit height when one is
+    /// stored, otherwise [`crate::DEFAULT_ROW_HEIGHT_PX`].
+    pub fn row_height(&self, sheet_id: &str, row: &str) -> Option<u32> {
+        let sheet = self.sheets.iter().find(|sheet| sheet.id == sheet_id)?;
+        if !sheet.rows.iter().any(|item| item == row) {
+            return None;
+        }
+        Some(
+            sheet
+                .row_heights
+                .get(row)
+                .copied()
+                .unwrap_or(crate::DEFAULT_ROW_HEIGHT_PX),
+        )
+    }
+
+    /// The effective column width in pixels: the explicit width when one is
+    /// stored, otherwise [`crate::DEFAULT_COLUMN_WIDTH_PX`].
+    pub fn column_width(&self, sheet_id: &str, column: &str) -> Option<u32> {
+        let sheet = self.sheets.iter().find(|sheet| sheet.id == sheet_id)?;
+        if !sheet.columns.iter().any(|item| item == column) {
+            return None;
+        }
+        Some(
+            sheet
+                .column_widths
+                .get(column)
+                .copied()
+                .unwrap_or(crate::DEFAULT_COLUMN_WIDTH_PX),
+        )
     }
 
     pub fn has_row(&self, sheet_id: &str, row: &str) -> bool {
@@ -779,6 +859,7 @@ impl SpreadsheetWorkbook {
             .unwrap_or_else(|| row_axis(row.to_string()));
         Some(DeletedRowPayload {
             row_axis,
+            row_height: sheet.row_heights.get(row).copied(),
             cells: sheet
                 .cells
                 .iter()
@@ -812,29 +893,16 @@ impl SpreadsheetWorkbook {
         })
     }
 
+    /// Deletes the row named by `row`, shifting every following row up so
+    /// the axis keeps a dense 1..n run. `Some(false)` means the delete was
+    /// refused because it would remove the last row.
     pub fn delete_row(&mut self, sheet_id: &str, row: &str) -> Option<bool> {
-        let sheet = self.sheets.iter_mut().find(|sheet| sheet.id == sheet_id)?;
-        let index = sheet.rows.iter().position(|item| item == row)?;
-        if sheet.rows.len() <= 1 {
-            return Some(false);
+        let start = row.parse::<u32>().ok()?;
+        let sheet = self.sheets.iter().find(|sheet| sheet.id == sheet_id)?;
+        if !sheet.rows.iter().any(|item| item == row) {
+            return None;
         }
-        sheet.rows.remove(index);
-        sheet.row_axes.retain(|axis| axis.label != row);
-        sheet
-            .cells
-            .retain(|cell| split_cell_address(&cell.address).1 != row);
-        sheet
-            .merges
-            .retain(|merge| !range_contains_row(&merge.range, row));
-        sheet
-            .filters
-            .retain(|filter| !range_contains_row(&filter.range, row));
-        sheet
-            .protected_ranges
-            .retain(|protected| !range_contains_row(&protected.range, row));
-        self.named_ranges
-            .retain(|range| range.sheet_id != sheet_id || !range_contains_row(&range.range, row));
-        Some(true)
+        Some(delete_axis(self, sheet_id, Axis::Row, start, 1).is_ok())
     }
 
     pub fn restore_row(
@@ -844,23 +912,24 @@ impl SpreadsheetWorkbook {
         payload: DeletedRowPayload,
     ) -> Result<(), SpreadsheetError> {
         payload.validate_source(row)?;
+        let at = row.parse::<u32>().map_err(|_| {
+            SpreadsheetError::Format(format!("spreadsheet row {row} is not a position"))
+        })?;
+        if !self.sheets.iter().any(|sheet| sheet.id == sheet_id) {
+            return Err(SpreadsheetError::NotFound(format!(
+                "sheet {sheet_id} was not found"
+            )));
+        }
+        // Re-open the position the delete closed, then refill it.
+        insert_axis(self, sheet_id, Axis::Row, at, 1)?;
         let sheet = self
             .sheets
             .iter_mut()
             .find(|sheet| sheet.id == sheet_id)
             .ok_or_else(|| SpreadsheetError::NotFound(format!("sheet {sheet_id} was not found")))?;
-        if sheet.rows.iter().any(|item| item == row) {
-            return Err(SpreadsheetError::Conflict(format!(
-                "row {sheet_id}!{row} already exists"
-            )));
+        if let Some(height) = payload.row_height {
+            sheet.row_heights.insert(row.to_string(), height);
         }
-        sheet.rows.push(row.to_string());
-        sheet
-            .rows
-            .sort_by_key(|value| value.parse::<u32>().unwrap_or(0));
-        sheet.row_axes.retain(|axis| axis.label != row);
-        sheet.row_axes.push(payload.row_axis.clone());
-        sheet.ensure_axis_metadata();
         for cell in payload.cells {
             upsert_sheet_cell(sheet, cell);
         }
@@ -904,15 +973,11 @@ impl SpreadsheetWorkbook {
         self.validate_source()
     }
 
+    /// Inserts one column at the position named by `column`, shifting the
+    /// columns at and after it right. See [`SpreadsheetWorkbook::add_row`].
     pub fn add_column(&mut self, sheet_id: &str, column: &str) -> Option<()> {
-        let sheet = self.sheets.iter_mut().find(|sheet| sheet.id == sheet_id)?;
-        if !sheet.columns.iter().any(|item| item == column) {
-            sheet.columns.push(column.to_string());
-            sheet
-                .columns
-                .sort_by_key(|value| column_to_number(value).unwrap_or(0));
-        }
-        sheet.ensure_axis_metadata();
+        let at = column_to_number(column)?;
+        insert_axis(self, sheet_id, Axis::Column, at, 1).ok()?;
         Some(())
     }
 
@@ -940,6 +1005,7 @@ impl SpreadsheetWorkbook {
             .unwrap_or_else(|| column_axis(column.to_string()));
         Some(DeletedColumnPayload {
             column_axis,
+            column_width: sheet.column_widths.get(column).copied(),
             cells: sheet
                 .cells
                 .iter()
@@ -975,30 +1041,15 @@ impl SpreadsheetWorkbook {
         })
     }
 
+    /// Deletes the column named by `column`, shifting every following
+    /// column left. See [`SpreadsheetWorkbook::delete_row`].
     pub fn delete_column(&mut self, sheet_id: &str, column: &str) -> Option<bool> {
-        let sheet = self.sheets.iter_mut().find(|sheet| sheet.id == sheet_id)?;
-        let index = sheet.columns.iter().position(|item| item == column)?;
-        if sheet.columns.len() <= 1 {
-            return Some(false);
+        let start = column_to_number(column)?;
+        let sheet = self.sheets.iter().find(|sheet| sheet.id == sheet_id)?;
+        if !sheet.columns.iter().any(|item| item == column) {
+            return None;
         }
-        sheet.columns.remove(index);
-        sheet.column_axes.retain(|axis| axis.label != column);
-        sheet
-            .cells
-            .retain(|cell| split_cell_address(&cell.address).0 != column);
-        sheet
-            .merges
-            .retain(|merge| !range_contains_column(&merge.range, column));
-        sheet
-            .filters
-            .retain(|filter| !range_contains_column(&filter.range, column));
-        sheet
-            .protected_ranges
-            .retain(|protected| !range_contains_column(&protected.range, column));
-        self.named_ranges.retain(|range| {
-            range.sheet_id != sheet_id || !range_contains_column(&range.range, column)
-        });
-        Some(true)
+        Some(delete_axis(self, sheet_id, Axis::Column, start, 1).is_ok())
     }
 
     pub fn restore_column(
@@ -1008,23 +1059,23 @@ impl SpreadsheetWorkbook {
         payload: DeletedColumnPayload,
     ) -> Result<(), SpreadsheetError> {
         payload.validate_source(column)?;
+        let at = column_to_number(column).ok_or_else(|| {
+            SpreadsheetError::Format(format!("spreadsheet column {column} is not a position"))
+        })?;
+        if !self.sheets.iter().any(|sheet| sheet.id == sheet_id) {
+            return Err(SpreadsheetError::NotFound(format!(
+                "sheet {sheet_id} was not found"
+            )));
+        }
+        insert_axis(self, sheet_id, Axis::Column, at, 1)?;
         let sheet = self
             .sheets
             .iter_mut()
             .find(|sheet| sheet.id == sheet_id)
             .ok_or_else(|| SpreadsheetError::NotFound(format!("sheet {sheet_id} was not found")))?;
-        if sheet.columns.iter().any(|item| item == column) {
-            return Err(SpreadsheetError::Conflict(format!(
-                "column {sheet_id}!{column} already exists"
-            )));
+        if let Some(width) = payload.column_width {
+            sheet.column_widths.insert(column.to_string(), width);
         }
-        sheet.columns.push(column.to_string());
-        sheet
-            .columns
-            .sort_by_key(|value| column_to_number(value).unwrap_or(0));
-        sheet.column_axes.retain(|axis| axis.label != column);
-        sheet.column_axes.push(payload.column_axis.clone());
-        sheet.ensure_axis_metadata();
         for cell in payload.cells {
             upsert_sheet_cell(sheet, cell);
         }
