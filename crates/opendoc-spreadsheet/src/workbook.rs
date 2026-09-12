@@ -11,6 +11,9 @@ use super::address::{
     normalize_named_range_name, normalize_sheet_title, parse_cell_range, range_contains_column,
     range_contains_row, rewrite_formula_sheet_title_references, split_cell_address,
 };
+use super::fill::fill_sheet_range;
+use super::format::Locale;
+use super::io;
 use super::model::{
     column_axis, row_axis, validate_axis_size_px, Cell, CellComment, CellDependency,
     CellValidation, DeletedCellComment, NamedRange, Sheet, SheetFilter, SheetFilterCriterion,
@@ -20,7 +23,7 @@ use super::recalc::SpreadsheetEvaluationContext;
 use super::structure::{
     add_sheet_protected_range, copy_sheet_range, delete_axis, insert_axis, merge_sheet_cells,
     set_sheet_basic_filter, set_sheet_basic_filter_options, set_sheet_cell, set_sheet_cell_format,
-    upsert_sheet_cell, Axis,
+    sort_range, upsert_sheet_cell, Axis,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -278,6 +281,87 @@ impl SpreadsheetWorkbook {
     ) -> Option<Result<(), SpreadsheetError>> {
         let sheet = self.sheets.iter_mut().find(|sheet| sheet.id == sheet_id)?;
         Some(copy_sheet_range(sheet, source_range, target_address))
+    }
+
+    /// Sorts the rows of `range` by one of its columns (SH-7). Formulas move
+    /// with their row, so relative references keep pointing at the same data.
+    pub fn sort_range(
+        &mut self,
+        sheet_id: &str,
+        range: &str,
+        column: &str,
+        descending: bool,
+        has_header: bool,
+    ) -> Option<Result<(), SpreadsheetError>> {
+        let sheet = self.sheets.iter_mut().find(|sheet| sheet.id == sheet_id)?;
+        let Some(column) = column_to_number(column) else {
+            return Some(Err(SpreadsheetError::Format(format!(
+                "sort column {column} is not a column label"
+            ))));
+        };
+        Some(sort_range(sheet, range, column, descending, has_header))
+    }
+
+    /// Expands `source_range` over `target_range` from the fill handle
+    /// (SH-28). Series inference lives in `fill`.
+    pub fn fill_range(
+        &mut self,
+        sheet_id: &str,
+        source_range: &str,
+        target_range: &str,
+    ) -> Option<Result<(), SpreadsheetError>> {
+        let sheet = self.sheets.iter_mut().find(|sheet| sheet.id == sheet_id)?;
+        Some(fill_sheet_range(sheet, source_range, target_range))
+    }
+
+    /// Cell edits for a CSV/TSV import landing at `origin` (SH-47).
+    pub fn csv_cell_edits(
+        origin: &str,
+        text: &str,
+        delimiter: Option<&str>,
+    ) -> Result<Vec<(String, String)>, SpreadsheetError> {
+        let delimiter = io::parse_delimiter(delimiter)?;
+        let rows = io::parse_csv(text, delimiter)?;
+        let (origin_column, origin_row) =
+            super::address::parse_cell_position(&normalize_cell_address(origin)?)?;
+        let mut edits = Vec::new();
+        for (row_offset, row) in rows.iter().enumerate() {
+            for (column_offset, value) in row.iter().enumerate() {
+                let address = cell_address(
+                    origin_column + column_offset as u32,
+                    origin_row + row_offset as u32,
+                )?;
+                edits.push((address, value.clone()));
+            }
+        }
+        Ok(edits)
+    }
+
+    /// One sheet's populated grid as CSV/TSV, using display text so stored
+    /// number formats survive the round trip to another tool.
+    pub fn export_csv(
+        &self,
+        sheet_id: &str,
+        delimiter: Option<&str>,
+    ) -> Result<String, SpreadsheetError> {
+        let delimiter = io::parse_delimiter(delimiter)?;
+        let sheet = self
+            .sheets
+            .iter()
+            .find(|sheet| sheet.id == sheet_id)
+            .ok_or_else(|| SpreadsheetError::NotFound(format!("sheet {sheet_id} was not found")))?;
+        io::export_csv(sheet, delimiter, &Locale::for_tag(&self.locale))
+    }
+
+    /// Reads a base64-encoded XLSX workbook (SH-47).
+    pub fn from_xlsx_base64(base64: &str, title: &str) -> Result<Self, SpreadsheetError> {
+        let bytes = io::decode_base64(base64)?;
+        io::import_xlsx(&bytes, title)
+    }
+
+    /// Writes the workbook as a base64-encoded XLSX file (SH-47).
+    pub fn to_xlsx_base64(&self) -> Result<String, SpreadsheetError> {
+        Ok(io::encode_base64(&io::export_xlsx(self)?))
     }
 
     pub fn add_named_range(

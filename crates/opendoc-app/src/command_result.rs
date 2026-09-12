@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AppAuditView, AppDocument, AppEditorSelection, AppSpreadsheetSelection, EditorResult,
-    OpenDocAuthorizationDecision, OpenDocRuntimeLookupResult, OpenDocRuntimeProfile,
-    OpenDocRuntimeSession, OpenDocShareInvite, OpenDocSyncRelayResult,
+    AppAuditView, AppDocument, AppDocumentLayout, AppEditorSelection, AppExport, AppFindMatches,
+    AppSpreadsheetSelection, AppVersionView, EditorResult, OpenDocAuthorizationDecision,
+    OpenDocRuntimeLookupResult, OpenDocRuntimeProfile, OpenDocRuntimeSession, OpenDocShareInvite,
+    OpenDocSyncRelayResult,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -22,4 +23,10 @@ pub enum AppCommandResult {
     RuntimeLookup(OpenDocRuntimeLookupResult),
     SpreadsheetSelection(AppSpreadsheetSelection),
     EditorSelection(AppEditorSelection),
+    FindMatches(AppFindMatches),
+    VersionView(AppVersionView),
+    /// An export: the bytes plus what the target format could not carry.
+    Export(AppExport),
+    /// Where the document's blocks fall on which pages.
+    DocumentLayout(AppDocumentLayout),
 }

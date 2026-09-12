@@ -1,4 +1,6 @@
-use crate::{AppApiError, AppDocument, AppSpreadsheetWorkbook, OpenDocApp};
+use crate::{
+    AppApiError, AppDocument, AppSpreadsheetOperation, AppSpreadsheetWorkbook, OpenDocApp,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SpreadsheetEvaluationPolicy {
@@ -44,6 +46,21 @@ impl<'a> SpreadsheetMutationService<'a> {
 }
 
 impl OpenDocApp {
+    /// Journals a spreadsheet mutation, deriving the operation envelope kind
+    /// from the payload.
+    ///
+    /// Hand-written kind strings at the call site are what produced the
+    /// `move-inline` drift bug in the rich-document path; every spreadsheet
+    /// command goes through here so the kind and the payload are one fact.
+    pub(crate) fn journal_spreadsheet_operation(
+        &mut self,
+        summary: &str,
+        operation: AppSpreadsheetOperation,
+    ) {
+        let kind = operation.operation_kind();
+        self.push_spreadsheet_operation(kind, summary, operation);
+    }
+
     pub(crate) fn mutate_spreadsheet<T>(
         &mut self,
         policy: SpreadsheetEvaluationPolicy,

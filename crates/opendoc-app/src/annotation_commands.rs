@@ -64,7 +64,7 @@ impl OpenDocApp {
                             rendered_cache: None,
                         },
                     ],
-                    properties: Vec::new(),
+                    properties: BlockProperties::default(),
                 },
             },
         )

@@ -63,3 +63,39 @@ pub struct EditorMarkInput {
     #[serde(default)]
     pub action: Option<String>,
 }
+
+/// How a find query is interpreted (parity ED-24).
+///
+/// The three toggles travel together because they only mean anything
+/// together: `query` is a literal unless `regex` is set, `whole_word`
+/// constrains whichever of the two it is, and `match_case` selects the
+/// folding. Find and both replace commands take exactly this, so a replace
+/// can never search differently from the find that listed its targets.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct FindOptions {
+    pub query: String,
+    pub match_case: bool,
+    pub whole_word: bool,
+    pub regex: bool,
+}
+
+/// One match, as the selection that covers it.
+///
+/// `start` and `end` are ordinary [`EditorPosition`]s, so the frontend
+/// highlights a match by handing them to the same `setSelection` it uses for
+/// the caret. A match may begin in one inline run and end in another
+/// (parity ED-25), which is why this is a pair of positions and not an
+/// offset plus a length inside one run.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AppFindMatch {
+    pub start: EditorPosition,
+    pub end: EditorPosition,
+    /// The matched text itself, so a caller can show it without re-reading
+    /// the document (and so a regex match is inspectable).
+    pub text: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AppFindMatches {
+    pub matches: Vec<AppFindMatch>,
+}

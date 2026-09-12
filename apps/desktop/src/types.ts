@@ -19,6 +19,7 @@ export type {
   AppDeletedSheet,
   AppOperationRecord,
   AppRecentDocument,
+  AppRecoverySession,
   AppRepositoryTombstone,
   AppSignature,
   AppWarning,
@@ -30,6 +31,7 @@ export type {
   AppBibliographyEntry,
   AppBibliographyReference,
   AppBlock,
+  AppBlockProperties,
   AppCitationDatabase,
   AppCitationGroup,
   AppComment,
@@ -37,16 +39,23 @@ export type {
   AppDocument,
   AppFootnote,
   AppInline,
+  AppPageLayout,
+  AppPageSetup,
+  AppPageSizePreset,
   AppSuggestion,
   EditorResult,
 } from "./generated/document";
 export type {
   AppEditorSelection,
+  AppFindMatch,
+  AppFindMatches,
   EditorInput,
   EditorInlineRange,
   EditorPosition,
   EditorSelection,
 } from "./generated/editor";
+export type { AppExport, AppExportEncoding } from "./generated/export";
+export type { AppBlockPlacement, AppDocumentLayout } from "./generated/layout";
 export type {
   OpenDocAuthorizationDecision,
   OpenDocPermissionGrant,
@@ -82,6 +91,14 @@ export type {
   AppSpreadsheetSelection,
   AppSpreadsheetWorkbook,
 } from "./generated/spreadsheet";
+export type {
+  AppDocumentVersion,
+  AppVersionDiff,
+  AppVersionDiffEntry,
+  AppVersionPreview,
+  AppVersionSigner,
+  AppVersionView,
+} from "./generated/version";
 
 export type OpenDocRuntimeConfig = {
   mode?: OpenDocRuntimeMode;

@@ -2,6 +2,7 @@
 //! interchange adapters.
 
 mod address;
+mod fill;
 #[allow(dead_code)]
 mod format;
 #[allow(dead_code)]

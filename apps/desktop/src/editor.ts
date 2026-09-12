@@ -13,6 +13,16 @@ export type EditorHooks = {
   onError: (message: string) => void;
   /** Keyboard shortcuts the chrome handles (returns true when consumed). */
   onKeydown: (event: KeyboardEvent, selection: EditorSelection | null) => Promise<boolean>;
+  /**
+   * Files dropped on, or pasted into, the document. `afterBlockId` is the
+   * block the gesture landed on, or null when it landed nowhere in
+   * particular.
+   *
+   * This module recognises the gesture and finds the position; it does not
+   * know what a blob or an image block is. Turning the bytes into document
+   * content is a command sequence, and commands are the chrome's business.
+   */
+  onInsertFiles: (files: File[], afterBlockId: string | null) => Promise<void>;
 };
 
 type Gesture = { inputType: string; data: string | null; selection: EditorSelection | null };
@@ -44,6 +54,37 @@ function isAtomic(element: Element): boolean {
   return element.getAttribute("contenteditable") === "false";
 }
 
+/** True while a drag carries files, which is what a dragover has to allow. */
+function carriesFiles(transfer: DataTransfer | null): boolean {
+  return Array.from(transfer?.types ?? []).includes("Files");
+}
+
+/**
+ * The image files on a clipboard or a drag.
+ *
+ * `DataTransfer.files` is empty for a clipboard paste in Chrome, and
+ * `.items` is empty for some drags, so both are read and de-duplicated.
+ */
+function imageFiles(transfer: DataTransfer | null): File[] {
+  if (!transfer) {
+    return [];
+  }
+  const found: File[] = [];
+  const seen = new Set<string>();
+  const add = (file: File | null) => {
+    if (!file || !file.type.startsWith("image/")) return;
+    const key = `${file.name}:${file.size}:${file.type}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    found.push(file);
+  };
+  for (const item of Array.from(transfer.items ?? [])) {
+    if (item.kind === "file") add(item.getAsFile());
+  }
+  for (const file of Array.from(transfer.files ?? [])) add(file);
+  return found;
+}
+
 export class DocumentEditor {
   private queue: Gesture[] = [];
   private inFlight = false;
@@ -59,6 +100,7 @@ export class DocumentEditor {
    */
   private cleanups: (() => void)[] = [];
   private destroyed = false;
+  private dropTarget: Element | null = null;
 
   constructor(
     private host: HTMLElement,
@@ -73,7 +115,11 @@ export class DocumentEditor {
     this.listen(host, "compositionend", (event) => this.onCompositionEnd(event as CompositionEvent));
     this.listen(host, "keydown", (event) => void this.onKeydown(event as KeyboardEvent));
     this.listen(host, "paste", (event) => this.onPaste(event as ClipboardEvent));
-    this.listen(host, "drop", (event) => event.preventDefault());
+    // A drop only fires at all if dragover is cancelled — without this the
+    // browser navigates to the dropped file and the document is gone.
+    this.listen(host, "dragover", (event) => this.onDragOver(event as DragEvent));
+    this.listen(host, "dragleave", () => this.setDropTarget(null));
+    this.listen(host, "drop", (event) => this.onDrop(event as DragEvent));
     this.listen(host, "click", (event) => this.onClick(event as MouseEvent));
     this.listen(document, "selectionchange", () => {
       if (this.composing || this.inFlight) {
@@ -90,6 +136,7 @@ export class DocumentEditor {
 
   destroy(): void {
     this.destroyed = true;
+    this.setDropTarget(null);
     this.queue.length = 0;
     for (const cleanup of this.cleanups.splice(0)) {
       cleanup();
@@ -253,12 +300,71 @@ export class DocumentEditor {
 
   private onPaste(event: ClipboardEvent): void {
     event.preventDefault();
+    // A screenshot on the clipboard arrives as a file with no useful text
+    // alternative, so files are checked before text: pasting a picture must
+    // not silently insert its filename instead.
+    const files = imageFiles(event.clipboardData);
+    if (files.length > 0) {
+      void this.hooks.onInsertFiles(files, this.selection()?.focus.block_id ?? null);
+      return;
+    }
     const html = event.clipboardData?.getData("text/html") ?? "";
     const text = event.clipboardData?.getData("text/plain") ?? "";
     if (!html && !text) {
       return;
     }
     this.enqueue("insertFromPaste", text, html || null);
+  }
+
+  private onDragOver(event: DragEvent): void {
+    if (!carriesFiles(event.dataTransfer)) {
+      this.setDropTarget(null);
+      return;
+    }
+    event.preventDefault();
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = "copy";
+    }
+    this.setDropTarget(this.blockElementAt(event.clientX, event.clientY));
+  }
+
+  private onDrop(event: DragEvent): void {
+    // Cancelled whatever the payload: an un-cancelled drop of a file replaces
+    // the page with the file, and an un-cancelled drop of text would have the
+    // browser edit the DOM behind the core's back.
+    event.preventDefault();
+    const target = this.blockElementAt(event.clientX, event.clientY);
+    this.setDropTarget(null);
+    const files = imageFiles(event.dataTransfer);
+    if (files.length === 0) {
+      return;
+    }
+    void this.hooks.onInsertFiles(files, target?.getAttribute("data-block-id") ?? null);
+  }
+
+  /** The block the pointer is over, used as the drop position. */
+  private blockElementAt(x: number, y: number): Element | null {
+    const element = document.elementFromPoint(x, y);
+    if (!element || !this.host.contains(element)) {
+      return null;
+    }
+    return element.closest("[data-block-id]");
+  }
+
+  /**
+   * Marks the block a drop would land after.
+   *
+   * A class on a rendered element, never an inserted node: the renderer owns
+   * the children of the host, and anything this module added there would be
+   * deleted by the next morph.
+   */
+  private setDropTarget(element: Element | null): void {
+    if (this.dropTarget === element) {
+      return;
+    }
+    this.dropTarget?.classList.remove("drop-target");
+    element?.classList.add("drop-target");
+    this.dropTarget = element;
   }
 
   private onCompositionStart(): void {

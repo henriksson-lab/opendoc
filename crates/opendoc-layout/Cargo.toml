@@ -1,0 +1,14 @@
+[package]
+name = "opendoc-layout"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opendoc-core = { path = "../opendoc-core" }
+# Font metrics only: a zero-allocation, pure-Rust TrueType parser with no
+# filesystem and no C dependency, so it builds for wasm32-unknown-unknown.
+# Shaping features (GSUB/GPOS) are deliberately not used — the bundled faces
+# are subset without them, so a glyph advance is the whole story and Chrome
+# cannot apply a kern or a ligature this crate did not account for.
+# See docs/adr/0014-pagination-in-rust.md.
+ttf-parser = { version = "0.25", default-features = false, features = ["std"] }

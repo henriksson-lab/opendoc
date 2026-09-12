@@ -54,6 +54,18 @@ for (const { entry, dir, out: outDir } of modules) {
 
 writeFileSync(join(assets, "styles.css"), readFileSync(join(src, "styles.css"), "utf8"));
 
+// The bundled document faces. The stylesheet asks for them with a relative
+// `./fonts/` URL, which resolves next to styles.css in both the dev server
+// and here — so the same rule works without a bundler rewriting anything.
+// They are not decoration: `opendoc-layout` paginates against these exact
+// metrics (see docs/adr/0014-pagination-in-rust.md), so a build without them
+// would draw pages that break somewhere other than where Rust said.
+const fonts = join(src, "fonts");
+if (!existsSync(fonts)) {
+  throw new Error("src/fonts/ missing: the document faces are required for pagination to match");
+}
+cpSync(fonts, join(assets, "fonts"), { recursive: true });
+
 const wasmDir = join(src, "wasm");
 if (existsSync(wasmDir)) {
   cpSync(wasmDir, join(assets, "wasm"), { recursive: true });

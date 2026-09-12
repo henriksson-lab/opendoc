@@ -8,6 +8,7 @@ use super::address::{
     cell_address, cell_axis_labels, normalize_cell_address, number_to_column, parse_cell_position,
     trim_number,
 };
+use super::structure::transform_formula_for_paste;
 use super::workbook::SpreadsheetWorkbook;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -159,6 +160,61 @@ impl SpreadsheetWorkbook {
                 let next = normalize_cell_address(value)?;
                 (if extend { anchor } else { next.clone() }, next)
             }
+            // Fill-handle drag: `anchor`/`focus` are the source block and
+            // `value` is the cell the pointer is over. The drag snaps to
+            // whichever axis it reached furthest along, so a diagonal gesture
+            // still produces a target `fill_range` will accept.
+            "fill-target" => {
+                let (anchor_col, anchor_row) = parse_cell_position(&anchor)?;
+                let from_col = anchor_col.min(col);
+                let from_row = anchor_row.min(row);
+                let to_col = anchor_col.max(col);
+                let to_row = anchor_row.max(row);
+                let hover = normalize_cell_address(value)?;
+                let (hover_col, hover_row) = parse_cell_position(&hover)?;
+                let hover_col = hover_col.clamp(1, max_col);
+                let hover_row = hover_row.clamp(1, max_row);
+                let reach = |first: u32, last: u32, at: u32| {
+                    at.saturating_sub(last).max(first.saturating_sub(at))
+                };
+                let row_reach = reach(from_row, to_row, hover_row);
+                let column_reach = reach(from_col, to_col, hover_col);
+                if row_reach >= column_reach {
+                    (
+                        cell_address(from_col, from_row.min(hover_row))?,
+                        cell_address(to_col, to_row.max(hover_row))?,
+                    )
+                } else {
+                    (
+                        cell_address(from_col.min(hover_col), from_row)?,
+                        cell_address(to_col.max(hover_col), to_row)?,
+                    )
+                }
+            }
+            // The edge of the current selection a keyboard fill copies from:
+            // the top row for "down", the leftmost column for "right".
+            "fill-source" => {
+                let (anchor_col, anchor_row) = parse_cell_position(&anchor)?;
+                let from_col = anchor_col.min(col);
+                let from_row = anchor_row.min(row);
+                let to_col = anchor_col.max(col);
+                let to_row = anchor_row.max(row);
+                match value {
+                    "down" => (
+                        cell_address(from_col, from_row)?,
+                        cell_address(to_col, from_row)?,
+                    ),
+                    "right" => (
+                        cell_address(from_col, from_row)?,
+                        cell_address(from_col, to_row)?,
+                    ),
+                    other => {
+                        return Err(SpreadsheetError::Format(format!(
+                            "unknown spreadsheet fill source {other}"
+                        )))
+                    }
+                }
+            }
             "set-range" => {
                 let (start, end) = value.split_once(':').unwrap_or((value, value));
                 let start = normalize_cell_address(start)?;
@@ -196,11 +252,23 @@ impl SpreadsheetWorkbook {
         )
     }
 
+    /// Cell edits for a TSV paste landing at `origin`.
+    ///
+    /// `source_origin` is the top-left cell the text was copied from, and is
+    /// `None` for text that came from outside the workbook. When it is known,
+    /// pasted formulas move with the paste: relative references shift by the
+    /// paste offset and absolute (`$`) ones stay where they are.
     pub fn tsv_cell_edits(
         origin: impl AsRef<str>,
         text: impl AsRef<str>,
+        source_origin: Option<&str>,
     ) -> Result<Vec<(String, String)>, SpreadsheetError> {
-        let (origin_col, origin_row) = parse_cell_position(origin.as_ref())?;
+        let origin = normalize_cell_address(origin.as_ref())?;
+        let (origin_col, origin_row) = parse_cell_position(&origin)?;
+        let source_origin = source_origin
+            .map(normalize_cell_address)
+            .transpose()?
+            .filter(|source_origin| *source_origin != origin);
         let normalized_text = text.as_ref().replace("\r\n", "\n").replace('\r', "\n");
         let mut rows: Vec<&str> = normalized_text.split('\n').collect();
         if rows.len() > 1 && rows.last().is_some_and(|row| row.is_empty()) {
@@ -209,13 +277,19 @@ impl SpreadsheetWorkbook {
         let mut cells = Vec::new();
         for (row_offset, line) in rows.into_iter().enumerate() {
             for (col_offset, value) in line.split('\t').enumerate() {
-                cells.push((
-                    cell_address(
-                        origin_col + col_offset as u32,
-                        origin_row + row_offset as u32,
-                    )?,
-                    value.to_string(),
-                ));
+                let address = cell_address(
+                    origin_col + col_offset as u32,
+                    origin_row + row_offset as u32,
+                )?;
+                let value = match &source_origin {
+                    // Every cell in the block moves by the same offset, so the
+                    // block origins describe the whole paste.
+                    Some(source_origin) => {
+                        transform_formula_for_paste(value, source_origin, &origin)?
+                    }
+                    None => value.to_string(),
+                };
+                cells.push((address, value));
             }
         }
         Ok(cells)
@@ -359,7 +433,7 @@ mod tests {
 
     #[test]
     fn tsv_cell_edits_normalizes_origin_and_line_endings() {
-        let cells = SpreadsheetWorkbook::tsv_cell_edits("b2", "x\ty\r\nz\t")
+        let cells = SpreadsheetWorkbook::tsv_cell_edits("b2", "x\ty\r\nz\t", None)
             .expect("TSV paste should be valid");
 
         assert_eq!(
@@ -371,6 +445,85 @@ mod tests {
                 ("C3".to_string(), String::new()),
             ]
         );
+    }
+
+    #[test]
+    fn fill_target_snaps_a_drag_to_one_axis() {
+        let workbook = SpreadsheetWorkbook::sample();
+
+        // Mostly downwards: the columns stay put.
+        let down = workbook
+            .reduce_selection("sheet-1", "A1", "B2", "fill-target", "D6", false)
+            .unwrap();
+        assert_eq!(down.range, "A1:B6");
+
+        // Mostly sideways.
+        let right = workbook
+            .reduce_selection("sheet-1", "A1", "B2", "fill-target", "F3", false)
+            .unwrap();
+        assert_eq!(right.range, "A1:F2");
+
+        // Upwards extends backwards from the source.
+        let up = workbook
+            .reduce_selection("sheet-1", "A4", "B5", "fill-target", "A1", false)
+            .unwrap();
+        assert_eq!(up.range, "A1:B5");
+
+        // Inside the source: nothing to fill.
+        let inside = workbook
+            .reduce_selection("sheet-1", "A1", "B3", "fill-target", "A2", false)
+            .unwrap();
+        assert_eq!(inside.range, "A1:B3");
+    }
+
+    #[test]
+    fn fill_source_names_the_leading_edge_of_the_selection() {
+        let workbook = SpreadsheetWorkbook::sample();
+
+        let down = workbook
+            .reduce_selection("sheet-1", "B4", "A1", "fill-source", "down", false)
+            .unwrap();
+        assert_eq!(down.range, "A1:B1");
+
+        let right = workbook
+            .reduce_selection("sheet-1", "A1", "C3", "fill-source", "right", false)
+            .unwrap();
+        assert_eq!(right.range, "A1:A3");
+
+        assert!(workbook
+            .reduce_selection("sheet-1", "A1", "C3", "fill-source", "sideways", false)
+            .is_err());
+    }
+
+    #[test]
+    fn pasting_a_copied_formula_shifts_relative_references_only() {
+        let cells = SpreadsheetWorkbook::tsv_cell_edits("C5", "=A1+$B$1\t7", Some("B2"))
+            .expect("TSV paste should be valid");
+
+        // B2 -> C5 is one column right and three rows down.
+        assert_eq!(
+            cells,
+            vec![
+                ("C5".to_string(), "=B4+$B$1".to_string()),
+                ("D5".to_string(), "7".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn pasting_text_from_outside_the_workbook_leaves_formulas_alone() {
+        let cells = SpreadsheetWorkbook::tsv_cell_edits("C5", "=A1+1", None)
+            .expect("TSV paste should be valid");
+
+        assert_eq!(cells, vec![("C5".to_string(), "=A1+1".to_string())]);
+    }
+
+    #[test]
+    fn pasting_back_onto_the_copy_origin_changes_nothing() {
+        let cells = SpreadsheetWorkbook::tsv_cell_edits("b2", "=A1", Some("B2"))
+            .expect("TSV paste should be valid");
+
+        assert_eq!(cells, vec![("B2".to_string(), "=A1".to_string())]);
     }
 
     #[test]

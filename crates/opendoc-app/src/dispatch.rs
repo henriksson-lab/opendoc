@@ -8,7 +8,13 @@ impl OpenDocApp {
     ) -> Result<AppCommandResult, AppApiError> {
         let command = parse_json_command(command, &args)?
             .ok_or_else(|| AppApiError::NotFound(format!("unsupported app command {command}")))?;
-        self.dispatch_typed_command(command, args)
+        let result = self.dispatch_typed_command(command, args)?;
+        // One hook for the crash journal, after the command that changed the
+        // state it shadows. Commands that move the journal without minting an
+        // envelope (undo, redo, candidate merges, recovery itself) are covered
+        // here without knowing about it.
+        self.sync_recovery_journal();
+        Ok(result)
     }
 
     fn dispatch_typed_command(
@@ -21,6 +27,7 @@ impl OpenDocApp {
         if !self.is_open && !spec.allowed_without_open_document {
             return Err(AppApiError::Conflict("no document is open".to_string()));
         }
+        self.guard_document_replacement(&command, &args)?;
         match command {
             AppCommand::CloseDocument => {
                 return Ok(AppCommandResult::Document(self.close_document()));
@@ -67,6 +74,44 @@ impl OpenDocApp {
         } else {
             self.dispatch_typed_command_inner(command)
         }
+    }
+
+    /// The one place unsaved work is defended.
+    ///
+    /// Every runtime reaches the app through `dispatch_command`, so a command
+    /// that replaces the open document cannot avoid this check: the frontend
+    /// does not decide which actions are dangerous, and a new action that
+    /// forgets to ask the user is refused outright rather than silently
+    /// throwing the document away. Failing closed is the point — the worst
+    /// outcome of forgetting is now an action that does not run.
+    ///
+    /// `OpenDocCommand::replaces_open_document` classifies commands with an
+    /// exhaustive match, so a command added later must state which side of the
+    /// line it is on before the crate compiles.
+    fn guard_document_replacement(
+        &self,
+        command: &AppCommand,
+        args: &Value,
+    ) -> Result<(), AppApiError> {
+        if !command.replaces_open_document() || !self.has_unsaved_changes() {
+            return Ok(());
+        }
+        if args
+            .get(DISCARD_UNSAVED_CHANGES_ARG)
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+        let pending = self
+            .operation_journal
+            .len()
+            .saturating_sub(self.saved_operation_count);
+        Err(AppApiError::UnsavedChanges(format!(
+            "{} would discard {pending} unsaved change(s) in \"{}\"; repeat the command with {DISCARD_UNSAVED_CHANGES_ARG} once the user has accepted the loss",
+            command.spec().name,
+            self.document.title
+        )))
     }
 
     fn dispatch_typed_command_inner(
@@ -159,14 +204,15 @@ impl OpenDocApp {
                 self.import_doc_or_docx_path(args.path)?,
             )),
             AppCommand::ExportGoogleDocsJson => {
-                Ok(AppCommandResult::Text(self.export_google_docs_json_text()?))
+                Ok(AppCommandResult::Export(self.export_google_docs_json()?))
             }
+            AppCommand::ExportDocx => Ok(AppCommandResult::Export(self.export_docx()?)),
             AppCommand::ImportGoogleSheetsJson(args) => Ok(AppCommandResult::Document(
                 self.import_google_sheets_json_text(args.json_text)?,
             )),
-            AppCommand::ExportGoogleSheetsJson => Ok(AppCommandResult::Text(
-                self.export_google_sheets_json_text()?,
-            )),
+            AppCommand::ExportGoogleSheetsJson => {
+                Ok(AppCommandResult::Export(self.export_google_sheets_json()?))
+            }
             AppCommand::RenderWorkbookHtml(args) => Ok(AppCommandResult::Text(
                 self.render_workbook_html(&args.sheet_id)?,
             )),
@@ -258,6 +304,21 @@ impl OpenDocApp {
             AppCommand::AutosaveCurrentRepository => Ok(AppCommandResult::Document(
                 self.autosave_current_repository()?,
             )),
+            AppCommand::ListDocumentVersions(args) => Ok(AppCommandResult::VersionView(
+                self.list_document_versions(args.limit.map(|limit| limit as usize))?,
+            )),
+            AppCommand::OpenDocumentAtVersion(args) => Ok(AppCommandResult::VersionView(
+                self.open_document_at_version(args.manifest)?,
+            )),
+            AppCommand::DiffDocumentVersions(args) => Ok(AppCommandResult::VersionView(
+                self.diff_document_versions(args.from_manifest, args.to_manifest)?,
+            )),
+            AppCommand::NameDocumentVersion(args) => Ok(AppCommandResult::VersionView(
+                self.name_document_version(args.manifest, args.label, args.author)?,
+            )),
+            AppCommand::RestoreDocumentVersion(args) => Ok(AppCommandResult::Document(
+                self.restore_document_version(args.manifest)?,
+            )),
             AppCommand::CompactLocalRepository(args) => Ok(AppCommandResult::Document(
                 self.compact_local_repository(args.path, args.pack_name)?,
             )),
@@ -318,15 +379,110 @@ impl OpenDocApp {
                 self.delete_block(args.block_id)?,
             )),
             AppCommand::SetBlockTextStyle(args) => Ok(AppCommandResult::Document(
-                self.set_block_text_style(args.block_id, args.style, args.level, args.ordered)?,
+                self.set_block_text_style(args.block_id, args.style, args.level, args.list_kind)?,
             )),
             AppCommand::SetEditorSelectionBlockStyle(args) => Ok(AppCommandResult::Document(
                 self.set_editor_selection_block_style(
                     args.selection,
                     args.style,
                     args.level,
-                    args.ordered,
+                    args.list_kind,
                 )?,
+            )),
+            AppCommand::SetPageSetup(args) => Ok(AppCommandResult::Document(self.set_page_setup(
+                args.width_twips,
+                args.height_twips,
+                args.margin_top_twips,
+                args.margin_bottom_twips,
+                args.margin_start_twips,
+                args.margin_end_twips,
+            )?)),
+            AppCommand::SetPageOrientation(args) => Ok(AppCommandResult::Document(
+                self.set_page_orientation(args.orientation)?,
+            )),
+            AppCommand::SetPageFurniture(args) => Ok(AppCommandResult::Document(
+                self.set_page_furniture(args.slot, args.text, args.field, args.alignment)?,
+            )),
+            AppCommand::ClearPageFurniture(args) => Ok(AppCommandResult::Document(
+                self.clear_page_furniture(args.slot)?,
+            )),
+            AppCommand::SetBlockAlignment(args) => Ok(AppCommandResult::Document(
+                self.set_block_alignment(args.block_id, args.value)?,
+            )),
+            AppCommand::SetEditorSelectionBlockAlignment(args) => Ok(AppCommandResult::Document(
+                self.set_editor_selection_block_alignment(args.selection, args.value)?,
+            )),
+            AppCommand::SetBlockIndentStart(args) => Ok(AppCommandResult::Document(
+                self.set_block_indent_start(args.block_id, args.twips)?,
+            )),
+            AppCommand::SetEditorSelectionBlockIndentStart(args) => Ok(AppCommandResult::Document(
+                self.set_editor_selection_block_indent_start(args.selection, args.twips)?,
+            )),
+            AppCommand::SetBlockIndentEnd(args) => Ok(AppCommandResult::Document(
+                self.set_block_indent_end(args.block_id, args.twips)?,
+            )),
+            AppCommand::SetEditorSelectionBlockIndentEnd(args) => Ok(AppCommandResult::Document(
+                self.set_editor_selection_block_indent_end(args.selection, args.twips)?,
+            )),
+            AppCommand::SetBlockIndentFirstLine(args) => Ok(AppCommandResult::Document(
+                self.set_block_indent_first_line(args.block_id, args.twips)?,
+            )),
+            AppCommand::SetEditorSelectionBlockIndentFirstLine(args) => {
+                Ok(AppCommandResult::Document(
+                    self.set_editor_selection_block_indent_first_line(args.selection, args.twips)?,
+                ))
+            }
+            AppCommand::SetBlockLineSpacing(args) => Ok(AppCommandResult::Document(
+                self.set_block_line_spacing(args.block_id, args.mode, args.value)?,
+            )),
+            AppCommand::SetEditorSelectionBlockLineSpacing(args) => Ok(AppCommandResult::Document(
+                self.set_editor_selection_block_line_spacing(
+                    args.selection,
+                    args.mode,
+                    args.value,
+                )?,
+            )),
+            AppCommand::SetBlockSpaceBefore(args) => Ok(AppCommandResult::Document(
+                self.set_block_space_before(args.block_id, args.twips)?,
+            )),
+            AppCommand::SetEditorSelectionBlockSpaceBefore(args) => Ok(AppCommandResult::Document(
+                self.set_editor_selection_block_space_before(args.selection, args.twips)?,
+            )),
+            AppCommand::SetBlockSpaceAfter(args) => Ok(AppCommandResult::Document(
+                self.set_block_space_after(args.block_id, args.twips)?,
+            )),
+            AppCommand::SetEditorSelectionBlockSpaceAfter(args) => Ok(AppCommandResult::Document(
+                self.set_editor_selection_block_space_after(args.selection, args.twips)?,
+            )),
+            AppCommand::SetBlockDirection(args) => Ok(AppCommandResult::Document(
+                self.set_block_direction(args.block_id, args.value)?,
+            )),
+            AppCommand::SetEditorSelectionBlockDirection(args) => Ok(AppCommandResult::Document(
+                self.set_editor_selection_block_direction(args.selection, args.value)?,
+            )),
+            AppCommand::ClearBlockProperty(args) => Ok(AppCommandResult::Document(
+                self.clear_named_block_property(args.block_id, args.key)?,
+            )),
+            AppCommand::ClearEditorSelectionBlockProperty(args) => Ok(AppCommandResult::Document(
+                self.clear_editor_selection_named_block_property(args.selection, args.key)?,
+            )),
+            AppCommand::SetListItemChecked(args) => Ok(AppCommandResult::Document(
+                self.set_list_item_checked(args.block_id, args.checked)?,
+            )),
+            AppCommand::LayoutDocument => {
+                Ok(AppCommandResult::DocumentLayout(self.layout_document()))
+            }
+            AppCommand::FindInDocument(args) => Ok(AppCommandResult::FindMatches(
+                self.find_in_document(&args.find)?,
+            )),
+            AppCommand::ReplaceMatchInDocument(args) => Ok(AppCommandResult::Document(
+                self.replace_match_in_document(&args.find, args.replacement, args.match_index)?,
+            )),
+            AppCommand::ReplaceAllInDocument(args) => Ok(AppCommandResult::Document(
+                self.replace_all_in_document(&args.find, args.replacement)?,
+            )),
+            AppCommand::AdjustEditorSelectionIndent(args) => Ok(AppCommandResult::Document(
+                self.adjust_editor_selection_indent(args.selection, args.delta)?,
             )),
             AppCommand::AddHeading(args) => Ok(AppCommandResult::Document(
                 self.add_heading(args.text, args.level)?,
@@ -368,18 +524,18 @@ impl OpenDocApp {
             AppCommand::AddListItem(args) => Ok(AppCommandResult::Document(self.add_list_item(
                 args.text,
                 args.level,
-                args.ordered,
+                args.list_kind,
             )?)),
             AppCommand::InsertListItemAfter(args) => {
                 Ok(AppCommandResult::Document(self.insert_list_item_after(
                     args.after_block_id,
                     args.text,
                     args.level,
-                    args.ordered,
+                    args.list_kind,
                 )?))
             }
             AppCommand::UpdateListItem(args) => Ok(AppCommandResult::Document(
-                self.update_list_item(args.block_id, args.level, args.ordered)?,
+                self.update_list_item(args.block_id, args.level, args.list_kind)?,
             )),
             AppCommand::AdjustEditorSelectionListIndent(args) => Ok(AppCommandResult::Document(
                 self.adjust_editor_selection_list_indent(args.selection, args.delta)?,
@@ -419,6 +575,45 @@ impl OpenDocApp {
             )?)),
             AppCommand::DeleteTableCell(args) => Ok(AppCommandResult::Document(
                 self.delete_table_cell(args.table_block_id, args.row_id, args.cell_id)?,
+            )),
+            AppCommand::InsertTableColumn(args) => Ok(AppCommandResult::Document(
+                self.insert_table_column(args.table_block_id, args.after_column_id)?,
+            )),
+            AppCommand::DeleteTableColumn(args) => Ok(AppCommandResult::Document(
+                self.delete_table_column(args.table_block_id, args.column_id)?,
+            )),
+            AppCommand::SetTableColumnWidth(args) => Ok(AppCommandResult::Document(
+                self.set_table_column_width(args.table_block_id, args.column_id, args.twips)?,
+            )),
+            AppCommand::ClearTableColumnWidth(args) => Ok(AppCommandResult::Document(
+                self.clear_table_column_width(args.table_block_id, args.column_id)?,
+            )),
+            AppCommand::MergeTableCells(args) => Ok(AppCommandResult::Document(
+                self.merge_table_cells(args.cell_id, args.row_span, args.column_span)?,
+            )),
+            AppCommand::SplitTableCell(args) => Ok(AppCommandResult::Document(
+                self.split_table_cell(args.cell_id)?,
+            )),
+            AppCommand::SetTableCellBackground(args) => Ok(AppCommandResult::Document(
+                self.set_table_cell_background(args.cell_id, args.color)?,
+            )),
+            AppCommand::SetTableCellBorder(args) => {
+                Ok(AppCommandResult::Document(self.set_table_cell_border(
+                    args.cell_id,
+                    args.edge,
+                    args.style,
+                    args.twips,
+                    args.color,
+                )?))
+            }
+            AppCommand::SetTableCellVerticalAlignment(args) => Ok(AppCommandResult::Document(
+                self.set_table_cell_vertical_alignment(args.cell_id, args.alignment)?,
+            )),
+            AppCommand::SetTableCellPadding(args) => Ok(AppCommandResult::Document(
+                self.set_table_cell_padding(args.cell_id, args.edge, args.twips)?,
+            )),
+            AppCommand::ClearTableCellProperty(args) => Ok(AppCommandResult::Document(
+                self.clear_table_cell_property(args.cell_id, args.key)?,
             )),
             AppCommand::AddCitation => Ok(AppCommandResult::Document(self.add_sample_citation())),
             AppCommand::InsertCitation(args) => {
@@ -636,6 +831,21 @@ impl OpenDocApp {
             AppCommand::UpdateImageBlobHash(args) => Ok(AppCommandResult::Document(
                 self.update_image_blob_hash(args.block_id, args.blob_hash)?,
             )),
+            AppCommand::SetImageBlockWidth(args) => Ok(AppCommandResult::Document(
+                self.set_image_block_width(args.block_id, args.twips)?,
+            )),
+            AppCommand::SetImageBlockHeight(args) => Ok(AppCommandResult::Document(
+                self.set_image_block_height(args.block_id, args.twips)?,
+            )),
+            AppCommand::SetImageBlockSize(args) => Ok(AppCommandResult::Document(
+                self.set_image_block_size(args.block_id, args.width_twips, args.height_twips)?,
+            )),
+            AppCommand::ClearImageBlockSize(args) => Ok(AppCommandResult::Document(
+                self.clear_image_block_size(args.block_id)?,
+            )),
+            AppCommand::SetImageBlockPlacement(args) => Ok(AppCommandResult::Document(
+                self.set_image_block_placement(args.block_id, args.placement)?,
+            )),
             AppCommand::DescribeSpreadsheetSelection(args) => {
                 Ok(AppCommandResult::SpreadsheetSelection(
                     self.describe_spreadsheet_selection(args.sheet_id, args.anchor, args.focus)?,
@@ -654,9 +864,14 @@ impl OpenDocApp {
             AppCommand::CopySpreadsheetSelectionTsv(args) => Ok(AppCommandResult::Text(
                 self.copy_spreadsheet_selection_tsv(args.sheet_id, args.anchor, args.focus)?,
             )),
-            AppCommand::PasteSpreadsheetTsv(args) => Ok(AppCommandResult::Document(
-                self.paste_spreadsheet_tsv(args.sheet_id, args.origin, args.text)?,
-            )),
+            AppCommand::PasteSpreadsheetTsv(args) => {
+                Ok(AppCommandResult::Document(self.paste_spreadsheet_tsv(
+                    args.sheet_id,
+                    args.origin,
+                    args.text,
+                    args.source_origin.as_deref(),
+                )?))
+            }
             AppCommand::ClearSpreadsheetSelection(args) => Ok(AppCommandResult::Document(
                 self.clear_spreadsheet_selection(args.sheet_id, args.anchor, args.focus)?,
             )),
@@ -838,6 +1053,35 @@ impl OpenDocApp {
             AppCommand::CopySpreadsheetRange(args) => Ok(AppCommandResult::Document(
                 self.copy_spreadsheet_range(args.sheet_id, args.source_range, args.target_address)?,
             )),
+            AppCommand::SortSpreadsheetRange(args) => {
+                Ok(AppCommandResult::Document(self.sort_spreadsheet_range(
+                    args.sheet_id,
+                    args.range,
+                    args.column,
+                    args.descending,
+                    args.has_header,
+                )?))
+            }
+            AppCommand::FillSpreadsheetRange(args) => Ok(AppCommandResult::Document(
+                self.fill_spreadsheet_range(args.sheet_id, args.source_range, args.target_range)?,
+            )),
+            AppCommand::ImportSpreadsheetCsv(args) => {
+                Ok(AppCommandResult::Document(self.import_spreadsheet_csv(
+                    args.sheet_id,
+                    args.origin,
+                    args.text,
+                    args.delimiter.as_deref(),
+                )?))
+            }
+            AppCommand::ExportSpreadsheetCsv(args) => Ok(AppCommandResult::Text(
+                self.export_spreadsheet_csv(args.sheet_id, args.delimiter.as_deref())?,
+            )),
+            AppCommand::ImportSpreadsheetXlsx(args) => Ok(AppCommandResult::Document(
+                self.import_spreadsheet_xlsx(args.title, args.base64)?,
+            )),
+            AppCommand::ExportSpreadsheetXlsx => {
+                Ok(AppCommandResult::Text(self.export_spreadsheet_xlsx()?))
+            }
             AppCommand::AddSpreadsheetNamedRange(args) => Ok(AppCommandResult::Document(
                 self.add_spreadsheet_named_range(args.sheet_id, args.name, args.range)?,
             )),
@@ -847,9 +1091,111 @@ impl OpenDocApp {
             AppCommand::DeleteSpreadsheetNamedRange(args) => Ok(AppCommandResult::Document(
                 self.delete_spreadsheet_named_range(args.name)?,
             )),
+            AppCommand::RecoverSession(args) => Ok(AppCommandResult::Document(
+                self.recover_session(args.session_id)?,
+            )),
+            AppCommand::DiscardRecoverySession(args) => Ok(AppCommandResult::Document(
+                self.discard_recovery_session(args.session_id)?,
+            )),
             AppCommand::RestoreSpreadsheetNamedRange(args) => Ok(AppCommandResult::Document(
                 self.restore_spreadsheet_named_range(args.name)?,
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod unsaved_work_guard_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The four actions of FS-6 plus the ones that were already guarded.
+    const REPLACING: &[&str] = &[
+        "open_local_repository",
+        "open_flat_repository",
+        "open_local_repository_by_doi",
+        "merge_local_repository_candidates",
+        "import_doc_or_docx_path",
+        "import_docx_base64",
+        "import_google_docs_json",
+        "create_document",
+        "close_document",
+        "recover_session",
+    ];
+
+    fn dirty_app() -> OpenDocApp {
+        let mut app = OpenDocApp::new_sample();
+        app.dispatch_command("create_document", json!({ "title": "Guarded" }))
+            .expect("create");
+        assert!(!app.has_unsaved_changes());
+        app.dispatch_command("add_paragraph", json!({ "text": "not saved yet" }))
+            .expect("paragraph");
+        assert!(app.has_unsaved_changes());
+        app
+    }
+
+    #[test]
+    fn every_document_replacing_command_is_refused_over_unsaved_work() {
+        for name in REPLACING {
+            let mut app = dirty_app();
+            // Arguments are deliberately junk: the guard runs before the
+            // command can look at them, so a missing path cannot be the reason
+            // the call fails.
+            let error = app
+                .dispatch_command(
+                    name,
+                    json!({
+                        "path": "/nonexistent",
+                        "namespace": "ns",
+                        "documentUuid": "doc",
+                        "doi": "10.0/x",
+                        "title": "t",
+                        "name": "x.docx",
+                        "base64": "",
+                        "jsonText": "{}",
+                        "sessionId": "recovery-0",
+                    }),
+                )
+                .expect_err("guard refuses the command");
+            assert!(
+                matches!(error, AppApiError::UnsavedChanges(_)),
+                "{name} must be refused with UnsavedChanges, got {error:?}"
+            );
+            assert!(
+                app.has_unsaved_changes(),
+                "{name} must leave the unsaved work alone"
+            );
+        }
+    }
+
+    #[test]
+    fn an_acknowledged_replacement_goes_through() {
+        let mut app = dirty_app();
+        app.dispatch_command(
+            "create_document",
+            json!({ "title": "Replaced", "discardUnsavedChanges": true }),
+        )
+        .expect("acknowledged replacement runs");
+        assert_eq!(app.document().title, "Replaced");
+        assert!(!app.has_unsaved_changes());
+    }
+
+    #[test]
+    fn ordinary_edits_are_never_guarded() {
+        let mut app = dirty_app();
+        app.dispatch_command("add_paragraph", json!({ "text": "more" }))
+            .expect("edits are not replacements");
+        app.dispatch_command("undo_current_edit", json!({}))
+            .expect("undo is not a replacement");
+        app.dispatch_command("get_document", json!({}))
+            .expect("reads are not replacements");
+    }
+
+    #[test]
+    fn a_clean_document_is_replaced_without_asking() {
+        let mut app = OpenDocApp::new_sample();
+        assert!(!app.has_unsaved_changes());
+        app.dispatch_command("create_document", json!({ "title": "Fresh" }))
+            .expect("nothing to lose, nothing to ask");
     }
 }

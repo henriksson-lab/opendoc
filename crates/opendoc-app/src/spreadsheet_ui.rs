@@ -41,14 +41,25 @@ impl OpenDocApp {
         Ok(self.workbook.selection_tsv(sheet_id, anchor, focus)?)
     }
 
+    /// Pastes clipboard TSV at `origin`.
+    ///
+    /// `source_origin` is the top-left cell the text was copied from, when the
+    /// copy came from this workbook. Formulas then move with the paste:
+    /// relative references shift by the paste offset, absolute ones do not.
+    /// Text pasted from elsewhere passes `None` and is stored verbatim.
     pub fn paste_spreadsheet_tsv(
         &mut self,
         sheet_id: impl AsRef<str>,
         origin: impl AsRef<str>,
         text: impl AsRef<str>,
+        source_origin: Option<&str>,
     ) -> Result<AppDocument, AppApiError> {
         let sheet_id = normalize_sheet_id(sheet_id.as_ref())?;
-        let cells = opendoc_spreadsheet::SpreadsheetWorkbook::tsv_cell_edits(origin, text)?;
+        let source_origin = source_origin
+            .map(str::trim)
+            .filter(|source_origin| !source_origin.is_empty());
+        let cells =
+            opendoc_spreadsheet::SpreadsheetWorkbook::tsv_cell_edits(origin, text, source_origin)?;
         if cells.is_empty() {
             return Ok(self.document());
         }
@@ -95,8 +106,7 @@ impl OpenDocApp {
             Ok(())
         })?;
         for address in addresses {
-            self.push_spreadsheet_operation(
-                "set-spreadsheet-cell-format",
+            self.journal_spreadsheet_operation(
                 &format!("format {sheet_id}!{address} {property}"),
                 AppSpreadsheetOperation::SetCellFormat {
                     sheet_id: sheet_id.clone(),

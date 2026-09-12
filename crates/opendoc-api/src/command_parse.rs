@@ -1,10 +1,9 @@
+//! Parsing a named JSON command into the typed command enum.
+
+use crate::command_arg_structs::*;
+use crate::command_arg_values::*;
 use crate::command_args::*;
-use crate::{
-    AppCitationItem, EditorSelection, OpenDocCommand, OpenDocPermissionGrant, OpenDocPresencePeer,
-    OpenDocRelayOperation, OpenDocRuntimeLookupEntry, OpenDocRuntimeMode, OpenDocRuntimeProfile,
-    OpenDocStorageBackend,
-};
-use opendoc_spreadsheet::{SheetFilterCriterion, SheetFilterSortSpec};
+use crate::{OpenDocCommand, OpenDocRuntimeMode, OpenDocRuntimeProfile};
 use serde_json::Value;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -21,13 +20,6 @@ impl std::fmt::Display for CommandParseError {
 }
 
 impl std::error::Error for CommandParseError {}
-
-pub(crate) fn arg_string(args: &Value, name: &str) -> Result<String, CommandParseError> {
-    args.get(name)
-        .and_then(Value::as_str)
-        .map(ToString::to_string)
-        .ok_or_else(|| CommandParseError::Format(format!("missing string argument {name}")))
-}
 
 fn parse_runtime_mode(mode: &str) -> Result<OpenDocRuntimeMode, CommandParseError> {
     match mode {
@@ -68,432 +60,6 @@ pub fn undo_coalesce_key(command: &str, args: &Value) -> Option<String> {
         .get("block_id")?
         .as_str()?;
     Some(format!("{input_type}:{block_id}"))
-}
-
-pub(crate) fn arg_optional_string(
-    args: &Value,
-    name: &str,
-) -> Result<Option<String>, CommandParseError> {
-    match args.get(name) {
-        Some(Value::Null) | None => Ok(None),
-        Some(Value::String(value)) => Ok(Some(value.clone())),
-        _ => Err(CommandParseError::Format(format!(
-            "argument {name} must be a string or null"
-        ))),
-    }
-}
-
-pub(crate) fn arg_string_vec(args: &Value, name: &str) -> Result<Vec<String>, CommandParseError> {
-    let Some(values) = args.get(name).and_then(Value::as_array) else {
-        return Err(CommandParseError::Format(format!(
-            "missing string-array argument {name}"
-        )));
-    };
-    values
-        .iter()
-        .map(|value| {
-            value.as_str().map(str::to_string).ok_or_else(|| {
-                CommandParseError::Format(format!(
-                    "string-array argument {name} contains a non-string"
-                ))
-            })
-        })
-        .collect()
-}
-
-pub(crate) fn arg_u8(args: &Value, name: &str) -> Result<u8, CommandParseError> {
-    let Some(value) = args.get(name).and_then(Value::as_u64) else {
-        return Err(CommandParseError::Format(format!(
-            "missing integer argument {name}"
-        )));
-    };
-    u8::try_from(value)
-        .map_err(|_| CommandParseError::Format(format!("integer argument {name} is out of range")))
-}
-
-pub(crate) fn arg_u32(args: &Value, name: &str) -> Result<u32, CommandParseError> {
-    let Some(value) = args.get(name).and_then(Value::as_u64) else {
-        return Err(CommandParseError::Format(format!(
-            "missing integer argument {name}"
-        )));
-    };
-    u32::try_from(value)
-        .map_err(|_| CommandParseError::Format(format!("integer argument {name} is out of range")))
-}
-
-pub(crate) fn arg_i8(args: &Value, name: &str) -> Result<i8, CommandParseError> {
-    let Some(value) = args.get(name).and_then(Value::as_i64) else {
-        return Err(CommandParseError::Format(format!(
-            "missing integer argument {name}"
-        )));
-    };
-    i8::try_from(value)
-        .map_err(|_| CommandParseError::Format(format!("integer argument {name} is out of range")))
-}
-
-pub(crate) fn arg_bool(args: &Value, name: &str) -> Result<bool, CommandParseError> {
-    args.get(name)
-        .and_then(Value::as_bool)
-        .ok_or_else(|| CommandParseError::Format(format!("missing boolean argument {name}")))
-}
-
-fn editor_selection_arg(args: &Value) -> Result<EditorSelection, CommandParseError> {
-    serde_json::from_value(
-        args.get("selection")
-            .cloned()
-            .ok_or_else(|| CommandParseError::Format("missing selection argument".to_string()))?,
-    )
-    .map_err(|err| CommandParseError::Format(format!("invalid editor selection: {err}")))
-}
-
-pub(crate) fn arg_optional_bool(
-    args: &Value,
-    name: &str,
-) -> Result<Option<bool>, CommandParseError> {
-    match args.get(name) {
-        Some(Value::Null) | None => Ok(None),
-        Some(Value::Bool(value)) => Ok(Some(*value)),
-        _ => Err(CommandParseError::Format(format!(
-            "argument {name} must be a boolean or null"
-        ))),
-    }
-}
-
-fn arg_runtime_storage_backends(
-    args: &Value,
-    name: &str,
-) -> Result<Option<Vec<OpenDocStorageBackend>>, CommandParseError> {
-    let Some(values) = args.get(name) else {
-        return Ok(None);
-    };
-    let Some(values) = values.as_array() else {
-        return Err(CommandParseError::Format(format!(
-            "argument {name} must be a storage-backend array"
-        )));
-    };
-    let mut backends = Vec::new();
-    for value in values {
-        let Some(raw) = value.as_str() else {
-            continue;
-        };
-        let backend = match raw.trim() {
-            "local" => Some(OpenDocStorageBackend::Local),
-            "flat" => Some(OpenDocStorageBackend::Flat),
-            "opendal-fs" => Some(OpenDocStorageBackend::OpenDalFs),
-            _ => None,
-        };
-        if let Some(backend) = backend {
-            if !backends.contains(&backend) {
-                backends.push(backend);
-            }
-        }
-    }
-    Ok(Some(backends))
-}
-
-pub(crate) fn arg_string_array(args: &Value, name: &str) -> Result<Vec<String>, CommandParseError> {
-    let Some(values) = args.get(name).and_then(Value::as_array) else {
-        return Err(CommandParseError::Format(format!(
-            "missing string-array argument {name}"
-        )));
-    };
-    values
-        .iter()
-        .map(|value| {
-            value.as_str().map(ToString::to_string).ok_or_else(|| {
-                CommandParseError::Format(format!(
-                    "string-array argument {name} contains a non-string"
-                ))
-            })
-        })
-        .collect()
-}
-
-pub(crate) fn arg_runtime_share_actions(args: &Value, name: &str) -> Vec<String> {
-    let Some(values) = args.get(name).and_then(Value::as_array) else {
-        return Vec::new();
-    };
-    values
-        .iter()
-        .map(|value| match value {
-            Value::String(value) => value.clone(),
-            Value::Null => "null".to_string(),
-            Value::Bool(value) => value.to_string(),
-            Value::Number(value) => value.to_string(),
-            _ => String::new(),
-        })
-        .collect()
-}
-
-pub(crate) fn arg_spreadsheet_cell_edits(
-    args: &Value,
-    name: &str,
-) -> Result<Vec<(String, String)>, CommandParseError> {
-    let Some(values) = args.get(name).and_then(Value::as_array) else {
-        return Err(CommandParseError::Format(format!(
-            "missing spreadsheet-cell-edit-array argument {name}"
-        )));
-    };
-    values
-        .iter()
-        .map(|value| {
-            let Some(entry) = value.as_object() else {
-                return Err(CommandParseError::Format(format!(
-                    "spreadsheet-cell-edit-array argument {name} contains a non-object"
-                )));
-            };
-            let address = entry
-                .get("address")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    CommandParseError::Format(format!(
-                        "spreadsheet-cell-edit-array argument {name} contains an edit without a string address"
-                    ))
-                })?
-                .to_string();
-            let value = entry
-                .get("value")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    CommandParseError::Format(format!(
-                        "spreadsheet-cell-edit-array argument {name} contains an edit without a string value"
-                    ))
-                })?
-                .to_string();
-            Ok((address, value))
-        })
-        .collect()
-}
-
-pub(crate) fn arg_citation_items(
-    args: &Value,
-    name: &str,
-) -> Result<Vec<AppCitationItem>, CommandParseError> {
-    let Some(values) = args.get(name).and_then(Value::as_array) else {
-        return Err(CommandParseError::Format(format!(
-            "missing citation-item-array argument {name}"
-        )));
-    };
-    values
-        .iter()
-        .map(|value| {
-            serde_json::from_value(value.clone()).map_err(|err| {
-                CommandParseError::Format(format!(
-                    "invalid citation item in argument {name}: {err}"
-                ))
-            })
-        })
-        .collect()
-}
-
-pub(crate) fn arg_filter_criteria(
-    args: &Value,
-    name: &str,
-) -> Result<Vec<SheetFilterCriterion>, CommandParseError> {
-    let Some(values) = args.get(name).and_then(Value::as_array) else {
-        return Err(CommandParseError::Format(format!(
-            "missing filter-criteria-array argument {name}"
-        )));
-    };
-    values
-        .iter()
-        .map(|value| {
-            serde_json::from_value(value.clone()).map_err(|err| {
-                CommandParseError::Format(format!(
-                    "invalid filter criterion in argument {name}: {err}"
-                ))
-            })
-        })
-        .collect()
-}
-
-pub(crate) fn arg_filter_sort_specs(
-    args: &Value,
-    name: &str,
-) -> Result<Vec<SheetFilterSortSpec>, CommandParseError> {
-    let Some(values) = args.get(name).and_then(Value::as_array) else {
-        return Err(CommandParseError::Format(format!(
-            "missing filter-sort-array argument {name}"
-        )));
-    };
-    values
-        .iter()
-        .map(|value| {
-            serde_json::from_value(value.clone()).map_err(|err| {
-                CommandParseError::Format(format!("invalid filter sort in argument {name}: {err}"))
-            })
-        })
-        .collect()
-}
-
-pub(crate) fn arg_presence_peers(
-    args: &Value,
-    name: &str,
-) -> Result<Vec<OpenDocPresencePeer>, CommandParseError> {
-    let Some(values) = args.get(name) else {
-        return Ok(Vec::new());
-    };
-    let Some(values) = values.as_array() else {
-        return Err(CommandParseError::Format(format!(
-            "argument {name} must be a presence-peer array"
-        )));
-    };
-    Ok(values
-        .iter()
-        .filter_map(|value| {
-            let entry = value.as_object()?;
-            let subject = normalized_value_string(entry.get("subject"))?;
-            Some(OpenDocPresencePeer {
-                subject,
-                display_name: normalized_value_string(entry.get("display_name"))
-                    .unwrap_or_default(),
-                role: normalized_value_string(entry.get("role")).unwrap_or_default(),
-                cursor_anchor: normalized_value_string(entry.get("cursor_anchor")),
-                last_seen_ms: nonnegative_integer_millis(entry.get("last_seen_ms")),
-            })
-        })
-        .collect())
-}
-
-fn normalized_value_string(value: Option<&Value>) -> Option<String> {
-    value
-        .and_then(Value::as_str)
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
-fn nonnegative_integer_millis(value: Option<&Value>) -> u64 {
-    let Some(value) = value else {
-        return 0;
-    };
-    if let Some(number) = value.as_u64() {
-        return number;
-    }
-    if let Some(number) = value.as_i64() {
-        return u64::try_from(number).unwrap_or(0);
-    }
-    value
-        .as_f64()
-        .filter(|number| number.is_finite() && *number > 0.0)
-        .map(|number| number.trunc().min(u64::MAX as f64) as u64)
-        .unwrap_or(0)
-}
-
-pub(crate) fn arg_permission_grants(
-    args: &Value,
-    name: &str,
-) -> Result<Vec<OpenDocPermissionGrant>, CommandParseError> {
-    let Some(values) = args.get(name) else {
-        return Ok(Vec::new());
-    };
-    let Some(values) = values.as_array() else {
-        return Err(CommandParseError::Format(format!(
-            "argument {name} must be a permission-grant array"
-        )));
-    };
-    Ok(values
-        .iter()
-        .filter_map(|value| {
-            let entry = value.as_object()?;
-            let subject = normalized_value_string(entry.get("subject"))?;
-            let action = normalized_value_string(entry.get("action"))?;
-            let scope = normalized_value_string(entry.get("scope"))?;
-            Some(OpenDocPermissionGrant {
-                subject,
-                action,
-                scope,
-                document_uuid: normalized_value_string(entry.get("document_uuid")),
-            })
-        })
-        .collect())
-}
-
-pub(crate) fn arg_relay_operations(
-    args: &Value,
-    name: &str,
-) -> Result<Vec<OpenDocRelayOperation>, CommandParseError> {
-    let Some(values) = args.get(name) else {
-        return Ok(Vec::new());
-    };
-    let Some(values) = values.as_array() else {
-        return Err(CommandParseError::Format(format!(
-            "argument {name} must be a relay-operation array"
-        )));
-    };
-    Ok(values
-        .iter()
-        .map(|value| {
-            let Some(entry) = value.as_object() else {
-                return OpenDocRelayOperation {
-                    id: String::new(),
-                    actor: String::new(),
-                    seq: 0,
-                    kind: String::new(),
-                    base_manifest: None,
-                };
-            };
-            OpenDocRelayOperation {
-                id: normalized_value_string(entry.get("id")).unwrap_or_default(),
-                actor: normalized_value_string(entry.get("actor")).unwrap_or_default(),
-                seq: nonnegative_integer_millis(entry.get("seq")),
-                kind: normalized_value_string(entry.get("kind")).unwrap_or_default(),
-                base_manifest: normalized_value_string(entry.get("base_manifest")),
-            }
-        })
-        .collect())
-}
-
-pub(crate) fn arg_runtime_lookup_entries(
-    args: &Value,
-    name: &str,
-) -> Result<Vec<OpenDocRuntimeLookupEntry>, CommandParseError> {
-    let Some(values) = args.get(name) else {
-        return Ok(Vec::new());
-    };
-    let Some(values) = values.as_array() else {
-        return Err(CommandParseError::Format(format!(
-            "argument {name} must be a runtime-lookup-entry array"
-        )));
-    };
-    Ok(values
-        .iter()
-        .map(|value| {
-            let Some(entry) = value.as_object() else {
-                return OpenDocRuntimeLookupEntry {
-                    document_uuid: String::new(),
-                    doi: None,
-                    manifest: None,
-                };
-            };
-            OpenDocRuntimeLookupEntry {
-                document_uuid: normalized_value_string(entry.get("document_uuid"))
-                    .unwrap_or_default(),
-                doi: normalized_value_string(entry.get("doi")),
-                manifest: normalized_value_string(entry.get("manifest")),
-            }
-        })
-        .collect())
-}
-
-pub(crate) fn arg_u8_vec(args: &Value, name: &str) -> Result<Vec<u8>, CommandParseError> {
-    let Some(values) = args.get(name).and_then(Value::as_array) else {
-        return Err(CommandParseError::Format(format!(
-            "missing byte-array argument {name}"
-        )));
-    };
-    values
-        .iter()
-        .map(|value| {
-            let Some(byte) = value.as_u64() else {
-                return Err(CommandParseError::Format(format!(
-                    "byte-array argument {name} contains a non-integer"
-                )));
-            };
-            u8::try_from(byte).map_err(|_| {
-                CommandParseError::Format(format!("byte-array argument {name} contains {byte}"))
-            })
-        })
-        .collect()
 }
 
 pub fn parse_json_command(
@@ -588,6 +154,7 @@ pub fn parse_json_command(
             },
         ))),
         "export_google_docs_json" => Ok(Some(OpenDocCommand::ExportGoogleDocsJson)),
+        "export_docx" => Ok(Some(OpenDocCommand::ExportDocx)),
         "import_google_sheets_json" => Ok(Some(OpenDocCommand::ImportGoogleSheetsJson(
             ImportGoogleSheetsJsonArgs {
                 json_text: arg_string(args, "jsonText")?,
@@ -708,6 +275,30 @@ pub fn parse_json_command(
             OpenDocCommand::SaveOpenDalFsRepositoryOrCandidate(repository_namespace(args)?),
         )),
         "autosave_current_repository" => Ok(Some(OpenDocCommand::AutosaveCurrentRepository)),
+        "list_document_versions" => Ok(Some(OpenDocCommand::ListDocumentVersions(
+            ListDocumentVersionsArgs {
+                limit: arg_optional_u32(args, "limit")?,
+            },
+        ))),
+        "open_document_at_version" => Ok(Some(OpenDocCommand::OpenDocumentAtVersion(
+            document_version(args)?,
+        ))),
+        "diff_document_versions" => Ok(Some(OpenDocCommand::DiffDocumentVersions(
+            DiffDocumentVersionsArgs {
+                from_manifest: arg_string(args, "fromManifest")?,
+                to_manifest: arg_string(args, "toManifest")?,
+            },
+        ))),
+        "name_document_version" => Ok(Some(OpenDocCommand::NameDocumentVersion(
+            NameDocumentVersionArgs {
+                manifest: arg_string(args, "manifest")?,
+                label: arg_string(args, "label")?,
+                author: arg_string(args, "author")?,
+            },
+        ))),
+        "restore_document_version" => Ok(Some(OpenDocCommand::RestoreDocumentVersion(
+            document_version(args)?,
+        ))),
         "compact_local_repository" => Ok(Some(OpenDocCommand::CompactLocalRepository(
             CompactLocalRepositoryArgs {
                 path: arg_string(args, "path")?,
@@ -716,6 +307,14 @@ pub fn parse_json_command(
         ))),
         "open_local_repository" => Ok(Some(OpenDocCommand::OpenLocalRepository(
             repository_document(args)?,
+        ))),
+        "recover_session" => Ok(Some(OpenDocCommand::RecoverSession(RecoverySessionArgs {
+            session_id: arg_string(args, "sessionId")?,
+        }))),
+        "discard_recovery_session" => Ok(Some(OpenDocCommand::DiscardRecoverySession(
+            RecoverySessionArgs {
+                session_id: arg_string(args, "sessionId")?,
+            },
         ))),
         "scan_local_repository" => Ok(Some(OpenDocCommand::ScanLocalRepository(repository_path(
             args,
@@ -776,7 +375,7 @@ pub fn parse_json_command(
                 block_id: arg_string(args, "blockId")?,
                 style: arg_string(args, "style")?,
                 level: arg_u8(args, "level")?,
-                ordered: arg_bool(args, "ordered")?,
+                list_kind: arg_string(args, "listKind")?,
             },
         ))),
         "set_editor_selection_block_style" => Ok(Some(
@@ -784,9 +383,184 @@ pub fn parse_json_command(
                 selection: editor_selection_arg(args)?,
                 style: arg_string(args, "style")?,
                 level: arg_u8(args, "level")?,
-                ordered: arg_bool(args, "ordered")?,
+                list_kind: arg_string(args, "listKind")?,
             }),
         )),
+        "set_page_setup" => Ok(Some(OpenDocCommand::SetPageSetup(SetPageSetupArgs {
+            width_twips: arg_i32(args, "widthTwips")?,
+            height_twips: arg_i32(args, "heightTwips")?,
+            margin_top_twips: arg_i32(args, "marginTopTwips")?,
+            margin_bottom_twips: arg_i32(args, "marginBottomTwips")?,
+            margin_start_twips: arg_i32(args, "marginStartTwips")?,
+            margin_end_twips: arg_i32(args, "marginEndTwips")?,
+        }))),
+        "set_page_orientation" => Ok(Some(OpenDocCommand::SetPageOrientation(
+            SetPageOrientationArgs {
+                orientation: arg_string(args, "orientation")?,
+            },
+        ))),
+        "set_page_furniture" => Ok(Some(OpenDocCommand::SetPageFurniture(
+            SetPageFurnitureArgs {
+                slot: arg_string(args, "slot")?,
+                text: arg_string(args, "text")?,
+                field: arg_string(args, "field")?,
+                alignment: arg_string(args, "alignment")?,
+            },
+        ))),
+        "clear_page_furniture" => Ok(Some(OpenDocCommand::ClearPageFurniture(
+            PageFurnitureSlotArgs {
+                slot: arg_string(args, "slot")?,
+            },
+        ))),
+        "set_block_alignment" => Ok(Some(OpenDocCommand::SetBlockAlignment(
+            SetBlockNamedValueArgs {
+                block_id: arg_string(args, "blockId")?,
+                value: arg_string(args, "alignment")?,
+            },
+        ))),
+        "set_editor_selection_block_alignment" => {
+            Ok(Some(OpenDocCommand::SetEditorSelectionBlockAlignment(
+                SetEditorSelectionBlockNamedValueArgs {
+                    selection: editor_selection_arg(args)?,
+                    value: arg_string(args, "alignment")?,
+                },
+            )))
+        }
+        "set_block_indent_start" => Ok(Some(OpenDocCommand::SetBlockIndentStart(
+            SetBlockLengthArgs {
+                block_id: arg_string(args, "blockId")?,
+                twips: arg_i32(args, "twips")?,
+            },
+        ))),
+        "set_editor_selection_block_indent_start" => Ok(Some(
+            OpenDocCommand::SetEditorSelectionBlockIndentStart(SetEditorSelectionBlockLengthArgs {
+                selection: editor_selection_arg(args)?,
+                twips: arg_i32(args, "twips")?,
+            }),
+        )),
+        "set_block_indent_end" => Ok(Some(OpenDocCommand::SetBlockIndentEnd(
+            SetBlockLengthArgs {
+                block_id: arg_string(args, "blockId")?,
+                twips: arg_i32(args, "twips")?,
+            },
+        ))),
+        "set_editor_selection_block_indent_end" => Ok(Some(
+            OpenDocCommand::SetEditorSelectionBlockIndentEnd(SetEditorSelectionBlockLengthArgs {
+                selection: editor_selection_arg(args)?,
+                twips: arg_i32(args, "twips")?,
+            }),
+        )),
+        "set_block_indent_first_line" => Ok(Some(OpenDocCommand::SetBlockIndentFirstLine(
+            SetBlockLengthArgs {
+                block_id: arg_string(args, "blockId")?,
+                twips: arg_i32(args, "twips")?,
+            },
+        ))),
+        "set_editor_selection_block_indent_first_line" => Ok(Some(
+            OpenDocCommand::SetEditorSelectionBlockIndentFirstLine(
+                SetEditorSelectionBlockLengthArgs {
+                    selection: editor_selection_arg(args)?,
+                    twips: arg_i32(args, "twips")?,
+                },
+            ),
+        )),
+        "set_block_line_spacing" => Ok(Some(OpenDocCommand::SetBlockLineSpacing(
+            SetBlockLineSpacingArgs {
+                block_id: arg_string(args, "blockId")?,
+                mode: arg_string(args, "spacingMode")?,
+                value: arg_i32(args, "spacingValue")?,
+            },
+        ))),
+        "set_editor_selection_block_line_spacing" => {
+            Ok(Some(OpenDocCommand::SetEditorSelectionBlockLineSpacing(
+                SetEditorSelectionBlockLineSpacingArgs {
+                    selection: editor_selection_arg(args)?,
+                    mode: arg_string(args, "spacingMode")?,
+                    value: arg_i32(args, "spacingValue")?,
+                },
+            )))
+        }
+        "set_block_space_before" => Ok(Some(OpenDocCommand::SetBlockSpaceBefore(
+            SetBlockLengthArgs {
+                block_id: arg_string(args, "blockId")?,
+                twips: arg_i32(args, "twips")?,
+            },
+        ))),
+        "set_editor_selection_block_space_before" => Ok(Some(
+            OpenDocCommand::SetEditorSelectionBlockSpaceBefore(SetEditorSelectionBlockLengthArgs {
+                selection: editor_selection_arg(args)?,
+                twips: arg_i32(args, "twips")?,
+            }),
+        )),
+        "set_block_space_after" => Ok(Some(OpenDocCommand::SetBlockSpaceAfter(
+            SetBlockLengthArgs {
+                block_id: arg_string(args, "blockId")?,
+                twips: arg_i32(args, "twips")?,
+            },
+        ))),
+        "set_editor_selection_block_space_after" => Ok(Some(
+            OpenDocCommand::SetEditorSelectionBlockSpaceAfter(SetEditorSelectionBlockLengthArgs {
+                selection: editor_selection_arg(args)?,
+                twips: arg_i32(args, "twips")?,
+            }),
+        )),
+        "set_block_direction" => Ok(Some(OpenDocCommand::SetBlockDirection(
+            SetBlockNamedValueArgs {
+                block_id: arg_string(args, "blockId")?,
+                value: arg_string(args, "direction")?,
+            },
+        ))),
+        "set_editor_selection_block_direction" => {
+            Ok(Some(OpenDocCommand::SetEditorSelectionBlockDirection(
+                SetEditorSelectionBlockNamedValueArgs {
+                    selection: editor_selection_arg(args)?,
+                    value: arg_string(args, "direction")?,
+                },
+            )))
+        }
+        "clear_block_property" => Ok(Some(OpenDocCommand::ClearBlockProperty(
+            ClearBlockPropertyArgs {
+                block_id: arg_string(args, "blockId")?,
+                key: arg_string(args, "key")?,
+            },
+        ))),
+        "clear_editor_selection_block_property" => {
+            Ok(Some(OpenDocCommand::ClearEditorSelectionBlockProperty(
+                ClearEditorSelectionBlockPropertyArgs {
+                    selection: editor_selection_arg(args)?,
+                    key: arg_string(args, "key")?,
+                },
+            )))
+        }
+        "set_list_item_checked" => Ok(Some(OpenDocCommand::SetListItemChecked(
+            SetListItemCheckedArgs {
+                block_id: arg_string(args, "blockId")?,
+                checked: arg_bool(args, "checked")?,
+            },
+        ))),
+        "layout_document" => Ok(Some(OpenDocCommand::LayoutDocument)),
+        "find_in_document" => Ok(Some(OpenDocCommand::FindInDocument(FindInDocumentArgs {
+            find: find_options_arg(args)?,
+        }))),
+        "replace_match_in_document" => Ok(Some(OpenDocCommand::ReplaceMatchInDocument(
+            ReplaceMatchInDocumentArgs {
+                find: find_options_arg(args)?,
+                replacement: arg_string(args, "replacement")?,
+                match_index: arg_u32(args, "matchIndex")? as usize,
+            },
+        ))),
+        "replace_all_in_document" => Ok(Some(OpenDocCommand::ReplaceAllInDocument(
+            ReplaceAllInDocumentArgs {
+                find: find_options_arg(args)?,
+                replacement: arg_string(args, "replacement")?,
+            },
+        ))),
+        "adjust_editor_selection_indent" => Ok(Some(OpenDocCommand::AdjustEditorSelectionIndent(
+            AdjustEditorSelectionListIndentArgs {
+                selection: editor_selection_arg(args)?,
+                delta: arg_i8(args, "delta")?,
+            },
+        ))),
         "add_heading" => Ok(Some(OpenDocCommand::AddHeading(AddHeadingArgs {
             text: arg_string(args, "text")?,
             level: arg_u8(args, "level")?,
@@ -852,20 +626,20 @@ pub fn parse_json_command(
         "add_list_item" => Ok(Some(OpenDocCommand::AddListItem(AddListItemArgs {
             text: arg_string(args, "text")?,
             level: arg_u8(args, "level")?,
-            ordered: arg_bool(args, "ordered")?,
+            list_kind: arg_string(args, "listKind")?,
         }))),
         "insert_list_item_after" => Ok(Some(OpenDocCommand::InsertListItemAfter(
             InsertListItemAfterArgs {
                 after_block_id: arg_string(args, "afterBlockId")?,
                 text: arg_string(args, "text")?,
                 level: arg_u8(args, "level")?,
-                ordered: arg_bool(args, "ordered")?,
+                list_kind: arg_string(args, "listKind")?,
             },
         ))),
         "update_list_item" => Ok(Some(OpenDocCommand::UpdateListItem(UpdateListItemArgs {
             block_id: arg_string(args, "blockId")?,
             level: arg_u8(args, "level")?,
-            ordered: arg_bool(args, "ordered")?,
+            list_kind: arg_string(args, "listKind")?,
         }))),
         "adjust_editor_selection_list_indent" => Ok(Some(
             OpenDocCommand::AdjustEditorSelectionListIndent(AdjustEditorSelectionListIndentArgs {
@@ -901,6 +675,71 @@ pub fn parse_json_command(
             row_id: arg_string(args, "rowId")?,
             cell_id: arg_string(args, "cellId")?,
         }))),
+        "insert_table_column" => Ok(Some(OpenDocCommand::InsertTableColumn(
+            InsertTableColumnArgs {
+                table_block_id: arg_string(args, "tableBlockId")?,
+                after_column_id: arg_optional_string(args, "afterColumnId")?,
+            },
+        ))),
+        "delete_table_column" => Ok(Some(OpenDocCommand::DeleteTableColumn(TableColumnArgs {
+            table_block_id: arg_string(args, "tableBlockId")?,
+            column_id: arg_string(args, "columnId")?,
+        }))),
+        "set_table_column_width" => Ok(Some(OpenDocCommand::SetTableColumnWidth(
+            SetTableColumnWidthArgs {
+                table_block_id: arg_string(args, "tableBlockId")?,
+                column_id: arg_string(args, "columnId")?,
+                twips: arg_i32(args, "twips")?,
+            },
+        ))),
+        "clear_table_column_width" => Ok(Some(OpenDocCommand::ClearTableColumnWidth(
+            TableColumnArgs {
+                table_block_id: arg_string(args, "tableBlockId")?,
+                column_id: arg_string(args, "columnId")?,
+            },
+        ))),
+        "merge_table_cells" => Ok(Some(OpenDocCommand::MergeTableCells(MergeTableCellsArgs {
+            cell_id: arg_string(args, "cellId")?,
+            row_span: arg_u32(args, "rowSpan")?,
+            column_span: arg_u32(args, "columnSpan")?,
+        }))),
+        "split_table_cell" => Ok(Some(OpenDocCommand::SplitTableCell(TableCellArgs {
+            cell_id: arg_string(args, "cellId")?,
+        }))),
+        "set_table_cell_background" => Ok(Some(OpenDocCommand::SetTableCellBackground(
+            SetTableCellBackgroundArgs {
+                cell_id: arg_string(args, "cellId")?,
+                color: arg_string(args, "color")?,
+            },
+        ))),
+        "set_table_cell_border" => Ok(Some(OpenDocCommand::SetTableCellBorder(
+            SetTableCellBorderArgs {
+                cell_id: arg_string(args, "cellId")?,
+                edge: arg_string(args, "edge")?,
+                style: arg_string(args, "style")?,
+                twips: arg_i32(args, "twips")?,
+                color: arg_string(args, "color")?,
+            },
+        ))),
+        "set_table_cell_vertical_alignment" => Ok(Some(
+            OpenDocCommand::SetTableCellVerticalAlignment(SetTableCellVerticalAlignmentArgs {
+                cell_id: arg_string(args, "cellId")?,
+                alignment: arg_string(args, "alignment")?,
+            }),
+        )),
+        "set_table_cell_padding" => Ok(Some(OpenDocCommand::SetTableCellPadding(
+            SetTableCellPaddingArgs {
+                cell_id: arg_string(args, "cellId")?,
+                edge: arg_string(args, "edge")?,
+                twips: arg_i32(args, "twips")?,
+            },
+        ))),
+        "clear_table_cell_property" => Ok(Some(OpenDocCommand::ClearTableCellProperty(
+            ClearTableCellPropertyArgs {
+                cell_id: arg_string(args, "cellId")?,
+                key: arg_string(args, "key")?,
+            },
+        ))),
         "add_citation" => Ok(Some(OpenDocCommand::AddCitation)),
         "insert_citation" => Ok(Some(OpenDocCommand::InsertCitation(InsertCitationArgs {
             reference_id: arg_string(args, "referenceId")?,
@@ -1118,6 +957,34 @@ pub fn parse_json_command(
                 blob_hash: arg_string(args, "blobHash")?,
             },
         ))),
+        "set_image_block_width" => Ok(Some(OpenDocCommand::SetImageBlockWidth(
+            ImageBlockLengthArgs {
+                block_id: arg_string(args, "blockId")?,
+                twips: arg_i32(args, "twips")?,
+            },
+        ))),
+        "set_image_block_height" => Ok(Some(OpenDocCommand::SetImageBlockHeight(
+            ImageBlockLengthArgs {
+                block_id: arg_string(args, "blockId")?,
+                twips: arg_i32(args, "twips")?,
+            },
+        ))),
+        "set_image_block_size" => Ok(Some(OpenDocCommand::SetImageBlockSize(
+            ImageBlockSizeArgs {
+                block_id: arg_string(args, "blockId")?,
+                width_twips: arg_i32(args, "widthTwips")?,
+                height_twips: arg_i32(args, "heightTwips")?,
+            },
+        ))),
+        "clear_image_block_size" => Ok(Some(OpenDocCommand::ClearImageBlockSize(BlockIdArgs {
+            block_id: arg_string(args, "blockId")?,
+        }))),
+        "set_image_block_placement" => Ok(Some(OpenDocCommand::SetImageBlockPlacement(
+            ImageBlockPlacementArgs {
+                block_id: arg_string(args, "blockId")?,
+                placement: arg_string(args, "placement")?,
+            },
+        ))),
         "describe_spreadsheet_selection" => Ok(Some(OpenDocCommand::DescribeSpreadsheetSelection(
             spreadsheet_selection_args(args)?,
         ))),
@@ -1139,6 +1006,7 @@ pub fn parse_json_command(
                 sheet_id: arg_string(args, "sheetId")?,
                 origin: arg_string(args, "origin")?,
                 text: arg_string(args, "text")?,
+                source_origin: arg_optional_string(args, "sourceOrigin")?,
             },
         ))),
         "clear_spreadsheet_selection" => Ok(Some(OpenDocCommand::ClearSpreadsheetSelection(
@@ -1341,6 +1209,39 @@ pub fn parse_json_command(
             source_range: arg_string(args, "sourceRange")?,
             target_address: arg_string(args, "targetAddress")?,
         }))),
+        "sort_spreadsheet_range" => Ok(Some(OpenDocCommand::SortSpreadsheetRange(SortRangeArgs {
+            sheet_id: arg_string(args, "sheetId")?,
+            range: arg_string(args, "range")?,
+            column: arg_string(args, "column")?,
+            descending: arg_bool(args, "descending")?,
+            has_header: arg_bool(args, "hasHeader")?,
+        }))),
+        "fill_spreadsheet_range" => Ok(Some(OpenDocCommand::FillSpreadsheetRange(FillRangeArgs {
+            sheet_id: arg_string(args, "sheetId")?,
+            source_range: arg_string(args, "sourceRange")?,
+            target_range: arg_string(args, "targetRange")?,
+        }))),
+        "import_spreadsheet_csv" => Ok(Some(OpenDocCommand::ImportSpreadsheetCsv(
+            ImportSpreadsheetCsvArgs {
+                sheet_id: arg_string(args, "sheetId")?,
+                origin: arg_string(args, "origin")?,
+                text: arg_string(args, "text")?,
+                delimiter: arg_optional_string(args, "delimiter")?,
+            },
+        ))),
+        "export_spreadsheet_csv" => Ok(Some(OpenDocCommand::ExportSpreadsheetCsv(
+            ExportSpreadsheetCsvArgs {
+                sheet_id: arg_string(args, "sheetId")?,
+                delimiter: arg_optional_string(args, "delimiter")?,
+            },
+        ))),
+        "import_spreadsheet_xlsx" => Ok(Some(OpenDocCommand::ImportSpreadsheetXlsx(
+            ImportSpreadsheetXlsxArgs {
+                title: arg_string(args, "title")?,
+                base64: arg_string(args, "base64")?,
+            },
+        ))),
+        "export_spreadsheet_xlsx" => Ok(Some(OpenDocCommand::ExportSpreadsheetXlsx)),
         "add_spreadsheet_named_range" => Ok(Some(OpenDocCommand::AddSpreadsheetNamedRange(
             named_range_args(args)?,
         ))),
@@ -1355,287 +1256,4 @@ pub fn parse_json_command(
         )),
         _ => Ok(None),
     }
-}
-
-fn repository_path(args: &Value) -> Result<RepositoryPathArgs, CommandParseError> {
-    Ok(RepositoryPathArgs {
-        path: arg_string(args, "path")?,
-    })
-}
-
-fn repository_namespace(args: &Value) -> Result<RepositoryNamespaceArgs, CommandParseError> {
-    Ok(RepositoryNamespaceArgs {
-        path: arg_string(args, "path")?,
-        namespace: arg_string(args, "namespace")?,
-    })
-}
-
-fn repository_document(args: &Value) -> Result<RepositoryDocumentArgs, CommandParseError> {
-    Ok(RepositoryDocumentArgs {
-        path: arg_string(args, "path")?,
-        document_uuid: arg_string(args, "documentUuid")?,
-    })
-}
-
-fn repository_namespace_document(
-    args: &Value,
-) -> Result<RepositoryNamespaceDocumentArgs, CommandParseError> {
-    Ok(RepositoryNamespaceDocumentArgs {
-        path: arg_string(args, "path")?,
-        namespace: arg_string(args, "namespace")?,
-        document_uuid: arg_string(args, "documentUuid")?,
-    })
-}
-
-fn repository_doi(args: &Value) -> Result<RepositoryDoiArgs, CommandParseError> {
-    Ok(RepositoryDoiArgs {
-        path: arg_string(args, "path")?,
-        doi: arg_string(args, "doi")?,
-    })
-}
-
-fn repository_namespace_doi(args: &Value) -> Result<RepositoryNamespaceDoiArgs, CommandParseError> {
-    Ok(RepositoryNamespaceDoiArgs {
-        path: arg_string(args, "path")?,
-        namespace: arg_string(args, "namespace")?,
-        doi: arg_string(args, "doi")?,
-    })
-}
-
-fn block_id_args(args: &Value) -> Result<BlockIdArgs, CommandParseError> {
-    Ok(BlockIdArgs {
-        block_id: arg_string(args, "blockId")?,
-    })
-}
-
-fn after_block_args(args: &Value) -> Result<AfterBlockArgs, CommandParseError> {
-    Ok(AfterBlockArgs {
-        after_block_id: arg_string(args, "afterBlockId")?,
-    })
-}
-
-fn insert_table_after_args(args: &Value) -> Result<InsertTableAfterArgs, CommandParseError> {
-    let after_block_id = arg_string(args, "afterBlockId")?;
-    match (
-        args.get("rows").and_then(Value::as_u64),
-        args.get("columns").and_then(Value::as_u64),
-    ) {
-        (Some(rows), Some(columns)) => Ok(InsertTableAfterArgs::Sized {
-            after_block_id,
-            rows: rows as usize,
-            columns: columns as usize,
-        }),
-        _ => Ok(InsertTableAfterArgs::Default { after_block_id }),
-    }
-}
-
-fn author_body_args(args: &Value) -> Result<AuthorBodyArgs, CommandParseError> {
-    Ok(AuthorBodyArgs {
-        author: arg_string(args, "author")?,
-        body: arg_string(args, "body")?,
-    })
-}
-
-fn text_range_author_body_args(args: &Value) -> Result<TextRangeAuthorBodyArgs, CommandParseError> {
-    Ok(TextRangeAuthorBodyArgs {
-        start_inline_id: arg_string(args, "startInlineId")?,
-        end_inline_id: arg_string(args, "endInlineId")?,
-        author: arg_string(args, "author")?,
-        body: arg_string(args, "body")?,
-    })
-}
-
-fn block_author_body_args(args: &Value) -> Result<BlockAuthorBodyArgs, CommandParseError> {
-    Ok(BlockAuthorBodyArgs {
-        block_id: arg_string(args, "blockId")?,
-        author: arg_string(args, "author")?,
-        body: arg_string(args, "body")?,
-    })
-}
-
-fn thread_author_body_args(args: &Value) -> Result<ThreadAuthorBodyArgs, CommandParseError> {
-    Ok(ThreadAuthorBodyArgs {
-        thread_id: arg_string(args, "threadId")?,
-        author: arg_string(args, "author")?,
-        body: arg_string(args, "body")?,
-    })
-}
-
-fn thread_id_args(args: &Value) -> Result<ThreadIdArgs, CommandParseError> {
-    Ok(ThreadIdArgs {
-        thread_id: arg_string(args, "threadId")?,
-    })
-}
-
-fn thread_comment_id_args(args: &Value) -> Result<ThreadCommentIdArgs, CommandParseError> {
-    Ok(ThreadCommentIdArgs {
-        thread_id: arg_string(args, "threadId")?,
-        comment_id: arg_string(args, "commentId")?,
-    })
-}
-
-fn author_text_args(args: &Value) -> Result<AuthorTextArgs, CommandParseError> {
-    Ok(AuthorTextArgs {
-        author: arg_string(args, "author")?,
-        text: arg_string(args, "text")?,
-    })
-}
-
-fn text_range_author_text_args(args: &Value) -> Result<TextRangeAuthorTextArgs, CommandParseError> {
-    Ok(TextRangeAuthorTextArgs {
-        start_inline_id: arg_string(args, "startInlineId")?,
-        end_inline_id: arg_string(args, "endInlineId")?,
-        author: arg_string(args, "author")?,
-        text: arg_string(args, "text")?,
-    })
-}
-
-fn block_author_text_args(args: &Value) -> Result<BlockAuthorTextArgs, CommandParseError> {
-    Ok(BlockAuthorTextArgs {
-        block_id: arg_string(args, "blockId")?,
-        author: arg_string(args, "author")?,
-        text: arg_string(args, "text")?,
-    })
-}
-
-fn text_range_author_args(args: &Value) -> Result<TextRangeAuthorArgs, CommandParseError> {
-    Ok(TextRangeAuthorArgs {
-        start_inline_id: arg_string(args, "startInlineId")?,
-        end_inline_id: arg_string(args, "endInlineId")?,
-        author: arg_string(args, "author")?,
-    })
-}
-
-fn format_suggestion_args(args: &Value) -> Result<FormatSuggestionArgs, CommandParseError> {
-    Ok(FormatSuggestionArgs {
-        author: arg_string(args, "author")?,
-        inline_id: arg_string(args, "inlineId")?,
-        mark_kind: arg_string(args, "markKind")?,
-        value: arg_optional_string(args, "value")?,
-    })
-}
-
-fn bibliography_reference_metadata_args(
-    args: &Value,
-) -> Result<BibliographyReferenceMetadataArgs, CommandParseError> {
-    Ok(BibliographyReferenceMetadataArgs {
-        title: arg_string(args, "title")?,
-        authors: arg_string_vec(args, "authors")?,
-        issued: arg_optional_string(args, "issued")?,
-        doi: arg_optional_string(args, "doi")?,
-        url: arg_optional_string(args, "url")?,
-    })
-}
-
-fn reference_id_args(args: &Value) -> Result<ReferenceIdArgs, CommandParseError> {
-    Ok(ReferenceIdArgs {
-        reference_id: arg_string(args, "referenceId")?,
-    })
-}
-
-fn citation_id_args(args: &Value) -> Result<CitationIdArgs, CommandParseError> {
-    Ok(CitationIdArgs {
-        citation_id: arg_string(args, "citationId")?,
-    })
-}
-
-fn inline_id_args(args: &Value) -> Result<InlineIdArgs, CommandParseError> {
-    Ok(InlineIdArgs {
-        inline_id: arg_string(args, "inlineId")?,
-    })
-}
-
-fn text_mark_args(args: &Value) -> Result<TextMarkArgs, CommandParseError> {
-    Ok(TextMarkArgs {
-        inline_id: arg_string(args, "inlineId")?,
-        mark_kind: arg_string(args, "markKind")?,
-        value: arg_optional_string(args, "value")?,
-    })
-}
-
-fn text_mark_range_args(args: &Value) -> Result<TextMarkRangeArgs, CommandParseError> {
-    Ok(TextMarkRangeArgs {
-        start_inline_id: arg_string(args, "startInlineId")?,
-        end_inline_id: arg_string(args, "endInlineId")?,
-        mark_kind: arg_string(args, "markKind")?,
-        value: arg_optional_string(args, "value")?,
-    })
-}
-
-fn sheet_id_args(args: &Value) -> Result<SheetIdArgs, CommandParseError> {
-    Ok(SheetIdArgs {
-        sheet_id: arg_string(args, "sheetId")?,
-    })
-}
-
-fn sheet_rename_args(args: &Value) -> Result<SheetRenameArgs, CommandParseError> {
-    Ok(SheetRenameArgs {
-        sheet_id: arg_string(args, "sheetId")?,
-        title: arg_string(args, "title")?,
-    })
-}
-
-fn sheet_row_args(args: &Value) -> Result<SheetRowArgs, CommandParseError> {
-    Ok(SheetRowArgs {
-        sheet_id: arg_string(args, "sheetId")?,
-        row: arg_string(args, "row")?,
-    })
-}
-
-fn sheet_column_args(args: &Value) -> Result<SheetColumnArgs, CommandParseError> {
-    Ok(SheetColumnArgs {
-        sheet_id: arg_string(args, "sheetId")?,
-        column: arg_string(args, "column")?,
-    })
-}
-
-fn spreadsheet_selection_args(args: &Value) -> Result<SpreadsheetSelectionArgs, CommandParseError> {
-    Ok(SpreadsheetSelectionArgs {
-        sheet_id: arg_string(args, "sheetId")?,
-        anchor: arg_string(args, "anchor")?,
-        focus: arg_string(args, "focus")?,
-    })
-}
-
-fn cell_comment_id_args(args: &Value) -> Result<CellCommentIdArgs, CommandParseError> {
-    Ok(CellCommentIdArgs {
-        comment_id: arg_string(args, "commentId")?,
-    })
-}
-
-fn sheet_address_args(args: &Value) -> Result<SheetAddressArgs, CommandParseError> {
-    Ok(SheetAddressArgs {
-        sheet_id: arg_string(args, "sheetId")?,
-        address: arg_string(args, "address")?,
-    })
-}
-
-fn sheet_range_args(args: &Value) -> Result<SheetRangeArgs, CommandParseError> {
-    Ok(SheetRangeArgs {
-        sheet_id: arg_string(args, "sheetId")?,
-        range: arg_string(args, "range")?,
-    })
-}
-
-fn protected_range_args(args: &Value) -> Result<ProtectedRangeArgs, CommandParseError> {
-    Ok(ProtectedRangeArgs {
-        sheet_id: arg_string(args, "sheetId")?,
-        range: arg_string(args, "range")?,
-        description: arg_string(args, "description")?,
-        warning_only: arg_bool(args, "warningOnly")?,
-    })
-}
-
-fn named_range_args(args: &Value) -> Result<NamedRangeArgs, CommandParseError> {
-    Ok(NamedRangeArgs {
-        sheet_id: arg_string(args, "sheetId")?,
-        name: arg_string(args, "name")?,
-        range: arg_string(args, "range")?,
-    })
-}
-
-fn named_range_name_args(args: &Value) -> Result<NamedRangeNameArgs, CommandParseError> {
-    Ok(NamedRangeNameArgs {
-        name: arg_string(args, "name")?,
-    })
 }

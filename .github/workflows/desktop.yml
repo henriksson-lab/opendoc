@@ -7,14 +7,18 @@ on:
       - "Cargo.toml"
       - "crates/**"
       - "apps/desktop/**"
-      - "docs/GOOGLE_DOCS_EQUIVALENT_PLAN.md"
+      - "PLAN77.md"
+      - "docs/RESTRUCTURE_PLAN.md"
+      - "docs/GOOGLE_DOCS_PARITY_TODO.md"
   pull_request:
     paths:
       - ".github/workflows/desktop.yml"
       - "Cargo.toml"
       - "crates/**"
       - "apps/desktop/**"
-      - "docs/GOOGLE_DOCS_EQUIVALENT_PLAN.md"
+      - "PLAN77.md"
+      - "docs/RESTRUCTURE_PLAN.md"
+      - "docs/GOOGLE_DOCS_PARITY_TODO.md"
 
 jobs:
   desktop-linux:

@@ -326,19 +326,20 @@ state = __test.getState();
 assert.equal(state.doc.blocks.length, blockCount + 1, "one Enter creates exactly one new block");
 
 // ---- Enter inside a list item --------------------------------------------------
-for (const ordered of [false, true]) {
+for (const listKind of ["bullet", "ordered", "checklist"]) {
   state = __test.getState();
   let item = state.doc.blocks[state.doc.blocks.length - 1];
   __test.setSelection({
     anchor: { block_id: item.id, inline_id: item.content[0].id, offset: 0 },
     focus: { block_id: item.id, inline_id: item.content[0].id, offset: 0 },
   });
-  click(`[data-toolbar] [data-action='style:list:${ordered}']`);
+  click(`[data-toolbar] [data-action='style:list:${listKind}']`);
   await settle(15);
   state = __test.getState();
   item = state.doc.blocks[state.doc.blocks.length - 1];
   assert.equal(item.kind, "list-item", "the list button makes a list item");
-  assert.equal(item.ordered, ordered, "the list button keeps the requested numbering");
+  assert.equal(item.list_kind, listKind, "the list button applies the requested marker");
+  assert.equal(item.checked, listKind === "checklist" ? false : null, "only a checklist item carries a checkbox, and a new one is open");
 
   placeCaret(item.content[0].id, 0);
   beforeInput(body, "insertText", "item");
@@ -352,7 +353,7 @@ for (const ordered of [false, true]) {
   assert.equal(state.doc.blocks.length, listCount + 1, "Enter in a list item adds exactly one block");
   const continuation = state.doc.blocks[state.doc.blocks.length - 1];
   assert.equal(continuation.kind, "list-item", "Enter in a list item continues the list");
-  assert.equal(continuation.ordered, ordered, "the continuation keeps the numbering");
+  assert.equal(continuation.list_kind, listKind, "the continuation keeps the marker");
   assert.equal(continuation.level, state.doc.blocks[state.doc.blocks.length - 2].level, "the continuation keeps the level");
 
   // Enter on the empty continuation leaves the list instead of adding a bullet.
@@ -363,6 +364,49 @@ for (const ordered of [false, true]) {
   assert.equal(state.doc.blocks.length, listCount + 1, "leaving the list adds no block");
   assert.equal(state.doc.blocks[state.doc.blocks.length - 1].kind, "paragraph", "Enter on an empty list item leaves the list");
 }
+
+// ---- Unsaved-work guard (FS-6) ---------------------------------------------------
+// The guard lives in the Rust dispatcher, so every document-replacing command
+// is refused over unsaved work no matter which action asked for it. These four
+// used to replace the open document silently.
+state = __test.getState();
+assert.ok(state.doc.has_unsaved_changes, "the document under test has unsaved work");
+const replacing = [
+  ["open_local_repository", { path: "/nonexistent", documentUuid: "doc" }],
+  ["open_flat_repository", { path: "/nonexistent", namespace: "ns", documentUuid: "doc" }],
+  ["import_doc_or_docx_path", { path: "/nonexistent.docx" }],
+  ["import_docx_base64", { name: "x.docx", base64: "" }],
+  ["import_google_docs_json", { title: "x", jsonText: "{}" }],
+  ["create_document", { title: "Replacement" }],
+];
+for (const [command, args] of replacing) {
+  let refused = null;
+  try {
+    await invokeModule.dispatch(command, args);
+  } catch (error) {
+    refused = String(error?.message ?? error);
+  }
+  assert.ok(refused, `${command} must be refused while there are unsaved changes`);
+  assert.ok(refused.includes("UnsavedChanges"), `${command} refused with: ${refused}`);
+}
+state = __test.getState();
+assert.ok(state.doc.has_unsaved_changes, "a refused replacement leaves the work alone");
+
+// Declining the prompt cancels the action instead of losing the document.
+const titleBefore = state.doc.title;
+const blocksBefore = state.doc.blocks.length;
+const declined = __test.runAction("new-document");
+await settle(5);
+const prompt = $("dialog.modal[open]");
+assert.ok(prompt.textContent.includes("Discard unsaved changes?"), "the guard raises one prompt");
+prompt.querySelector("[data-cancel]").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+prompt.close();
+await declined;
+await settle(10);
+state = __test.getState();
+assert.equal(state.doc.title, titleBefore, "declining keeps the document");
+assert.equal(state.doc.blocks.length, blocksBefore, "declining keeps the content");
+assert.equal(window.document.querySelectorAll("dialog.modal[open]").length, 0, "the prompt is not stacked");
 
 // ---- Back to home ---------------------------------------------------------------
 await settle(10);
@@ -402,6 +446,67 @@ await settle(30);
 state = __test.getState();
 assert.equal(dialogsAnswered, 1, "one click on + raises exactly one dialog");
 assert.equal(state.doc.workbook.sheets.length, sheetsBefore + 1, "one click on + adds exactly one sheet");
+
+// ---- Versions panel (CO-16 / UI-27) ----------------------------------------
+// The browser runtime has no filesystem repository, so the panel is rendered
+// against a known view through the test seam; the repository-backed path is
+// covered by the Rust tests in app/version_service.rs.
+click("[data-action='toggle-panel:versions']");
+await settle(6);
+assert.match(
+  $("[data-side-panel]").textContent,
+  /Save this document to a repository/,
+  "versions panel explains the no-repository case",
+);
+assert.ok(
+  $("[data-error]").hidden || $("[data-error]").textContent.trim() === "",
+  "opening versions on an unsaved document raises no error banner",
+);
+
+__test.setVersionView({
+  document_uuid: "doc-1",
+  branch: "main",
+  repository_root: "/tmp/repo",
+  repository_backend: "local",
+  head: "sha256:aaaa",
+  current: "sha256:aaaa",
+  truncated: false,
+  warnings: [{ code: "version-history-problem", message: "sha256:cccc: snapshot object is missing" }],
+  versions: [
+    { manifest: "sha256:aaaa", parent: "sha256:bbbb", snapshot: "sha256:1111", created_at_ms: 1757500000000, signers: [{ signer: "ssh-ed25519 AAAA", signer_display: "Ada", title: "Doc", signed_at_ms: 1757500000000 }], label: "Sent to legal", label_author: "Ada", snapshot_present: true, is_head: true, is_current: true },
+    { manifest: "sha256:bbbb", parent: null, snapshot: "sha256:2222", created_at_ms: 1757400000000, signers: [], label: null, label_author: null, snapshot_present: true, is_head: false, is_current: false },
+    { manifest: "sha256:cccc", parent: null, snapshot: "sha256:3333", created_at_ms: 1757300000000, signers: [], label: null, label_author: null, snapshot_present: false, is_head: false, is_current: false },
+  ],
+  preview: null,
+  diff: {
+    from_manifest: "sha256:bbbb",
+    to_manifest: "sha256:aaaa",
+    added: 1,
+    removed: 1,
+    changed: 1,
+    entries: [
+      { change: "added", block_id: "b2", kind: "paragraph", path: "2", before_text: "", after_text: "new text" },
+      { change: "removed", block_id: "b3", kind: "heading 2", path: "3", before_text: "gone", after_text: "" },
+      { change: "changed", block_id: "b1", kind: "paragraph", path: "1", before_text: "old", after_text: "new" },
+    ],
+  },
+});
+await settle(6);
+
+const versionsPanel = $("[data-side-panel]");
+assert.match(versionsPanel.textContent, /Sent to legal/, "a named version shows its label, not its digest");
+assert.match(versionsPanel.textContent, /Ada/, "signers are listed");
+assert.match(versionsPanel.textContent, /snapshot missing/, "a version with no snapshot object is badged");
+assert.match(versionsPanel.textContent, /snapshot object is missing/, "history warnings are surfaced");
+assert.match(versionsPanel.textContent, /1 added/, "diff counts are shown");
+
+// Restore must be refused for the open version and for one whose snapshot is gone.
+const restores = Array.from(versionsPanel.querySelectorAll(".version [data-action='version:restore']"));
+assert.deepEqual(
+  restores.map((button) => button.disabled),
+  [true, false, true],
+  "restore is disabled for the current version and the one missing its snapshot",
+);
 
 console.log("desktop smoke passed");
 process.exit(0);

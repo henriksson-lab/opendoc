@@ -18,8 +18,7 @@ impl OpenDocApp {
             workbook.set_cell(&address, value.clone());
             Ok(())
         })?;
-        self.push_spreadsheet_operation(
-            "set-spreadsheet-cell",
+        self.journal_spreadsheet_operation(
             &format!("set {address}"),
             AppSpreadsheetOperation::SetCell {
                 sheet_id,
@@ -45,8 +44,7 @@ impl OpenDocApp {
                     workbook.timezone.clone(),
                 ))
             })?;
-        self.push_spreadsheet_operation(
-            "set-spreadsheet-workbook-metadata",
+        self.journal_spreadsheet_operation(
             "set spreadsheet workbook metadata",
             AppSpreadsheetOperation::SetWorkbookMetadata {
                 title,
@@ -80,8 +78,7 @@ impl OpenDocApp {
             Ok(())
         })?;
         for (address, value) in entries {
-            self.push_spreadsheet_operation(
-                "set-spreadsheet-cell",
+            self.journal_spreadsheet_operation(
                 &format!("set {address}"),
                 AppSpreadsheetOperation::SetCell {
                     sheet_id: sheet_id.clone(),
@@ -108,8 +105,7 @@ impl OpenDocApp {
                 .map(|sheet| sheet.title.clone())
                 .ok_or_else(|| AppApiError::NotFound(format!("sheet {sheet_id} was not found")))
         })?;
-        self.push_spreadsheet_operation(
-            "add-spreadsheet-sheet",
+        self.journal_spreadsheet_operation(
             &format!("add sheet {sheet_id}"),
             AppSpreadsheetOperation::AddSheet { sheet_id, title },
         );
@@ -137,8 +133,7 @@ impl OpenDocApp {
             workbook.rewrite_formula_sheet_title_references(&old_title, &title);
             Ok(())
         })?;
-        self.push_spreadsheet_operation(
-            "rename-spreadsheet-sheet",
+        self.journal_spreadsheet_operation(
             &format!("rename sheet {sheet_id}"),
             AppSpreadsheetOperation::RenameSheet { sheet_id, title },
         );
@@ -167,8 +162,7 @@ impl OpenDocApp {
                 Some(true) => Ok(()),
             },
         )?;
-        self.push_spreadsheet_operation(
-            "delete-spreadsheet-sheet",
+        self.journal_spreadsheet_operation(
             &format!("delete sheet {sheet_id}"),
             AppSpreadsheetOperation::DeleteSheet {
                 sheet_id,
@@ -203,8 +197,7 @@ impl OpenDocApp {
             workbook.restore_sheet(sheet.clone(), named_ranges.clone())?;
             Ok(())
         })?;
-        self.push_spreadsheet_operation(
-            "restore-spreadsheet-sheet",
+        self.journal_spreadsheet_operation(
             &format!("restore sheet {sheet_id}"),
             AppSpreadsheetOperation::RestoreSheet {
                 sheet_id,
@@ -228,8 +221,7 @@ impl OpenDocApp {
                 .ok_or_else(|| AppApiError::NotFound(format!("sheet {sheet_id} was not found")))?;
             Ok(())
         })?;
-        self.push_spreadsheet_operation(
-            "add-spreadsheet-row",
+        self.journal_spreadsheet_operation(
             &format!("add row {sheet_id}!{row}"),
             AppSpreadsheetOperation::AddRow { sheet_id, row },
         );
@@ -261,8 +253,7 @@ impl OpenDocApp {
                 Some(true) => Ok(()),
             },
         )?;
-        self.push_spreadsheet_operation(
-            "delete-spreadsheet-row",
+        self.journal_spreadsheet_operation(
             &format!("delete row {sheet_id}!{row}"),
             AppSpreadsheetOperation::DeleteRow {
                 sheet_id,
@@ -291,8 +282,7 @@ impl OpenDocApp {
             workbook.restore_row(&sheet_id, &row, payload.clone())?;
             Ok(())
         })?;
-        self.push_spreadsheet_operation(
-            "restore-spreadsheet-row",
+        self.journal_spreadsheet_operation(
             &format!("restore row {sheet_id}!{row}"),
             AppSpreadsheetOperation::RestoreRow {
                 sheet_id,
@@ -316,8 +306,7 @@ impl OpenDocApp {
                 .ok_or_else(|| AppApiError::NotFound(format!("sheet {sheet_id} was not found")))?;
             Ok(())
         })?;
-        self.push_spreadsheet_operation(
-            "add-spreadsheet-column",
+        self.journal_spreadsheet_operation(
             &format!("add column {sheet_id}!{column}"),
             AppSpreadsheetOperation::AddColumn { sheet_id, column },
         );
@@ -349,8 +338,7 @@ impl OpenDocApp {
                 Some(true) => Ok(()),
             },
         )?;
-        self.push_spreadsheet_operation(
-            "delete-spreadsheet-column",
+        self.journal_spreadsheet_operation(
             &format!("delete column {sheet_id}!{column}"),
             AppSpreadsheetOperation::DeleteColumn {
                 sheet_id,
@@ -377,8 +365,7 @@ impl OpenDocApp {
             workbook.restore_column(&sheet_id, &column, payload.clone())?;
             Ok(())
         })?;
-        self.push_spreadsheet_operation(
-            "restore-spreadsheet-column",
+        self.journal_spreadsheet_operation(
             &format!("restore column {sheet_id}!{column}"),
             AppSpreadsheetOperation::RestoreColumn {
                 sheet_id,
@@ -414,8 +401,7 @@ impl OpenDocApp {
                 .ok_or_else(|| AppApiError::NotFound(format!("sheet {sheet_id} was not found")))?;
             Ok(())
         })?;
-        self.push_spreadsheet_operation(
-            "add-spreadsheet-cell-comment",
+        self.journal_spreadsheet_operation(
             &format!("comment {sheet_id}!{address}"),
             AppSpreadsheetOperation::AddCellComment {
                 sheet_id,
@@ -448,8 +434,7 @@ impl OpenDocApp {
                 })?;
             Ok(())
         })?;
-        self.push_spreadsheet_operation(
-            "update-spreadsheet-cell-comment",
+        self.journal_spreadsheet_operation(
             &format!("update cell comment {comment_id}"),
             AppSpreadsheetOperation::UpdateCellComment { comment_id, body },
         );
@@ -467,8 +452,7 @@ impl OpenDocApp {
             })?;
             Ok(())
         })?;
-        self.push_spreadsheet_operation(
-            "delete-spreadsheet-cell-comment",
+        self.journal_spreadsheet_operation(
             &format!("delete cell comment {comment_id}"),
             AppSpreadsheetOperation::DeleteCellComment { comment_id },
         );
@@ -486,8 +470,7 @@ impl OpenDocApp {
             })?;
             Ok(())
         })?;
-        self.push_spreadsheet_operation(
-            "restore-spreadsheet-cell-comment",
+        self.journal_spreadsheet_operation(
             &format!("restore cell comment {comment_id}"),
             AppSpreadsheetOperation::RestoreCellComment { comment_id },
         );
@@ -507,8 +490,7 @@ impl OpenDocApp {
                     .set_frozen_axes(&sheet_id, frozen_rows, frozen_columns)
                     .ok_or_else(|| AppApiError::NotFound(format!("sheet {sheet_id} was not found")))
             })?;
-        self.push_spreadsheet_operation(
-            "set-spreadsheet-frozen-axes",
+        self.journal_spreadsheet_operation(
             &format!("freeze {sheet_id} rows={frozen_rows} columns={frozen_columns}"),
             AppSpreadsheetOperation::SetFrozenAxes {
                 sheet_id,
@@ -536,8 +518,7 @@ impl OpenDocApp {
                 .ok_or_else(|| AppApiError::NotFound(format!("sheet {sheet_id} was not found")))?;
             Ok(())
         })?;
-        self.push_spreadsheet_operation(
-            "set-spreadsheet-cell-validation",
+        self.journal_spreadsheet_operation(
             &format!("validate {sheet_id}!{address} {}", validation.kind),
             AppSpreadsheetOperation::SetCellValidation {
                 sheet_id,
@@ -570,8 +551,7 @@ impl OpenDocApp {
                 .ok_or_else(|| AppApiError::NotFound(format!("sheet {sheet_id} was not found")))?;
             Ok(())
         })?;
-        self.push_spreadsheet_operation(
-            "clear-spreadsheet-cell-validation",
+        self.journal_spreadsheet_operation(
             &format!("clear validation {sheet_id}!{address}"),
             AppSpreadsheetOperation::ClearCellValidation {
                 sheet_id,
@@ -605,8 +585,7 @@ impl OpenDocApp {
             workbook.restore_cell_validation(&sheet_id, &address, validation.clone())?;
             Ok(())
         })?;
-        self.push_spreadsheet_operation(
-            "restore-spreadsheet-cell-validation",
+        self.journal_spreadsheet_operation(
             &format!("restore validation {sheet_id}!{address}"),
             AppSpreadsheetOperation::RestoreCellValidation {
                 sheet_id,
@@ -630,8 +609,7 @@ impl OpenDocApp {
             })??;
             Ok(())
         })?;
-        self.push_spreadsheet_operation(
-            "merge-spreadsheet-cells",
+        self.journal_spreadsheet_operation(
             &format!("merge {sheet_id}!{range}"),
             AppSpreadsheetOperation::MergeCells { sheet_id, range },
         );
@@ -658,8 +636,7 @@ impl OpenDocApp {
                 .ok_or_else(|| AppApiError::NotFound(format!("sheet {sheet_id} was not found")))?;
             Ok(())
         })?;
-        self.push_spreadsheet_operation(
-            "unmerge-spreadsheet-cells",
+        self.journal_spreadsheet_operation(
             &format!("unmerge {sheet_id}!{range}"),
             AppSpreadsheetOperation::UnmergeCells {
                 sheet_id,
@@ -691,8 +668,7 @@ impl OpenDocApp {
             workbook.restore_merge(&sheet_id, merge.clone())?;
             Ok(())
         })?;
-        self.push_spreadsheet_operation(
-            "restore-spreadsheet-merge",
+        self.journal_spreadsheet_operation(
             &format!("restore merge {sheet_id}!{range}"),
             AppSpreadsheetOperation::RestoreMerge {
                 sheet_id,
@@ -718,8 +694,7 @@ impl OpenDocApp {
                 })??;
             Ok(())
         })?;
-        self.push_spreadsheet_operation(
-            "set-spreadsheet-basic-filter",
+        self.journal_spreadsheet_operation(
             &format!("filter {sheet_id}!{range}"),
             AppSpreadsheetOperation::SetBasicFilter { sheet_id, range },
         );
@@ -744,8 +719,7 @@ impl OpenDocApp {
                 })??;
             Ok(())
         })?;
-        self.push_spreadsheet_operation(
-            "set-spreadsheet-basic-filter-options",
+        self.journal_spreadsheet_operation(
             &format!("filter options {sheet_id}"),
             AppSpreadsheetOperation::SetBasicFilterOptions {
                 sheet_id,
@@ -772,8 +746,7 @@ impl OpenDocApp {
                 .ok_or_else(|| AppApiError::NotFound(format!("sheet {sheet_id} was not found")))?;
             Ok(())
         })?;
-        self.push_spreadsheet_operation(
-            "clear-spreadsheet-basic-filter",
+        self.journal_spreadsheet_operation(
             &format!("clear filter {sheet_id}"),
             AppSpreadsheetOperation::ClearBasicFilter { sheet_id, filter },
         );
@@ -799,8 +772,7 @@ impl OpenDocApp {
             workbook.restore_basic_filter(&sheet_id, filter.clone())?;
             Ok(())
         })?;
-        self.push_spreadsheet_operation(
-            "restore-spreadsheet-basic-filter",
+        self.journal_spreadsheet_operation(
             &format!("restore filter {sheet_id}"),
             AppSpreadsheetOperation::RestoreBasicFilter { sheet_id, filter },
         );
@@ -834,8 +806,7 @@ impl OpenDocApp {
                 })??;
             Ok(())
         })?;
-        self.push_spreadsheet_operation(
-            "add-spreadsheet-protected-range",
+        self.journal_spreadsheet_operation(
             &format!("protect {sheet_id}!{range}"),
             AppSpreadsheetOperation::AddProtectedRange {
                 sheet_id,
@@ -867,8 +838,7 @@ impl OpenDocApp {
                 .ok_or_else(|| AppApiError::NotFound(format!("sheet {sheet_id} was not found")))?;
             Ok(())
         })?;
-        self.push_spreadsheet_operation(
-            "delete-spreadsheet-protected-range",
+        self.journal_spreadsheet_operation(
             &format!("delete protected range {sheet_id}!{range}"),
             AppSpreadsheetOperation::DeleteProtectedRange {
                 sheet_id,
@@ -902,8 +872,7 @@ impl OpenDocApp {
             workbook.restore_protected_range(&sheet_id, protected_range.clone())?;
             Ok(())
         })?;
-        self.push_spreadsheet_operation(
-            "restore-spreadsheet-protected-range",
+        self.journal_spreadsheet_operation(
             &format!("restore protected range {sheet_id}!{range}"),
             AppSpreadsheetOperation::RestoreProtectedRange {
                 sheet_id,
@@ -941,8 +910,7 @@ impl OpenDocApp {
                 })??;
             Ok(())
         })?;
-        self.push_spreadsheet_operation(
-            "update-spreadsheet-protected-range",
+        self.journal_spreadsheet_operation(
             &format!("update protected range {sheet_id}!{range}"),
             AppSpreadsheetOperation::UpdateProtectedRange {
                 sheet_id,
@@ -969,8 +937,7 @@ impl OpenDocApp {
                 .ok_or_else(|| AppApiError::NotFound(format!("sheet {sheet_id} was not found")))?;
             Ok(())
         })?;
-        self.push_spreadsheet_operation(
-            "set-spreadsheet-cell",
+        self.journal_spreadsheet_operation(
             &format!("set {sheet_id}!{address}"),
             AppSpreadsheetOperation::SetCell {
                 sheet_id,
@@ -1004,8 +971,7 @@ impl OpenDocApp {
             Ok(())
         })?;
         for (address, value) in entries {
-            self.push_spreadsheet_operation(
-                "set-spreadsheet-cell",
+            self.journal_spreadsheet_operation(
                 &format!("set {sheet_id}!{address}"),
                 AppSpreadsheetOperation::SetCell {
                     sheet_id: sheet_id.clone(),
@@ -1036,8 +1002,7 @@ impl OpenDocApp {
                 })??;
             Ok(())
         })?;
-        self.push_spreadsheet_operation(
-            "set-spreadsheet-cell-format",
+        self.journal_spreadsheet_operation(
             &format!("format {sheet_id}!{address} {property}"),
             AppSpreadsheetOperation::SetCellFormat {
                 sheet_id,
@@ -1067,8 +1032,7 @@ impl OpenDocApp {
                 })??;
             Ok(())
         })?;
-        self.push_spreadsheet_operation(
-            "set-spreadsheet-row-height",
+        self.journal_spreadsheet_operation(
             &format!("set row height {sheet_id}!{row} {height}"),
             AppSpreadsheetOperation::SetRowHeight {
                 sheet_id,
@@ -1099,8 +1063,7 @@ impl OpenDocApp {
                 })??;
             Ok(())
         })?;
-        self.push_spreadsheet_operation(
-            "set-spreadsheet-column-width",
+        self.journal_spreadsheet_operation(
             &format!("set column width {sheet_id}!{column} {width}"),
             AppSpreadsheetOperation::SetColumnWidth {
                 sheet_id,
@@ -1128,8 +1091,7 @@ impl OpenDocApp {
                 })??;
             Ok(())
         })?;
-        self.push_spreadsheet_operation(
-            "copy-spreadsheet-range",
+        self.journal_spreadsheet_operation(
             &format!("copy {sheet_id}!{} to {target_address}", source_range),
             AppSpreadsheetOperation::CopyRange {
                 sheet_id,
@@ -1138,6 +1100,134 @@ impl OpenDocApp {
             },
         );
         Ok(self.document())
+    }
+
+    /// Sorts the rows of a range by one of its columns (SH-7).
+    pub fn sort_spreadsheet_range(
+        &mut self,
+        sheet_id: impl AsRef<str>,
+        range: impl AsRef<str>,
+        column: impl AsRef<str>,
+        descending: bool,
+        has_header: bool,
+    ) -> Result<AppDocument, AppApiError> {
+        let sheet_id = normalize_sheet_id(sheet_id.as_ref())?;
+        let range = normalize_cell_range(range.as_ref())?;
+        let column = normalize_column_label(column.as_ref())?;
+        self.mutate_spreadsheet(SpreadsheetEvaluationPolicy::Force, |workbook| {
+            workbook
+                .sort_range(&sheet_id, &range, &column, descending, has_header)
+                .ok_or_else(|| {
+                    AppApiError::NotFound(format!("sheet {sheet_id} was not found"))
+                })??;
+            Ok(())
+        })?;
+        self.journal_spreadsheet_operation(
+            &format!(
+                "sort {sheet_id}!{range} by {column} {}",
+                if descending {
+                    "descending"
+                } else {
+                    "ascending"
+                }
+            ),
+            AppSpreadsheetOperation::SortRange {
+                sheet_id,
+                range,
+                column,
+                descending,
+                has_header,
+            },
+        );
+        Ok(self.document())
+    }
+
+    /// Expands a source range over the range a fill-handle drag covered
+    /// (SH-28). The series itself is inferred in `opendoc-spreadsheet`.
+    pub fn fill_spreadsheet_range(
+        &mut self,
+        sheet_id: impl AsRef<str>,
+        source_range: impl AsRef<str>,
+        target_range: impl AsRef<str>,
+    ) -> Result<AppDocument, AppApiError> {
+        let sheet_id = normalize_sheet_id(sheet_id.as_ref())?;
+        let source_range = normalize_cell_range(source_range.as_ref())?;
+        let target_range = normalize_cell_range(target_range.as_ref())?;
+        self.mutate_spreadsheet(SpreadsheetEvaluationPolicy::Force, |workbook| {
+            workbook
+                .fill_range(&sheet_id, &source_range, &target_range)
+                .ok_or_else(|| {
+                    AppApiError::NotFound(format!("sheet {sheet_id} was not found"))
+                })??;
+            Ok(())
+        })?;
+        self.journal_spreadsheet_operation(
+            &format!("fill {sheet_id}!{source_range} over {target_range}"),
+            AppSpreadsheetOperation::FillRange {
+                sheet_id,
+                source_range,
+                target_range,
+            },
+        );
+        Ok(self.document())
+    }
+
+    /// Imports CSV/TSV text into an existing sheet, starting at `origin`
+    /// (SH-47). Every imported cell is journalled as an ordinary cell edit,
+    /// so an import replays and undoes like any other block of typing.
+    pub fn import_spreadsheet_csv(
+        &mut self,
+        sheet_id: impl AsRef<str>,
+        origin: impl AsRef<str>,
+        text: impl AsRef<str>,
+        delimiter: Option<&str>,
+    ) -> Result<AppDocument, AppApiError> {
+        let sheet_id = normalize_sheet_id(sheet_id.as_ref())?;
+        let origin = normalize_cell_address(origin.as_ref())?;
+        let delimiter = delimiter
+            .map(str::trim)
+            .filter(|delimiter| !delimiter.is_empty());
+        let cells = AppSpreadsheetWorkbook::csv_cell_edits(&origin, text.as_ref(), delimiter)?;
+        if cells.is_empty() {
+            return Ok(self.document());
+        }
+        self.set_spreadsheet_cells_in_sheet(sheet_id, cells)
+    }
+
+    /// Serializes one sheet as CSV/TSV using display text (SH-47).
+    pub fn export_spreadsheet_csv(
+        &self,
+        sheet_id: impl AsRef<str>,
+        delimiter: Option<&str>,
+    ) -> Result<String, AppApiError> {
+        let sheet_id = normalize_sheet_id(sheet_id.as_ref())?;
+        let delimiter = delimiter
+            .map(str::trim)
+            .filter(|delimiter| !delimiter.is_empty());
+        Ok(self.workbook.evaluated().export_csv(&sheet_id, delimiter)?)
+    }
+
+    /// Replaces the workbook with an imported XLSX file (SH-47), mirroring
+    /// the Google Sheets JSON import.
+    pub fn import_spreadsheet_xlsx(
+        &mut self,
+        title: impl AsRef<str>,
+        base64: impl AsRef<str>,
+    ) -> Result<AppDocument, AppApiError> {
+        let title = normalize_sheet_title(title.as_ref());
+        let imported = AppSpreadsheetWorkbook::from_xlsx_base64(base64.as_ref(), &title)?;
+        imported.validate_source()?;
+        self.mutate_spreadsheet(SpreadsheetEvaluationPolicy::Force, |workbook| {
+            *workbook = imported;
+            Ok(())
+        })?;
+        self.push_app_operation("import-spreadsheet-xlsx", "import XLSX workbook");
+        Ok(self.document())
+    }
+
+    /// Serializes the workbook as a base64-encoded XLSX file (SH-47).
+    pub fn export_spreadsheet_xlsx(&self) -> Result<String, AppApiError> {
+        Ok(self.workbook.evaluated().to_xlsx_base64()?)
     }
 
     pub fn add_spreadsheet_named_range(
@@ -1157,8 +1247,7 @@ impl OpenDocApp {
                 })??;
             Ok(())
         })?;
-        self.push_spreadsheet_operation(
-            "add-spreadsheet-named-range",
+        self.journal_spreadsheet_operation(
             &format!("name {sheet_id}!{range} as {name}"),
             AppSpreadsheetOperation::AddNamedRange {
                 sheet_id,
@@ -1185,8 +1274,7 @@ impl OpenDocApp {
             })?;
             Ok(())
         })?;
-        self.push_spreadsheet_operation(
-            "delete-spreadsheet-named-range",
+        self.journal_spreadsheet_operation(
             &format!("delete named range {name}"),
             AppSpreadsheetOperation::DeleteNamedRange { name, range },
         );
@@ -1217,8 +1305,7 @@ impl OpenDocApp {
             workbook.restore_named_range(range.clone())?;
             Ok(())
         })?;
-        self.push_spreadsheet_operation(
-            "restore-spreadsheet-named-range",
+        self.journal_spreadsheet_operation(
             &format!("restore named range {name}"),
             AppSpreadsheetOperation::RestoreNamedRange { name, range },
         );
@@ -1242,8 +1329,7 @@ impl OpenDocApp {
                 })??;
             Ok(())
         })?;
-        self.push_spreadsheet_operation(
-            "update-spreadsheet-named-range",
+        self.journal_spreadsheet_operation(
             &format!("update named range {name} to {sheet_id}!{range}"),
             AppSpreadsheetOperation::UpdateNamedRange {
                 sheet_id,

@@ -8,13 +8,14 @@
     "build": "node scripts/build.mjs",
     "build:app": "npm run build:wasm && npm run build",
     "build:wasm": "node scripts/build-wasm.mjs",
-    "generate:commands": "cargo run -p opendoc-api --bin generate_command_contract --",
+    "generate:commands": "cargo run --release -p opendoc-api --bin generate_command_contract --",
     "native-check": "node scripts/native-check.mjs",
     "preflight": "node scripts/preflight.mjs",
     "tauri": "tauri",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "verify": "node scripts/verify.mjs",
-    "smoke": "node scripts/smoke.mjs"
+    "smoke": "node scripts/smoke.mjs",
+    "e2e": "node --experimental-websocket scripts/e2e.mjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0",

@@ -55,6 +55,12 @@ pub enum CommandReturn {
     OpenDocRuntimeLookupResult,
     AppSpreadsheetSelection,
     AppEditorSelection,
+    AppFindMatches,
+    AppVersionView,
+    /// Exported bytes plus what the target format could not carry.
+    AppExport,
+    /// Which page each block falls on, and where.
+    AppDocumentLayout,
     String,
     EditorResult,
 }
@@ -72,6 +78,10 @@ impl CommandReturn {
             Self::OpenDocRuntimeLookupResult => "OpenDocRuntimeLookupResult",
             Self::AppSpreadsheetSelection => "AppSpreadsheetSelection",
             Self::AppEditorSelection => "AppEditorSelection",
+            Self::AppFindMatches => "AppFindMatches",
+            Self::AppVersionView => "AppVersionView",
+            Self::AppExport => "AppExport",
+            Self::AppDocumentLayout => "AppDocumentLayout",
             Self::String => "string",
             Self::EditorResult => "EditorResult",
         }

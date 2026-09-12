@@ -128,14 +128,20 @@ npm run build
 npm run smoke
 ```
 
-`npm run verify` includes the default workspace Rust tests and the
-feature-gated OpenDAL filesystem app tests:
-`cargo test -p opendoc-app --features opendal-store`.
+`npm run verify` includes the workspace Rust tests and the feature-gated
+OpenDAL filesystem app tests:
+`cargo test --release -p opendoc-app --features opendal-store`.
 
-It also runs clippy with warnings denied, TypeScript type checking, the WASM
-build, the static frontend build, and the jsdom smoke test against the real
-Rust/WASM dispatcher.
+It also runs `cargo fmt --check`, clippy with warnings denied, the generated
+command-contract drift check, TypeScript type checking, the WASM build, the
+static frontend build, and the jsdom smoke test against the real Rust/WASM
+dispatcher.
 
-The workflow check verifies that `.github/workflows/desktop.yml` keeps the
-Linux desktop CI gate wired to the no-registry desktop verification command,
-the native Tauri backend check, and the required GTK/WebKit system packages.
+**Every cargo step uses `--release`.** Debug builds of this workspace are slow
+and give nothing back, and keeping one profile means the steps share a target
+directory instead of building the tree twice.
+
+`.github/workflows/desktop.yml` is the Linux CI gate: it installs the GTK/WebKit
+system packages, then runs `npm run verify` and `npm run native-check`. Nothing
+asserts the workflow's own contents, so changes to it are only caught by CI
+running.

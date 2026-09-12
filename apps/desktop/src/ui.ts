@@ -5,7 +5,24 @@ export type DialogField = {
   value?: string;
   options?: { value: string; label: string }[];
   placeholder?: string;
+  /** Granularity of a `number` field. Defaults to `"any"`; see below. */
+  step?: string;
 };
+
+/**
+ * `step` for a `number` field, defaulting to `"any"`.
+ *
+ * Without it the default step is 1 and the step *base* is the field's initial
+ * value, so a dialog pre-filled with "1.00" silently refuses to submit once
+ * the user types "0.50": the form fails constraint validation and the submit
+ * does nothing at all, with no message. Every numeric dialog in this app
+ * offers a real-world measurement, so "any" is the right default and a field
+ * that genuinely wants whole numbers says so.
+ */
+function numberStep(field: DialogField): string {
+  if (field.type !== "number") return "";
+  return ` step="${escapeHtml(field.step ?? "any")}"`;
+}
 
 let afterDialogClose: () => void = () => {};
 
@@ -89,7 +106,7 @@ export function promptDialog(options: {
                   ? `<select id="${id}" name="${escapeHtml(field.name)}">${(field.options ?? [])
                       .map((option) => `<option value="${escapeHtml(option.value)}"${option.value === field.value ? " selected" : ""}>${escapeHtml(option.label)}</option>`)
                       .join("")}</select>`
-                  : `<input id="${id}" name="${escapeHtml(field.name)}" type="${field.type ?? "text"}" value="${escapeHtml(field.value ?? "")}" placeholder="${escapeHtml(field.placeholder ?? "")}">`;
+                  : `<input id="${id}" name="${escapeHtml(field.name)}" type="${field.type ?? "text"}"${numberStep(field)} value="${escapeHtml(field.value ?? "")}" placeholder="${escapeHtml(field.placeholder ?? "")}">`;
             return `<label for="${id}"><span>${escapeHtml(field.label)}</span>${control}</label>`;
           })
           .join("")}

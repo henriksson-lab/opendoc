@@ -5,5 +5,8 @@ edition = "2021"
 
 [dependencies]
 base64 = "0.22"
+# LaTeX -> MathML Core projection for equations. Pure Rust, no_std-capable,
+# builds for wasm32-unknown-unknown; no JavaScript runtime involved.
+math-core = { version = "0.8.2", default-features = false, features = ["std"] }
 opendoc-core = { path = "../opendoc-core" }
 opendoc-spreadsheet = { path = "../opendoc-spreadsheet" }

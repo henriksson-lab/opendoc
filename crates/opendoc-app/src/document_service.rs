@@ -1,6 +1,8 @@
 use crate::{now_ms, rich_document_operation_kind, AppOperationEnvelope, AppOperationRecord};
 use opendoc_core::Document;
-use opendoc_merge::{merge_operations, ActorId, Operation, OperationId, OperationKind};
+use opendoc_merge::{
+    merge_operations, ActorId, CausalContext, Operation, OperationId, OperationKind,
+};
 
 pub(crate) struct DocumentOperationService<'a> {
     actor_id: &'a str,
@@ -34,14 +36,11 @@ impl<'a> DocumentOperationService<'a> {
     /// sites are redundant and can be deleted.
     pub(crate) fn apply(&mut self, _operation_kind: &str, summary: &str, kind: OperationKind) {
         let seq = *self.next_seq;
-        let op = Operation {
-            id: self.operation_id(seq),
-            kind: kind.clone(),
-        };
+        let op = Operation::in_context(self.operation_id(seq), kind, self.causal_context(0));
         *self.next_seq += 1;
-        if let Ok(result) = merge_operations(self.document, &[vec![op]]) {
+        if let Ok(result) = merge_operations(self.document, &[vec![op.clone()]]) {
             *self.document = result.document;
-            self.push_document_operation(summary, seq, kind);
+            self.push_document_operation(summary, op);
         }
     }
 
@@ -51,36 +50,55 @@ impl<'a> DocumentOperationService<'a> {
         let mut records = Vec::new();
         for (offset, (_operation_kind, summary, kind)) in operations.into_iter().enumerate() {
             let seq = *self.next_seq + offset as u64;
-            merge_ops.push(Operation {
-                id: self.operation_id(seq),
-                kind: kind.clone(),
-            });
-            records.push((summary.to_string(), seq, kind));
+            let op = Operation::in_context(
+                self.operation_id(seq),
+                kind,
+                self.causal_context(offset as u64),
+            );
+            merge_ops.push(op.clone());
+            records.push((summary.to_string(), op));
         }
         if let Ok(result) = merge_operations(self.document, &[merge_ops]) {
             *self.document = result.document;
             *self.next_seq += records.len() as u64;
-            for (summary, seq, kind) in records {
-                self.push_document_operation(&summary, seq, kind);
+            for (summary, op) in records {
+                self.push_document_operation(&summary, op);
             }
         }
     }
 
-    fn push_document_operation(&mut self, summary: &str, seq: u64, kind: OperationKind) {
+    /// The causal context a locally generated operation is written in: every
+    /// operation this replica has already applied, local or merged in from
+    /// another actor. Without it the merge would read this replica's edits as
+    /// concurrent with work it demonstrably already had, and text offsets
+    /// would be re-anchored against a document it never saw. See
+    /// `docs/adr/0007-causal-ordering-and-text-convergence.md`.
+    ///
+    /// `lamport_offset` advances the timestamp for later operations in a
+    /// batch, which all observe the same set but must still order among
+    /// themselves.
+    fn causal_context(&self, lamport_offset: u64) -> CausalContext {
+        let mut context = CausalContext::observing(
+            self.operation_envelopes
+                .iter()
+                .filter_map(|envelope| envelope.operation.as_ref()),
+        );
+        context.lamport += lamport_offset;
+        context
+    }
+
+    fn push_document_operation(&mut self, summary: &str, op: Operation) {
         let record = AppOperationRecord {
             actor: self.actor_id.to_string(),
-            seq,
-            kind: rich_document_operation_kind(&kind).to_string(),
+            seq: op.id.seq,
+            kind: rich_document_operation_kind(&op.kind).to_string(),
             summary: summary.to_string(),
             created_at_ms: now_ms(),
         };
         self.operation_journal.push(record.clone());
         self.operation_envelopes.push(AppOperationEnvelope {
             record,
-            operation: Some(Operation {
-                id: self.operation_id(seq),
-                kind,
-            }),
+            operation: Some(op),
             spreadsheet: None,
             blob: None,
         });

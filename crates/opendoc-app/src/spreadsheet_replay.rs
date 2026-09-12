@@ -1032,6 +1032,48 @@ pub(crate) fn apply_spreadsheet_envelopes(
                     |candidate| candidate.copy_range(&sheet_id, source_range, target_address),
                 );
             }
+            Some(AppSpreadsheetOperation::SortRange {
+                sheet_id,
+                range,
+                column,
+                descending,
+                has_header,
+            }) => {
+                let sheet_id = replay_sheet_id!(sheet_id, "range sort");
+                apply_spreadsheet_result(
+                    workbook,
+                    &mut warnings,
+                    "missing-spreadsheet-sheet",
+                    format!(
+                        "spreadsheet sort {sheet_id}!{range} was ignored because the sheet was missing"
+                    ),
+                    "invalid-spreadsheet-sort-range",
+                    format!("spreadsheet sort {sheet_id}!{range} by {column} was ignored"),
+                    |candidate| {
+                        candidate.sort_range(&sheet_id, range, column, *descending, *has_header)
+                    },
+                );
+            }
+            Some(AppSpreadsheetOperation::FillRange {
+                sheet_id,
+                source_range,
+                target_range,
+            }) => {
+                let sheet_id = replay_sheet_id!(sheet_id, "range fill");
+                apply_spreadsheet_result(
+                    workbook,
+                    &mut warnings,
+                    "missing-spreadsheet-sheet",
+                    format!(
+                        "spreadsheet fill {sheet_id}!{source_range} was ignored because the sheet was missing"
+                    ),
+                    "invalid-spreadsheet-fill-range",
+                    format!(
+                        "spreadsheet fill {sheet_id}!{source_range} over {target_range} was ignored"
+                    ),
+                    |candidate| candidate.fill_range(&sheet_id, source_range, target_range),
+                );
+            }
             Some(AppSpreadsheetOperation::AddNamedRange {
                 sheet_id,
                 name,

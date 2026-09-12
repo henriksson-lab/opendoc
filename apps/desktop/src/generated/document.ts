@@ -4,6 +4,7 @@
 import type {
   AppOperationRecord,
   AppRecentDocument,
+  AppRecoverySession,
   AppSignature,
   AppWarning,
 } from "./audit";
@@ -18,6 +19,16 @@ export type AppDocument = {
   title: string;
   locale: string;
   doi: string | null;
+  /** The sheet the document is laid out on. Source state: stored, signed and
+   * merged. Lengths are twips (twentieths of a point). */
+  page_setup?: AppPageSetup;
+  /** Blocks repeated at the top of every page. Source state. */
+  header?: AppBlock[];
+  /** Blocks repeated at the bottom of every page. Source state. */
+  footer?: AppBlock[];
+  /** Everything about the page that is derived rather than stored. Projection
+   * only: it never reaches a snapshot or a signature. */
+  page_layout?: AppPageLayout;
   visible_text: string;
   word_count: number;
   character_count: number;
@@ -40,23 +51,153 @@ export type AppDocument = {
   has_unsaved_changes: boolean;
   operation_count: number;
   operations: AppOperationRecord[];
+  recovery_sessions: AppRecoverySession[];
   body_html: string;
   footnotes_html: string;
+  /** Rendered header markup, rendered once. Repeating it on every page is
+   * pagination's job — see docs/adr/0009-pagination-and-page-geometry.md. */
+  header_html?: string;
+  /** Rendered footer markup, rendered once. */
+  footer_html?: string;
+};
+
+/** Page geometry in twips (twentieths of a point), the unit the model stores,
+ * so the projection cannot drift by rounding. `start`/`end` margins are
+ * direction-relative, like block indents. */
+export type AppPageSetup = {
+  width_twips: number;
+  height_twips: number;
+  margin_top_twips: number;
+  margin_bottom_twips: number;
+  margin_start_twips: number;
+  margin_end_twips: number;
+  margin_header_twips: number;
+  margin_footer_twips: number;
+};
+
+/** Everything about the page derived from AppPageSetup rather than stored
+ * beside it. Projection only. */
+export type AppPageLayout = {
+  /** The standard size these dimensions are, in either orientation, or null
+   * for a custom page. Recovered by measuring. */
+  size_name?: string | null;
+  /** "portrait" | "landscape", derived from the dimensions. */
+  orientation?: string;
+  /** Page geometry as CSS custom properties, ready for a style attribute. */
+  style?: string;
+  /** The same geometry as an @page rule. Custom properties do not apply inside
+   * @page, so the print box needs its own concrete projection. */
+  print_style?: string;
+  /** The sizes the page-setup dialog offers, so the frontend never hard-codes
+   * a paper dimension. */
+  size_presets?: AppPageSizePreset[];
+};
+
+export type AppPageSizePreset = {
+  name: string;
+  label: string;
+  width_twips: number;
+  height_twips: number;
 };
 
 export type AppBlock = {
   id: string;
   kind: string;
   level: number | null;
+  /** Projection of `list_kind`: true only for an ordered list item. A checklist
+   * item is false here — read `list_kind` to tell a checklist from a bullet. */
   ordered: boolean | null;
+  /** The list run this item belongs to. Adjacent items sharing this id are one
+   * list; a different id starts a new list and restarts numbering. */
+  list_id?: string | null;
+  /** "bullet" | "ordered" | "checklist" */
+  list_kind?: string | null;
+  /** Checkbox state, present only for checklist items. */
+  checked?: boolean | null;
+  properties?: AppBlockProperties;
   style_value: string;
   equation_source: string | null;
   blob_hash?: string | null;
   alt_text?: string | null;
+  /** Display width of an image block, in twips. Null/absent means the image is
+   * drawn at the size its bytes decode to — never filled in with that size. */
+  image_width_twips?: number | null;
+  /** Display height, in twips. Absent with a width present means "scale to keep
+   * the aspect ratio". */
+  image_height_twips?: number | null;
+  /** "block" | "wrap-start" | "wrap-end" */
+  image_placement?: string | null;
   content: AppInline[];
   rows: AppBlock[][][];
   row_ids?: string[];
   cell_ids?: string[][];
+  /** The grid's shape — columns and per-cell spans and styling — present only
+   * on a table block. `rows`, `row_ids` and `cell_ids` carry its contents. */
+  table?: AppTable | null;
+};
+
+/** The shape of a table block. `cells` is in the same order as `rows`. */
+export type AppTable = {
+  columns: AppTableColumn[];
+  cells: AppTableCell[][];
+};
+
+export type AppTableColumn = {
+  id: string;
+  /** Null/absent means auto: the view shares out what the sized columns leave. */
+  width_twips?: number | null;
+};
+
+export type AppTableCell = {
+  row_span: number;
+  column_span: number;
+  /** Whether this cell is hidden underneath a merged neighbour. Derived from
+   * the spans in Rust, so the view never works the geometry out itself. */
+  covered: boolean;
+  properties?: AppTableCellProperties;
+};
+
+/** Cell-level formatting. Lengths are twips, colours are hex (#rrggbb), and a
+ * null/absent field means the cell inherits that property. */
+export type AppTableCellProperties = {
+  background?: string | null;
+  border_top?: AppCellBorder | null;
+  border_bottom?: AppCellBorder | null;
+  border_start?: AppCellBorder | null;
+  border_end?: AppCellBorder | null;
+  /** "top" | "middle" | "bottom" */
+  vertical_alignment?: string | null;
+  padding_top_twips?: number | null;
+  padding_bottom_twips?: number | null;
+  padding_start_twips?: number | null;
+  padding_end_twips?: number | null;
+};
+
+export type AppCellBorder = {
+  /** "none" | "solid" | "dashed" | "dotted" | "double" */
+  style: string;
+  twips: number;
+  color: string;
+};
+
+/** Block-level paragraph formatting. Lengths are twips (twentieths of a point),
+ * the unit the model stores, so the projection cannot drift by rounding.
+ * A null/absent field means the block inherits that property. */
+export type AppBlockProperties = {
+  /** "start" | "center" | "end" | "justify" */
+  alignment?: string | null;
+  indent_start_twips?: number | null;
+  indent_end_twips?: number | null;
+  /** Negative means a hanging indent. */
+  indent_first_line_twips?: number | null;
+  /** "multiple" | "exact" | "at-least" */
+  line_spacing_mode?: string | null;
+  /** Thousandths of a line for "multiple", twips for the other two modes. */
+  line_spacing_value?: number | null;
+  space_before_twips?: number | null;
+  space_after_twips?: number | null;
+  /** "ltr" | "rtl" */
+  direction?: string | null;
 };
 
 export type AppInline = {

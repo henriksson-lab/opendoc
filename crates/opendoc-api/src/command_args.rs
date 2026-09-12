@@ -1,5 +1,5 @@
 use crate::{
-    AppCitationItem, EditorSelection, OpenDocPermissionGrant, OpenDocPresencePeer,
+    AppCitationItem, EditorSelection, FindOptions, OpenDocPermissionGrant, OpenDocPresencePeer,
     OpenDocRelayOperation, OpenDocRuntimeLookupEntry, OpenDocRuntimeProfile,
 };
 use opendoc_spreadsheet::{SheetFilterCriterion, SheetFilterSortSpec};
@@ -259,7 +259,7 @@ pub struct SetBlockTextStyleArgs {
     pub block_id: String,
     pub style: String,
     pub level: u8,
-    pub ordered: bool,
+    pub list_kind: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -267,7 +267,126 @@ pub struct SetEditorSelectionBlockStyleArgs {
     pub selection: EditorSelection,
     pub style: String,
     pub level: u8,
-    pub ordered: bool,
+    pub list_kind: String,
+}
+
+/// A block-property write whose value is a name the model parses
+/// (`Alignment`, `TextDirection`). Which property is being written is the
+/// command variant, never a field, so the pair cannot be mismatched.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetBlockNamedValueArgs {
+    pub block_id: String,
+    pub value: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetEditorSelectionBlockNamedValueArgs {
+    pub selection: EditorSelection,
+    pub value: String,
+}
+
+/// A block-property write carrying a length in twips (1/20 pt), the unit the
+/// model stores.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetBlockLengthArgs {
+    pub block_id: String,
+    pub twips: i32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetEditorSelectionBlockLengthArgs {
+    pub selection: EditorSelection,
+    pub twips: i32,
+}
+
+/// Line spacing is a sum type in the model (`Multiple`/`Exact`/`AtLeast`), so
+/// the wire form is the rule plus its value: thousandths of a line for
+/// `"multiple"`, twips for the other two.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetBlockLineSpacingArgs {
+    pub block_id: String,
+    pub mode: String,
+    pub value: i32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetEditorSelectionBlockLineSpacingArgs {
+    pub selection: EditorSelection,
+    pub mode: String,
+    pub value: i32,
+}
+
+/// A whole page geometry. Page setup is written as a unit rather than one
+/// dimension at a time; see `docs/adr/0009-pagination-and-page-geometry.md`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetPageSetupArgs {
+    pub width_twips: i32,
+    pub height_twips: i32,
+    pub margin_top_twips: i32,
+    pub margin_bottom_twips: i32,
+    pub margin_start_twips: i32,
+    pub margin_end_twips: i32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetPageOrientationArgs {
+    pub orientation: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetPageFurnitureArgs {
+    /// `"header"` or `"footer"`.
+    pub slot: String,
+    pub text: String,
+    /// `"none"`, `"page-number"` or `"page-count"`.
+    pub field: String,
+    pub alignment: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PageFurnitureSlotArgs {
+    pub slot: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClearBlockPropertyArgs {
+    pub block_id: String,
+    pub key: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClearEditorSelectionBlockPropertyArgs {
+    pub selection: EditorSelection,
+    pub key: String,
+}
+
+/// Find and replace share one options payload so the two can never disagree
+/// about what the query means; see [`crate::FindOptions`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FindInDocumentArgs {
+    pub find: FindOptions,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReplaceMatchInDocumentArgs {
+    pub find: FindOptions,
+    pub replacement: String,
+    /// Index into the match list `find_in_document` returned for the same
+    /// options. Rust re-runs the search rather than trusting positions the
+    /// frontend cached, so a stale highlight cannot edit the wrong range.
+    pub match_index: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReplaceAllInDocumentArgs {
+    pub find: FindOptions,
+    pub replacement: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetListItemCheckedArgs {
+    pub block_id: String,
+    pub checked: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -342,7 +461,7 @@ pub struct InsertEquationBlockAfterArgs {
 pub struct AddListItemArgs {
     pub text: String,
     pub level: u8,
-    pub ordered: bool,
+    pub list_kind: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -350,14 +469,14 @@ pub struct InsertListItemAfterArgs {
     pub after_block_id: String,
     pub text: String,
     pub level: u8,
-    pub ordered: bool,
+    pub list_kind: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UpdateListItemArgs {
     pub block_id: String,
     pub level: u8,
-    pub ordered: bool,
+    pub list_kind: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -409,6 +528,71 @@ pub struct DeleteTableCellArgs {
     pub table_block_id: String,
     pub row_id: String,
     pub cell_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InsertTableColumnArgs {
+    pub table_block_id: String,
+    pub after_column_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TableColumnArgs {
+    pub table_block_id: String,
+    pub column_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetTableColumnWidthArgs {
+    pub table_block_id: String,
+    pub column_id: String,
+    pub twips: i32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MergeTableCellsArgs {
+    pub cell_id: String,
+    pub row_span: u32,
+    pub column_span: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TableCellArgs {
+    pub cell_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetTableCellBackgroundArgs {
+    pub cell_id: String,
+    pub color: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetTableCellBorderArgs {
+    pub cell_id: String,
+    pub edge: String,
+    pub style: String,
+    pub twips: i32,
+    pub color: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetTableCellVerticalAlignmentArgs {
+    pub cell_id: String,
+    pub alignment: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetTableCellPaddingArgs {
+    pub cell_id: String,
+    pub edge: String,
+    pub twips: i32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClearTableCellPropertyArgs {
+    pub cell_id: String,
+    pub key: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -673,6 +857,28 @@ pub struct BlockAltTextArgs {
     pub alt_text: String,
 }
 
+/// A drawn size for one axis of an image block, in twips.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ImageBlockLengthArgs {
+    pub block_id: String,
+    pub twips: i32,
+}
+
+/// Both axes of an image block at once, because a corner drag is one gesture.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ImageBlockSizeArgs {
+    pub block_id: String,
+    pub width_twips: i32,
+    pub height_twips: i32,
+}
+
+/// `"block"`, `"wrap-start"` or `"wrap-end"`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ImageBlockPlacementArgs {
+    pub block_id: String,
+    pub placement: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BlockBlobHashArgs {
     pub block_id: String,
@@ -736,6 +942,10 @@ pub struct SpreadsheetPasteTsvArgs {
     pub sheet_id: String,
     pub origin: String,
     pub text: String,
+    /// Top-left cell the text was copied from, when the copy came from this
+    /// workbook. Pasted formulas then shift their relative references by the
+    /// paste offset; `None` stores the text verbatim.
+    pub source_origin: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -874,4 +1084,73 @@ pub struct CopyRangeArgs {
     pub sheet_id: String,
     pub source_range: String,
     pub target_address: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SortRangeArgs {
+    pub sheet_id: String,
+    pub range: String,
+    /// Column label to sort by; must sit inside `range`.
+    pub column: String,
+    pub descending: bool,
+    pub has_header: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FillRangeArgs {
+    pub sheet_id: String,
+    pub source_range: String,
+    /// Range the fill-handle drag covered. It may include the source block.
+    pub target_range: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ImportSpreadsheetCsvArgs {
+    pub sheet_id: String,
+    pub origin: String,
+    pub text: String,
+    /// `","` by default; `"tab"`/`"\t"` or any single ASCII character.
+    pub delimiter: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExportSpreadsheetCsvArgs {
+    pub sheet_id: String,
+    pub delimiter: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ImportSpreadsheetXlsxArgs {
+    pub title: String,
+    pub base64: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ListDocumentVersionsArgs {
+    /// Maximum number of versions to walk back from the head; `None` uses the
+    /// service default.
+    pub limit: Option<u32>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DocumentVersionArgs {
+    pub manifest: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DiffDocumentVersionsArgs {
+    pub from_manifest: String,
+    pub to_manifest: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NameDocumentVersionArgs {
+    pub manifest: String,
+    pub label: String,
+    pub author: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecoverySessionArgs {
+    pub session_id: String,
 }

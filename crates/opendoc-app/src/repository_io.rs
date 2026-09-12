@@ -246,7 +246,7 @@ impl OpenDocApp {
         )
     }
 
-    fn snapshot_document(&self) -> AppDocument {
+    pub(crate) fn snapshot_document(&self) -> AppDocument {
         let mut document = AppDocument::from_core(&self.document);
         document.workbook = self.workbook.evaluated();
         document.blobs = self.blobs.clone();
@@ -376,7 +376,7 @@ impl<'a> RepositoryService<'a> {
         pack_name: impl AsRef<str>,
     ) -> Result<AppDocument, AppApiError> {
         let root = root.into();
-        let store = LocalObjectStore::new(&root);
+        let store = crate::repository::local_object_store(&root)?;
         let stats = store
             .compact_loose_objects_to_pack(pack_name.as_ref())
             .map_err(|err| AppApiError::Store(err.to_string()))?;
@@ -399,7 +399,7 @@ impl<'a> RepositoryService<'a> {
         root: PathBuf,
         allow_candidate: bool,
     ) -> Result<AppDocument, AppApiError> {
-        let repo = Repository::new(LocalObjectStore::new(&root));
+        let repo = Repository::new(crate::repository::local_object_store(&root)?);
         self.save_to_repository_inner(root, repo, allow_candidate, "local", None)
     }
 
@@ -609,8 +609,7 @@ impl<'a> RepositoryService<'a> {
     }
 
     pub(crate) fn has_pending_save_changes(&self) -> bool {
-        self.saved_operation_count != self.operation_journal.len()
-            || self.saved_signature_count != self.signature_count()
+        self.app.has_unsaved_changes()
     }
 
     /// Continue this actor's sequence numbers after the highest one already
@@ -633,7 +632,7 @@ impl<'a> RepositoryService<'a> {
     ) -> Result<AppDocument, AppApiError> {
         let root = root.into();
         let doi = doi.as_ref().trim().to_string();
-        let repo = Repository::new(LocalObjectStore::new(&root));
+        let repo = Repository::new(crate::repository::local_object_store(&root)?);
         let lookup = lookup_by_doi_or_scan(&repo, &doi)?
             .ok_or_else(|| AppApiError::NotFound("DOI lookup record was not found".to_string()))?;
         let document = self.open_saved_projection(root, lookup.record.document_uuid)?;
@@ -711,7 +710,7 @@ impl<'a> RepositoryService<'a> {
         document_uuid: impl AsRef<str>,
     ) -> Result<AppDocument, AppApiError> {
         let root = root.into();
-        let repo = Repository::new(LocalObjectStore::new(&root));
+        let repo = Repository::new(crate::repository::local_object_store(&root)?);
         self.open_projection_from_repository(
             root,
             repo,
@@ -726,7 +725,7 @@ impl<'a> RepositoryService<'a> {
         root: impl Into<PathBuf>,
     ) -> Result<AppDocument, AppApiError> {
         let root = root.into();
-        let repo = Repository::new(LocalObjectStore::new(&root));
+        let repo = Repository::new(crate::repository::local_object_store(&root)?);
         let scan = repo
             .scan_lookup_entries()
             .map_err(|err| AppApiError::Store(err.to_string()))?;
@@ -1839,3 +1838,6 @@ fn lookup_has_doi_alias(lookup: &LookupRecord, normalized_doi: &str) -> bool {
             && alias.value.trim().eq_ignore_ascii_case(normalized_doi)
     })
 }
+
+#[cfg(test)]
+mod volume_repository_tests;

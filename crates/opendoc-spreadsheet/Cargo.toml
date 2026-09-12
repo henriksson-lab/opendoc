@@ -14,3 +14,7 @@ regex = "1"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
+# `rust_xlsxwriter` reads the system clock for the workbook's creation time,
+# which traps on wasm32-unknown-unknown. Its `wasm` feature reads `Date.now()`
+# instead, so XLSX export works in the browser shell as well as natively.
+rust_xlsxwriter = { version = "0.99.0", features = ["wasm"] }

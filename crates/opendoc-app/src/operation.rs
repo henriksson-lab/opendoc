@@ -167,6 +167,17 @@ fn validate_rich_document_operation_source(kind: &OperationKind) -> Result<(), A
         OperationKind::SetDocumentLocale { locale } => {
             validate_canonical_operation_field("document locale", locale)
         }
+        OperationKind::SetPageSetup { page_setup } => page_setup
+            .validate()
+            .map_err(|err| AppApiError::Format(err.to_string())),
+        OperationKind::SetPageFurniture { blocks, .. } => {
+            for block in blocks {
+                block
+                    .validate_isolated()
+                    .map_err(|err| AppApiError::Format(err.to_string()))?;
+            }
+            Ok(())
+        }
         OperationKind::InsertBlock { after, block } => {
             validate_optional_stable_id(after)?;
             block
@@ -356,6 +367,12 @@ fn validate_rich_document_operation_source(kind: &OperationKind) -> Result<(), A
         OperationKind::UpdateImageAltText { block_id, .. } => {
             validate_stable_operation_id(block_id)
         }
+        OperationKind::UpdateImageLayout { block_id, layout } => {
+            validate_stable_operation_id(block_id)?;
+            layout
+                .validate()
+                .map_err(|err| AppApiError::Format(err.to_string()))
+        }
         OperationKind::UpdateImageBlobHash {
             block_id,
             blob_hash,
@@ -384,6 +401,15 @@ fn validate_rich_document_operation_source(kind: &OperationKind) -> Result<(), A
                 ));
             }
             Ok(())
+        }
+        OperationKind::SetBlockProperty { block_id, property } => {
+            validate_stable_operation_id(block_id)?;
+            property
+                .validate()
+                .map_err(|err| AppApiError::Format(err.to_string()))
+        }
+        OperationKind::ClearBlockProperty { block_id, .. } => {
+            validate_stable_operation_id(block_id)
         }
         OperationKind::AcceptSuggestion {
             suggestion_id,
@@ -436,6 +462,53 @@ fn validate_rich_document_operation_source(kind: &OperationKind) -> Result<(), A
             validate_stable_operation_id(row_id)?;
             validate_stable_operation_id(cell_id)
         }
+        OperationKind::InsertTableColumn {
+            table_block_id,
+            after_column,
+            column,
+        } => {
+            validate_stable_operation_id(table_block_id)?;
+            validate_optional_stable_id(after_column)?;
+            validate_stable_operation_id(&column.id)?;
+            column
+                .validate()
+                .map_err(|err| AppApiError::Format(err.to_string()))
+        }
+        OperationKind::DeleteTableColumn {
+            table_block_id,
+            column_id,
+        } => {
+            validate_stable_operation_id(table_block_id)?;
+            validate_stable_operation_id(column_id)
+        }
+        OperationKind::SetTableColumnWidth {
+            table_block_id,
+            column_id,
+            width,
+        } => {
+            validate_stable_operation_id(table_block_id)?;
+            validate_stable_operation_id(column_id)?;
+            match width {
+                Some(width) if width.twips() < opendoc_core::TableColumn::MIN_WIDTH_TWIPS => Err(
+                    AppApiError::Format("table column width is below 0.1in".to_string()),
+                ),
+                _ => Ok(()),
+            }
+        }
+        OperationKind::SetTableCellSpan { cell_id, span } => {
+            validate_stable_operation_id(cell_id)?;
+            span.validate()
+                .map_err(|err| AppApiError::Format(err.to_string()))
+        }
+        OperationKind::SetTableCellProperty { cell_id, property } => {
+            validate_stable_operation_id(cell_id)?;
+            property
+                .validate()
+                .map_err(|err| AppApiError::Format(err.to_string()))
+        }
+        OperationKind::ClearTableCellProperty { cell_id, .. } => {
+            validate_stable_operation_id(cell_id)
+        }
     }
 }
 
@@ -480,18 +553,17 @@ fn inline_is_empty_source_text(inline: &Inline) -> bool {
         Inline::Mention { .. }
         | Inline::Equation { .. }
         | Inline::Citation { .. }
-        | Inline::FootnoteRef { .. } => false,
+        | Inline::FootnoteRef { .. }
+        | Inline::PageNumber { .. } => false,
     }
 }
 
 fn validate_table_row_payload(row: &opendoc_core::TableRow) -> Result<(), AppApiError> {
     let block = Block {
         id: StableId::new("table-validator"),
-        kind: BlockKind::Table {
-            rows: vec![row.clone()],
-        },
+        kind: BlockKind::table(vec![row.clone()]),
         content: Vec::new(),
-        properties: Vec::new(),
+        properties: BlockProperties::default(),
     };
     block
         .validate_isolated()
@@ -517,6 +589,8 @@ pub(crate) fn rich_document_operation_kind(kind: &OperationKind) -> &'static str
         OperationKind::SetDocumentTitle { .. } => "set-document-title",
         OperationKind::SetDocumentDoi { .. } => "set-document-doi",
         OperationKind::SetDocumentLocale { .. } => "set-document-locale",
+        OperationKind::SetPageSetup { .. } => "set-page-setup",
+        OperationKind::SetPageFurniture { .. } => "set-page-furniture",
         OperationKind::InsertBlock { .. } => "insert-block",
         OperationKind::DeleteBlock { .. } => "delete-block",
         OperationKind::InsertInline { .. } => "insert-inline",
@@ -547,10 +621,13 @@ pub(crate) fn rich_document_operation_kind(kind: &OperationKind) -> &'static str
         OperationKind::UpdateLinkHref { .. } => "update-link-href",
         OperationKind::UpdateBlockEquationSource { .. } => "update-block-equation-source",
         OperationKind::UpdateImageAltText { .. } => "update-image-alt-text",
+        OperationKind::UpdateImageLayout { .. } => "update-image-layout",
         OperationKind::UpdateImageBlobHash { .. } => "update-image-blob-hash",
         OperationKind::SetBlockTextStyle { .. } => "set-block-text-style",
         OperationKind::UpdateHeadingLevel { .. } => "update-heading-level",
         OperationKind::UpdateListItem { .. } => "update-list-item",
+        OperationKind::SetBlockProperty { .. } => "set-block-property",
+        OperationKind::ClearBlockProperty { .. } => "clear-block-property",
         OperationKind::AcceptSuggestion { .. } => "accept-suggestion",
         OperationKind::RejectSuggestion { .. } => "reject-suggestion",
         OperationKind::DeleteInline { .. } => "delete-inline",
@@ -558,6 +635,12 @@ pub(crate) fn rich_document_operation_kind(kind: &OperationKind) -> &'static str
         OperationKind::DeleteTableRow { .. } => "delete-table-row",
         OperationKind::InsertTableCell { .. } => "insert-table-cell",
         OperationKind::DeleteTableCell { .. } => "delete-table-cell",
+        OperationKind::InsertTableColumn { .. } => "insert-table-column",
+        OperationKind::DeleteTableColumn { .. } => "delete-table-column",
+        OperationKind::SetTableColumnWidth { .. } => "set-table-column-width",
+        OperationKind::SetTableCellSpan { .. } => "set-table-cell-span",
+        OperationKind::SetTableCellProperty { .. } => "set-table-cell-property",
+        OperationKind::ClearTableCellProperty { .. } => "clear-table-cell-property",
     }
 }
 
@@ -866,6 +949,18 @@ pub(crate) enum AppSpreadsheetOperation {
         source_range: String,
         target_address: String,
     },
+    SortRange {
+        sheet_id: String,
+        range: String,
+        column: String,
+        descending: bool,
+        has_header: bool,
+    },
+    FillRange {
+        sheet_id: String,
+        source_range: String,
+        target_range: String,
+    },
     AddNamedRange {
         sheet_id: String,
         name: String,
@@ -887,7 +982,9 @@ pub(crate) enum AppSpreadsheetOperation {
 }
 
 impl AppSpreadsheetOperation {
-    fn operation_kind(&self) -> &'static str {
+    /// The envelope kind this payload belongs in. Journalling derives the
+    /// kind from here so the two can never drift apart.
+    pub(crate) fn operation_kind(&self) -> &'static str {
         match self {
             Self::SetWorkbookMetadata { .. } => "set-spreadsheet-workbook-metadata",
             Self::AddSheet { .. } => "add-spreadsheet-sheet",
@@ -924,6 +1021,8 @@ impl AppSpreadsheetOperation {
             Self::SetRowHeight { .. } => "set-spreadsheet-row-height",
             Self::SetColumnWidth { .. } => "set-spreadsheet-column-width",
             Self::CopyRange { .. } => "copy-spreadsheet-range",
+            Self::SortRange { .. } => "sort-spreadsheet-range",
+            Self::FillRange { .. } => "fill-spreadsheet-range",
             Self::AddNamedRange { .. } => "add-spreadsheet-named-range",
             Self::UpdateNamedRange { .. } => "update-spreadsheet-named-range",
             Self::DeleteNamedRange { .. } => "delete-spreadsheet-named-range",
@@ -1197,6 +1296,31 @@ impl AppSpreadsheetOperation {
                 validate_canonical_cell_address(
                     "spreadsheet copy operation target address",
                     target_address,
+                )?;
+            }
+            Self::SortRange {
+                sheet_id,
+                range,
+                column,
+                ..
+            } => {
+                validate_canonical_sheet_id(sheet_id)?;
+                validate_canonical_cell_range("spreadsheet sort operation range", range)?;
+                validate_canonical_column_label(column)?;
+            }
+            Self::FillRange {
+                sheet_id,
+                source_range,
+                target_range,
+            } => {
+                validate_canonical_sheet_id(sheet_id)?;
+                validate_canonical_cell_range(
+                    "spreadsheet fill operation source range",
+                    source_range,
+                )?;
+                validate_canonical_cell_range(
+                    "spreadsheet fill operation target range",
+                    target_range,
                 )?;
             }
             Self::AddNamedRange {

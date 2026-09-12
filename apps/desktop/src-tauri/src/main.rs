@@ -5,11 +5,13 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use opendoc_app::{base64_decode, base64_encode, AppCommandResult, OpenDocApp};
+use opendoc_app::{
+    base64_decode, base64_encode, AppCommandResult, FileRecoveryJournalStore, OpenDocApp,
+};
 use serde::Serialize;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
 use tauri_plugin_dialog::{DialogExt, FilePath};
 
@@ -180,15 +182,37 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(DesktopState {
-            app: Mutex::new(OpenDocApp::new_sample()),
+            app: Mutex::new(OpenDocApp::new_empty_document()),
+        })
+        .setup(|app| {
+            // Crash recovery is a local-runtime capability: the store is a
+            // directory this shell owns. A browser build installs nothing and
+            // journalling stays inert (ADR 0005).
+            match app.path().app_data_dir() {
+                Ok(dir) => {
+                    let store = Arc::new(FileRecoveryJournalStore::new(dir.join("recovery")));
+                    match app.state::<DesktopState>().app.lock() {
+                        Ok(mut opendoc) => {
+                            if let Err(err) = opendoc.install_recovery_journal(store) {
+                                eprintln!("crash recovery journal unavailable: {err}");
+                            }
+                        }
+                        Err(_) => eprintln!("crash recovery journal unavailable: state poisoned"),
+                    }
+                }
+                Err(err) => eprintln!("crash recovery journal unavailable: {err}"),
+            }
+            Ok(())
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // Same dirty-state signal the dispatcher's replacement guard
+                // and the autosave loop use, read straight from the Rust app.
                 let unsaved = window
                     .state::<DesktopState>()
                     .app
                     .lock()
-                    .map(|app| app.document().has_unsaved_changes)
+                    .map(|app| app.has_unsaved_changes())
                     .unwrap_or(false);
                 if unsaved {
                     api.prevent_close();

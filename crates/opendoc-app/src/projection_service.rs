@@ -1,9 +1,9 @@
 use crate::{
-    append_spreadsheet_formula_warnings, verify_app_typed_signature, AppArchiveTombstone,
-    AppBlobRef, AppDocument, AppOperationRecord, AppRecentDocument, AppRenderService, AppSignature,
-    AppWarning,
+    append_spreadsheet_formula_warnings, push_unique_warning, verify_app_typed_signature,
+    AppArchiveTombstone, AppBlobRef, AppDocument, AppOperationRecord, AppPageLayout,
+    AppPageSizePreset, AppRecentDocument, AppRenderService, AppSignature, AppWarning,
 };
-use opendoc_core::Document;
+use opendoc_core::{Document, HeaderFooterSlot};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -95,8 +95,47 @@ impl<'a> AppProjectionService<'a> {
         if self.is_open {
             let renderer =
                 AppRenderService::new(self.document, self.workbook, self.blobs, self.blob_bytes);
-            document.body_html = renderer.render_document_html();
-            document.footnotes_html = renderer.render_footnotes_html();
+            // The renderer is a pure projection: it returns its warnings
+            // rather than writing them into the document, so this is the one
+            // place they become visible to the user. Without it an equation
+            // renders with an error marker and the warnings panel says
+            // nothing about why.
+            let body = renderer.render_document();
+            let footnotes = renderer.render_footnotes();
+            let header = renderer.render_page_furniture(HeaderFooterSlot::Header);
+            let footer = renderer.render_page_furniture(HeaderFooterSlot::Footer);
+            document.body_html = body.html;
+            document.footnotes_html = footnotes.html;
+            document.header_html = header.html;
+            document.footer_html = footer.html;
+            document.page_layout = AppPageLayout {
+                size_name: self.document.page_setup.size_name().map(str::to_string),
+                orientation: self.document.page_setup.orientation().as_str().to_string(),
+                style: renderer.page_setup_css_variables(),
+                print_style: renderer.page_setup_print_css(),
+                size_presets: opendoc_core::PAGE_SIZE_PRESETS
+                    .iter()
+                    .map(|preset| AppPageSizePreset {
+                        name: preset.name.to_string(),
+                        label: preset.label.to_string(),
+                        width_twips: preset.width_twips,
+                        height_twips: preset.height_twips,
+                    })
+                    .collect(),
+            };
+            for warning in body
+                .warnings
+                .iter()
+                .chain(footnotes.warnings.iter())
+                .chain(header.warnings.iter())
+                .chain(footer.warnings.iter())
+            {
+                push_unique_warning(
+                    &mut document.warnings,
+                    &warning.code,
+                    warning.message.clone(),
+                );
+            }
         }
         document.signature_state = self.signature_state_label().to_string();
         document.signatures = self
@@ -174,7 +213,7 @@ impl<'a> AppProjectionService<'a> {
                 .sum::<usize>()
     }
 
-    fn has_pending_save_changes(&self) -> bool {
+    pub(crate) fn has_pending_save_changes(&self) -> bool {
         self.saved_operation_count != self.operation_journal.len()
             || self.saved_signature_count != self.signature_count()
     }
@@ -185,5 +224,111 @@ impl<'a> AppProjectionService<'a> {
         } else {
             "unsigned"
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::OpenDocApp;
+    use opendoc_core::{Equation, EquationSourceFormat, Footnote, Inline, StableId};
+
+    /// An equation the renderer can parse but only partly understand renders
+    /// with an error marker inside it. Before this plumbing existed the user
+    /// saw the marker and the warnings panel said nothing, so there was no way
+    /// to learn what was wrong.
+    #[test]
+    fn unknown_equation_command_is_reported_in_the_document_warnings() {
+        let mut app = OpenDocApp::new_empty_document();
+        app.add_equation_inline(r"a + \notarealcommand{b}")
+            .expect("equation source is non-empty");
+        let document = app.document();
+        assert!(
+            document
+                .warnings
+                .iter()
+                .any(|warning| warning.code == "equation-unknown-command"),
+            "{:?}",
+            document.warnings
+        );
+    }
+
+    #[test]
+    fn unrenderable_equation_is_reported_in_the_document_warnings() {
+        let mut app = OpenDocApp::new_empty_document();
+        app.add_equation_block(r"\frac{a}{")
+            .expect("equation source is non-empty");
+        let document = app.document();
+        let warning = document
+            .warnings
+            .iter()
+            .find(|warning| warning.code == "equation-render-failed")
+            .unwrap_or_else(|| panic!("no render-failure warning in {:?}", document.warnings));
+        // The message must name the equation, or a document with several
+        // equations cannot be acted on.
+        assert!(!warning.message.trim().is_empty());
+    }
+
+    /// Footnote bodies hold inline equations too, and they are rendered by a
+    /// second call that returns its own warnings.
+    #[test]
+    fn footnote_equation_warnings_reach_the_document_warnings() {
+        let mut app = OpenDocApp::new_empty_document();
+        let footnote_id = StableId::new("footnote");
+        app.document.blocks[0].content.push(Inline::FootnoteRef {
+            id: StableId::new("inline"),
+            footnote_id: footnote_id.clone(),
+        });
+        app.document.footnotes.push(Footnote {
+            id: footnote_id,
+            revision: 0,
+            body: vec![Inline::Equation {
+                id: StableId::new("inline"),
+                equation: Equation {
+                    id: StableId::new("equation"),
+                    source_format: EquationSourceFormat::LatexLike,
+                    source: r"\frac{a}{".to_string(),
+                },
+            }],
+            deleted: false,
+        });
+        let document = app.document();
+        assert!(
+            document
+                .warnings
+                .iter()
+                .any(|warning| warning.code == "equation-render-failed"),
+            "{:?}",
+            document.warnings
+        );
+    }
+
+    /// Projection purity: an equation warning reaches the projection on every
+    /// call and is never written back into the signed source document. The
+    /// obvious wrong implementation is `push_model_warning`, which would put
+    /// a *rendering* outcome into state that gets hashed and signed.
+    #[test]
+    fn equation_warnings_are_projected_never_written_into_source_state() {
+        let mut app = OpenDocApp::new_empty_document();
+        app.add_equation_inline(r"a + \notarealcommand{b}")
+            .expect("equation source is non-empty");
+        let first = app.document();
+        let second = app.document();
+        assert_eq!(first.warnings, second.warnings, "projection is not stable");
+        assert!(
+            second
+                .warnings
+                .iter()
+                .any(|warning| warning.code == "equation-unknown-command"),
+            "{:?}",
+            second.warnings
+        );
+        assert!(
+            !app.document
+                .warnings
+                .iter()
+                .any(|warning| warning.code.starts_with("equation-")),
+            "renderer warnings must not be written into source state: {:?}",
+            app.document.warnings
+        );
     }
 }

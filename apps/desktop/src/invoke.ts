@@ -29,6 +29,13 @@ type WasmModule = {
   initSync?: (input: { module: BufferSource | WebAssembly.Module }) => unknown;
   dispatch: (command: string, argsJson: string) => string;
   reset: () => void;
+  /**
+   * Attaches IndexedDB to the Rust storage volume and hydrates it. Optional so
+   * a preloaded module (the jsdom smoke test) still typechecks; absent or
+   * failing, the core keeps working in memory.
+   */
+  storage_ready?: () => Promise<unknown>;
+  storage_status?: () => unknown;
 };
 
 let wasmModule: WasmModule | null = null;
@@ -55,6 +62,16 @@ async function loadWasm(): Promise<WasmModule> {
     wasmLoading = (async () => {
       const module = (await import("./wasm/opendoc_wasm.js")) as unknown as WasmModule;
       await module.default();
+      // Storage is Rust's (crates/opendoc-wasm/src/storage.rs); the only thing
+      // TypeScript owes it is this await. IndexedDB is asynchronous and
+      // dispatch is not, so the volume has to be hydrated before the first
+      // command can read from it. A runtime without IndexedDB resolves too,
+      // reporting that it is not persistent.
+      try {
+        await module.storage_ready?.();
+      } catch (error) {
+        console.warn("OpenDoc storage is unavailable; this session is not persistent", error);
+      }
       wasmModule = module;
       return module;
     })();
@@ -78,13 +95,35 @@ export async function dispatch(command: string, args: Record<string, unknown> = 
   return JSON.parse(json) as AppCommandResult;
 }
 
-/** Typed dispatch that unwraps the result payload. */
+/**
+ * Typed dispatch that unwraps the result payload.
+ *
+ * `discardUnsavedChanges` is not a command argument: it is the dispatcher-wide
+ * acknowledgement that lets a document-replacing command proceed over unsaved
+ * work (ADR 0005). Only pass it once a user has actually accepted the loss.
+ */
 export async function invoke<K extends DesktopCommandName>(
   command: K,
   args: CommandArgs<K> = {} as CommandArgs<K>,
+  options: { discardUnsavedChanges?: boolean } = {},
 ): Promise<CommandResult<K>> {
-  const result = await dispatch(command, args as Record<string, unknown>);
+  const payload = options.discardUnsavedChanges
+    ? { ...(args as Record<string, unknown>), discardUnsavedChanges: true }
+    : (args as Record<string, unknown>);
+  const result = await dispatch(command, payload);
   return result.value as CommandResult<K>;
+}
+
+/**
+ * Did Rust refuse this command because it would discard unsaved work?
+ *
+ * `AppApiError` reaches a transport as its `Debug` form, so the variant name
+ * is the wire marker. It is a distinct variant precisely so this check does
+ * not have to read message prose.
+ */
+export function isUnsavedChangesError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.trimStart().startsWith("UnsavedChanges(");
 }
 
 // ---- Desktop-only capabilities (file dialogs, file IO, window) ----------

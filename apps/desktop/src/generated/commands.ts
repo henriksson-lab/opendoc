@@ -4,8 +4,11 @@
 import type { AppAuditView } from "./audit";
 import type { AppCitationItem } from "./citation";
 import type { AppDocument, EditorResult } from "./document";
-import type { AppEditorSelection, EditorSelection } from "./editor";
+import type { AppEditorSelection, AppFindMatches, EditorSelection } from "./editor";
+import type { AppExport } from "./export";
+import type { AppDocumentLayout } from "./layout";
 import type { AppSpreadsheetSelection } from "./spreadsheet";
+import type { AppVersionView } from "./version";
 import type {
   OpenDocAuthorizationDecision,
   OpenDocRuntimeLookupResult,
@@ -30,7 +33,11 @@ export type AppCommandResult =
   | { kind: "SyncRelay"; value: OpenDocSyncRelayResult }
   | { kind: "RuntimeLookup"; value: OpenDocRuntimeLookupResult }
   | { kind: "SpreadsheetSelection"; value: AppSpreadsheetSelection }
-  | { kind: "EditorSelection"; value: AppEditorSelection };
+  | { kind: "EditorSelection"; value: AppEditorSelection }
+  | { kind: "FindMatches"; value: AppFindMatches }
+  | { kind: "VersionView"; value: AppVersionView }
+  | { kind: "Export"; value: AppExport }
+  | { kind: "DocumentLayout"; value: AppDocumentLayout };
 
 export type DesktopCommandArgs = {
   create_document: {
@@ -104,6 +111,7 @@ export type DesktopCommandArgs = {
     path: string;
   };
   export_google_docs_json: Record<string, never>;
+  export_docx: Record<string, never>;
   import_google_sheets_json: {
     jsonText: string;
   };
@@ -194,13 +202,137 @@ export type DesktopCommandArgs = {
     blockId: string;
     style: string;
     level: number;
-    ordered: boolean;
+    listKind: string;
   };
   set_editor_selection_block_style: {
     selection: EditorSelection;
     style: string;
     level: number;
-    ordered: boolean;
+    listKind: string;
+  };
+  layout_document: Record<string, never>;
+  set_page_setup: {
+    widthTwips: number;
+    heightTwips: number;
+    marginTopTwips: number;
+    marginBottomTwips: number;
+    marginStartTwips: number;
+    marginEndTwips: number;
+  };
+  set_page_orientation: {
+    orientation: string;
+  };
+  set_page_furniture: {
+    slot: string;
+    text: string;
+    field: string;
+    alignment: string;
+  };
+  clear_page_furniture: {
+    slot: string;
+  };
+  set_block_alignment: {
+    blockId: string;
+    alignment: string;
+  };
+  set_editor_selection_block_alignment: {
+    selection: EditorSelection;
+    alignment: string;
+  };
+  set_block_indent_start: {
+    blockId: string;
+    twips: number;
+  };
+  set_editor_selection_block_indent_start: {
+    selection: EditorSelection;
+    twips: number;
+  };
+  set_block_indent_end: {
+    blockId: string;
+    twips: number;
+  };
+  set_editor_selection_block_indent_end: {
+    selection: EditorSelection;
+    twips: number;
+  };
+  set_block_indent_first_line: {
+    blockId: string;
+    twips: number;
+  };
+  set_editor_selection_block_indent_first_line: {
+    selection: EditorSelection;
+    twips: number;
+  };
+  set_block_line_spacing: {
+    blockId: string;
+    spacingMode: string;
+    spacingValue: number;
+  };
+  set_editor_selection_block_line_spacing: {
+    selection: EditorSelection;
+    spacingMode: string;
+    spacingValue: number;
+  };
+  set_block_space_before: {
+    blockId: string;
+    twips: number;
+  };
+  set_editor_selection_block_space_before: {
+    selection: EditorSelection;
+    twips: number;
+  };
+  set_block_space_after: {
+    blockId: string;
+    twips: number;
+  };
+  set_editor_selection_block_space_after: {
+    selection: EditorSelection;
+    twips: number;
+  };
+  set_block_direction: {
+    blockId: string;
+    direction: string;
+  };
+  set_editor_selection_block_direction: {
+    selection: EditorSelection;
+    direction: string;
+  };
+  clear_block_property: {
+    blockId: string;
+    key: string;
+  };
+  clear_editor_selection_block_property: {
+    selection: EditorSelection;
+    key: string;
+  };
+  set_list_item_checked: {
+    blockId: string;
+    checked: boolean;
+  };
+  find_in_document: {
+    query: string;
+    matchCase: boolean;
+    wholeWord: boolean;
+    regex: boolean;
+  };
+  replace_match_in_document: {
+    query: string;
+    matchCase: boolean;
+    wholeWord: boolean;
+    regex: boolean;
+    replacement: string;
+    matchIndex: number;
+  };
+  replace_all_in_document: {
+    query: string;
+    matchCase: boolean;
+    wholeWord: boolean;
+    regex: boolean;
+    replacement: string;
+  };
+  adjust_editor_selection_indent: {
+    selection: EditorSelection;
+    delta: number;
   };
   add_heading: {
     text: string;
@@ -253,18 +385,18 @@ export type DesktopCommandArgs = {
   add_list_item: {
     text: string;
     level: number;
-    ordered: boolean;
+    listKind: string;
   };
   insert_list_item_after: {
     afterBlockId: string;
     text: string;
     level: number;
-    ordered: boolean;
+    listKind: string;
   };
   update_list_item: {
     blockId: string;
     level: number;
-    ordered: boolean;
+    listKind: string;
   };
   adjust_editor_selection_list_indent: {
     selection: EditorSelection;
@@ -299,6 +431,55 @@ export type DesktopCommandArgs = {
     tableBlockId: string;
     rowId: string;
     cellId: string;
+  };
+  insert_table_column: {
+    tableBlockId: string;
+    afterColumnId: string | null;
+  };
+  delete_table_column: {
+    tableBlockId: string;
+    columnId: string;
+  };
+  set_table_column_width: {
+    tableBlockId: string;
+    columnId: string;
+    twips: number;
+  };
+  clear_table_column_width: {
+    tableBlockId: string;
+    columnId: string;
+  };
+  merge_table_cells: {
+    cellId: string;
+    rowSpan: number;
+    columnSpan: number;
+  };
+  split_table_cell: {
+    cellId: string;
+  };
+  set_table_cell_background: {
+    cellId: string;
+    color: string;
+  };
+  set_table_cell_border: {
+    cellId: string;
+    edge: string;
+    style: string;
+    twips: number;
+    color: string;
+  };
+  set_table_cell_vertical_alignment: {
+    cellId: string;
+    alignment: string;
+  };
+  set_table_cell_padding: {
+    cellId: string;
+    edge: string;
+    twips: number;
+  };
+  clear_table_cell_property: {
+    cellId: string;
+    key: string;
   };
   add_citation: Record<string, never>;
   insert_citation: {
@@ -485,6 +666,26 @@ export type DesktopCommandArgs = {
     blockId: string;
     blobHash: string;
   };
+  set_image_block_width: {
+    blockId: string;
+    twips: number;
+  };
+  set_image_block_height: {
+    blockId: string;
+    twips: number;
+  };
+  set_image_block_size: {
+    blockId: string;
+    widthTwips: number;
+    heightTwips: number;
+  };
+  clear_image_block_size: {
+    blockId: string;
+  };
+  set_image_block_placement: {
+    blockId: string;
+    placement: string;
+  };
   set_spreadsheet_cell: {
     address: string;
     value: string;
@@ -511,6 +712,7 @@ export type DesktopCommandArgs = {
     sheetId: string;
     origin: string;
     text: string;
+    sourceOrigin?: string | null;
   };
   clear_spreadsheet_selection: {
     sheetId: string;
@@ -717,6 +919,33 @@ export type DesktopCommandArgs = {
     sourceRange: string;
     targetAddress: string;
   };
+  sort_spreadsheet_range: {
+    sheetId: string;
+    range: string;
+    column: string;
+    descending: boolean;
+    hasHeader: boolean;
+  };
+  fill_spreadsheet_range: {
+    sheetId: string;
+    sourceRange: string;
+    targetRange: string;
+  };
+  import_spreadsheet_csv: {
+    sheetId: string;
+    origin: string;
+    text: string;
+    delimiter?: string | null;
+  };
+  export_spreadsheet_csv: {
+    sheetId: string;
+    delimiter?: string | null;
+  };
+  import_spreadsheet_xlsx: {
+    title: string;
+    base64: string;
+  };
+  export_spreadsheet_xlsx: Record<string, never>;
   add_spreadsheet_named_range: {
     sheetId: string;
     name: string;
@@ -792,6 +1021,12 @@ export type DesktopCommandArgs = {
     path: string;
     documentUuid: string;
   };
+  recover_session: {
+    sessionId: string;
+  };
+  discard_recovery_session: {
+    sessionId: string;
+  };
   scan_local_repository: {
     path: string;
   };
@@ -845,6 +1080,24 @@ export type DesktopCommandArgs = {
     privateKeyPem: string;
   };
   verify_current_signatures: Record<string, never>;
+  list_document_versions: {
+    limit?: number;
+  };
+  open_document_at_version: {
+    manifest: string;
+  };
+  diff_document_versions: {
+    fromManifest: string;
+    toManifest: string;
+  };
+  name_document_version: {
+    manifest: string;
+    label: string;
+    author: string;
+  };
+  restore_document_version: {
+    manifest: string;
+  };
   describe_editor_selection: {
     selection: EditorSelection;
   };
@@ -873,9 +1126,9 @@ export type DesktopCommandArgs = {
 
 export type DesktopCommandName = keyof DesktopCommandArgs;
 export type TextCommandName =
-  | "export_google_docs_json"
-  | "export_google_sheets_json"
   | "copy_spreadsheet_selection_tsv"
+  | "export_spreadsheet_csv"
+  | "export_spreadsheet_xlsx"
   | "verify_current_signature"
   | "verify_current_signatures"
   | "render_document_html"
@@ -903,6 +1156,19 @@ export type SpreadsheetSelectionCommandName =
   | "reduce_spreadsheet_selection";
 export type EditorSelectionCommandName =
   | "describe_editor_selection";
+export type FindMatchesCommandName =
+  | "find_in_document";
+export type VersionViewCommandName =
+  | "list_document_versions"
+  | "open_document_at_version"
+  | "diff_document_versions"
+  | "name_document_version";
+export type ExportCommandName =
+  | "export_google_docs_json"
+  | "export_docx"
+  | "export_google_sheets_json";
+export type DocumentLayoutCommandName =
+  | "layout_document";
 export type DocumentCommandName = Exclude<
   DesktopCommandName,
   | TextCommandName
@@ -916,6 +1182,10 @@ export type DocumentCommandName = Exclude<
   | RuntimeLookupCommandName
   | SpreadsheetSelectionCommandName
   | EditorSelectionCommandName
+  | FindMatchesCommandName
+  | VersionViewCommandName
+  | ExportCommandName
+  | DocumentLayoutCommandName
 >;
 export type CommandArgs<K extends DesktopCommandName> = DesktopCommandArgs[K];
 export type CommandResult<K extends DesktopCommandName> = K extends TextCommandName
@@ -940,4 +1210,12 @@ export type CommandResult<K extends DesktopCommandName> = K extends TextCommandN
                   ? AppSpreadsheetSelection
                   : K extends EditorSelectionCommandName
                     ? AppEditorSelection
-                    : AppDocument;
+                    : K extends FindMatchesCommandName
+                      ? AppFindMatches
+                      : K extends VersionViewCommandName
+                        ? AppVersionView
+                        : K extends ExportCommandName
+                          ? AppExport
+                          : K extends DocumentLayoutCommandName
+                            ? AppDocumentLayout
+                            : AppDocument;

@@ -9,6 +9,7 @@ members = [
     "crates/opendoc-import",
     "crates/opendoc-api",
     "crates/opendoc-render",
+    "crates/opendoc-layout",
     "crates/opendoc-spreadsheet",
     "crates/opendoc-app",
     "crates/opendoc-wasm",

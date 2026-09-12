@@ -17,8 +17,11 @@ fn main() {
     let citation_types_path = desktop_root.join("src/generated/citation.ts");
     let document_types_path = desktop_root.join("src/generated/document.ts");
     let editor_types_path = desktop_root.join("src/generated/editor.ts");
+    let export_types_path = desktop_root.join("src/generated/export.ts");
+    let layout_types_path = desktop_root.join("src/generated/layout.ts");
     let runtime_types_path = desktop_root.join("src/generated/runtime.ts");
     let spreadsheet_types_path = desktop_root.join("src/generated/spreadsheet.ts");
+    let version_types_path = desktop_root.join("src/generated/version.ts");
     let docs_path = workspace.join("docs/APP_API_CONTRACT_V0.md");
     let check = std::env::args().any(|arg| arg == "--check");
 
@@ -29,8 +32,11 @@ fn main() {
     let citation_types = citation_types_ts();
     let document_types = document_types_ts();
     let editor_types = editor_types_ts();
+    let export_types = export_types_ts();
+    let layout_types = layout_types_ts();
     let runtime_types = runtime_types_ts();
     let spreadsheet_types = spreadsheet_types_ts();
+    let version_types = version_types_ts();
     let command_reference = command_reference_markdown();
 
     if check {
@@ -62,6 +68,16 @@ fn main() {
             "TypeScript editor DTO bindings",
         );
         assert_same(
+            &export_types_path,
+            &export_types,
+            "TypeScript export DTO bindings",
+        );
+        assert_same(
+            &layout_types_path,
+            &layout_types,
+            "TypeScript layout DTO bindings",
+        );
+        assert_same(
             &runtime_types_path,
             &runtime_types,
             "TypeScript runtime DTO bindings",
@@ -70,6 +86,11 @@ fn main() {
             &spreadsheet_types_path,
             &spreadsheet_types,
             "TypeScript spreadsheet DTO bindings",
+        );
+        assert_same(
+            &version_types_path,
+            &version_types,
+            "TypeScript version DTO bindings",
         );
         assert_generated_section_same(&docs_path, &command_reference, "API command reference");
     } else {
@@ -82,10 +103,14 @@ fn main() {
         fs::write(&document_types_path, document_types)
             .expect("write TypeScript document DTO bindings");
         fs::write(&editor_types_path, editor_types).expect("write TypeScript editor DTO bindings");
+        fs::write(&export_types_path, export_types).expect("write TypeScript export DTO bindings");
+        fs::write(&layout_types_path, layout_types).expect("write TypeScript layout DTO bindings");
         fs::write(&runtime_types_path, runtime_types)
             .expect("write TypeScript runtime DTO bindings");
         fs::write(&spreadsheet_types_path, spreadsheet_types)
             .expect("write TypeScript spreadsheet DTO bindings");
+        fs::write(&version_types_path, version_types)
+            .expect("write TypeScript version DTO bindings");
         update_generated_section(&docs_path, &command_reference)
             .expect("write API command reference");
     }
@@ -152,8 +177,11 @@ fn command_bindings_ts() -> String {
 import type {{ AppAuditView }} from "./audit";
 import type {{ AppCitationItem }} from "./citation";
 import type {{ AppDocument, EditorResult }} from "./document";
-import type {{ AppEditorSelection, EditorSelection }} from "./editor";
+import type {{ AppEditorSelection, AppFindMatches, EditorSelection }} from "./editor";
+import type {{ AppExport }} from "./export";
+import type {{ AppDocumentLayout }} from "./layout";
 import type {{ AppSpreadsheetSelection }} from "./spreadsheet";
+import type {{ AppVersionView }} from "./version";
 import type {{
   OpenDocAuthorizationDecision,
   OpenDocRuntimeLookupResult,
@@ -178,7 +206,11 @@ export type AppCommandResult =
   | {{ kind: "SyncRelay"; value: OpenDocSyncRelayResult }}
   | {{ kind: "RuntimeLookup"; value: OpenDocRuntimeLookupResult }}
   | {{ kind: "SpreadsheetSelection"; value: AppSpreadsheetSelection }}
-  | {{ kind: "EditorSelection"; value: AppEditorSelection }};
+  | {{ kind: "EditorSelection"; value: AppEditorSelection }}
+  | {{ kind: "FindMatches"; value: AppFindMatches }}
+  | {{ kind: "VersionView"; value: AppVersionView }}
+  | {{ kind: "Export"; value: AppExport }}
+  | {{ kind: "DocumentLayout"; value: AppDocumentLayout }};
 
 export type DesktopCommandArgs = {{
 {}
@@ -207,6 +239,14 @@ export type SpreadsheetSelectionCommandName =
 {};
 export type EditorSelectionCommandName =
 {};
+export type FindMatchesCommandName =
+{};
+export type VersionViewCommandName =
+{};
+export type ExportCommandName =
+{};
+export type DocumentLayoutCommandName =
+{};
 export type DocumentCommandName = Exclude<
   DesktopCommandName,
   | TextCommandName
@@ -220,6 +260,10 @@ export type DocumentCommandName = Exclude<
   | RuntimeLookupCommandName
   | SpreadsheetSelectionCommandName
   | EditorSelectionCommandName
+  | FindMatchesCommandName
+  | VersionViewCommandName
+  | ExportCommandName
+  | DocumentLayoutCommandName
 >;
 export type CommandArgs<K extends DesktopCommandName> = DesktopCommandArgs[K];
 export type CommandResult<K extends DesktopCommandName> = K extends TextCommandName
@@ -244,7 +288,15 @@ export type CommandResult<K extends DesktopCommandName> = K extends TextCommandN
                   ? AppSpreadsheetSelection
                   : K extends EditorSelectionCommandName
                     ? AppEditorSelection
-                    : AppDocument;
+                    : K extends FindMatchesCommandName
+                      ? AppFindMatches
+                      : K extends VersionViewCommandName
+                        ? AppVersionView
+                        : K extends ExportCommandName
+                          ? AppExport
+                          : K extends DocumentLayoutCommandName
+                            ? AppDocumentLayout
+                            : AppDocument;
 "#,
         COMMANDS
             .iter()
@@ -317,7 +369,99 @@ export type CommandResult<K extends DesktopCommandName> = K extends TextCommandN
                 .map(Vec::as_slice)
                 .unwrap_or(&[])
         ),
+        union_type(
+            names_by_return
+                .get(&CommandReturn::AppFindMatches)
+                .map(Vec::as_slice)
+                .unwrap_or(&[])
+        ),
+        union_type(
+            names_by_return
+                .get(&CommandReturn::AppVersionView)
+                .map(Vec::as_slice)
+                .unwrap_or(&[])
+        ),
+        union_type(
+            names_by_return
+                .get(&CommandReturn::AppExport)
+                .map(Vec::as_slice)
+                .unwrap_or(&[])
+        ),
+        union_type(
+            names_by_return
+                .get(&CommandReturn::AppDocumentLayout)
+                .map(Vec::as_slice)
+                .unwrap_or(&[])
+        ),
     )
+}
+
+fn version_types_ts() -> String {
+    r#"// Generated by cargo run -p opendoc-api --bin generate_command_contract from Rust version DTOs.
+// Do not edit by hand.
+
+import type { AppDocument } from "./document";
+import type { AppWarning } from "./audit";
+
+export type AppVersionSigner = {
+  signer: string;
+  signer_display: string;
+  title: string;
+  signed_at_ms: number;
+};
+
+export type AppDocumentVersion = {
+  manifest: string;
+  parent: string | null;
+  snapshot: string;
+  created_at_ms: number;
+  signers: AppVersionSigner[];
+  label: string | null;
+  label_author: string | null;
+  snapshot_present: boolean;
+  is_head: boolean;
+  is_current: boolean;
+};
+
+export type AppVersionPreview = {
+  manifest: string;
+  read_only: boolean;
+  document: AppDocument;
+};
+
+export type AppVersionDiffEntry = {
+  change: string;
+  block_id: string;
+  kind: string;
+  path: string;
+  before_text: string;
+  after_text: string;
+};
+
+export type AppVersionDiff = {
+  from_manifest: string;
+  to_manifest: string;
+  added: number;
+  removed: number;
+  changed: number;
+  entries: AppVersionDiffEntry[];
+};
+
+export type AppVersionView = {
+  document_uuid: string;
+  branch: string;
+  repository_root: string | null;
+  repository_backend: string | null;
+  head: string | null;
+  current: string | null;
+  versions: AppDocumentVersion[];
+  truncated: boolean;
+  preview: AppVersionPreview | null;
+  diff: AppVersionDiff | null;
+  warnings: AppWarning[];
+};
+"#
+    .to_string()
 }
 
 fn audit_types_ts() -> String {
@@ -473,6 +617,19 @@ export type AppOperationRecord = {
   created_at_ms: number;
 };
 
+export type AppRecoverySession = {
+  id: string;
+  document_uuid: string;
+  title: string;
+  started_at_ms: number;
+  operation_count: number;
+  repository_root: string | null;
+  repository_backend: string | null;
+  base_manifest: string | null;
+  operations: AppOperationRecord[];
+  truncated: boolean;
+};
+
 export type AppSignature = {
   target: string;
   signer: string;
@@ -541,6 +698,7 @@ fn document_types_ts() -> String {
 import type {
   AppOperationRecord,
   AppRecentDocument,
+  AppRecoverySession,
   AppSignature,
   AppWarning,
 } from "./audit";
@@ -555,6 +713,16 @@ export type AppDocument = {
   title: string;
   locale: string;
   doi: string | null;
+  /** The sheet the document is laid out on. Source state: stored, signed and
+   * merged. Lengths are twips (twentieths of a point). */
+  page_setup?: AppPageSetup;
+  /** Blocks repeated at the top of every page. Source state. */
+  header?: AppBlock[];
+  /** Blocks repeated at the bottom of every page. Source state. */
+  footer?: AppBlock[];
+  /** Everything about the page that is derived rather than stored. Projection
+   * only: it never reaches a snapshot or a signature. */
+  page_layout?: AppPageLayout;
   visible_text: string;
   word_count: number;
   character_count: number;
@@ -577,23 +745,153 @@ export type AppDocument = {
   has_unsaved_changes: boolean;
   operation_count: number;
   operations: AppOperationRecord[];
+  recovery_sessions: AppRecoverySession[];
   body_html: string;
   footnotes_html: string;
+  /** Rendered header markup, rendered once. Repeating it on every page is
+   * pagination's job — see docs/adr/0009-pagination-and-page-geometry.md. */
+  header_html?: string;
+  /** Rendered footer markup, rendered once. */
+  footer_html?: string;
+};
+
+/** Page geometry in twips (twentieths of a point), the unit the model stores,
+ * so the projection cannot drift by rounding. `start`/`end` margins are
+ * direction-relative, like block indents. */
+export type AppPageSetup = {
+  width_twips: number;
+  height_twips: number;
+  margin_top_twips: number;
+  margin_bottom_twips: number;
+  margin_start_twips: number;
+  margin_end_twips: number;
+  margin_header_twips: number;
+  margin_footer_twips: number;
+};
+
+/** Everything about the page derived from AppPageSetup rather than stored
+ * beside it. Projection only. */
+export type AppPageLayout = {
+  /** The standard size these dimensions are, in either orientation, or null
+   * for a custom page. Recovered by measuring. */
+  size_name?: string | null;
+  /** "portrait" | "landscape", derived from the dimensions. */
+  orientation?: string;
+  /** Page geometry as CSS custom properties, ready for a style attribute. */
+  style?: string;
+  /** The same geometry as an @page rule. Custom properties do not apply inside
+   * @page, so the print box needs its own concrete projection. */
+  print_style?: string;
+  /** The sizes the page-setup dialog offers, so the frontend never hard-codes
+   * a paper dimension. */
+  size_presets?: AppPageSizePreset[];
+};
+
+export type AppPageSizePreset = {
+  name: string;
+  label: string;
+  width_twips: number;
+  height_twips: number;
 };
 
 export type AppBlock = {
   id: string;
   kind: string;
   level: number | null;
+  /** Projection of `list_kind`: true only for an ordered list item. A checklist
+   * item is false here — read `list_kind` to tell a checklist from a bullet. */
   ordered: boolean | null;
+  /** The list run this item belongs to. Adjacent items sharing this id are one
+   * list; a different id starts a new list and restarts numbering. */
+  list_id?: string | null;
+  /** "bullet" | "ordered" | "checklist" */
+  list_kind?: string | null;
+  /** Checkbox state, present only for checklist items. */
+  checked?: boolean | null;
+  properties?: AppBlockProperties;
   style_value: string;
   equation_source: string | null;
   blob_hash?: string | null;
   alt_text?: string | null;
+  /** Display width of an image block, in twips. Null/absent means the image is
+   * drawn at the size its bytes decode to — never filled in with that size. */
+  image_width_twips?: number | null;
+  /** Display height, in twips. Absent with a width present means "scale to keep
+   * the aspect ratio". */
+  image_height_twips?: number | null;
+  /** "block" | "wrap-start" | "wrap-end" */
+  image_placement?: string | null;
   content: AppInline[];
   rows: AppBlock[][][];
   row_ids?: string[];
   cell_ids?: string[][];
+  /** The grid's shape — columns and per-cell spans and styling — present only
+   * on a table block. `rows`, `row_ids` and `cell_ids` carry its contents. */
+  table?: AppTable | null;
+};
+
+/** The shape of a table block. `cells` is in the same order as `rows`. */
+export type AppTable = {
+  columns: AppTableColumn[];
+  cells: AppTableCell[][];
+};
+
+export type AppTableColumn = {
+  id: string;
+  /** Null/absent means auto: the view shares out what the sized columns leave. */
+  width_twips?: number | null;
+};
+
+export type AppTableCell = {
+  row_span: number;
+  column_span: number;
+  /** Whether this cell is hidden underneath a merged neighbour. Derived from
+   * the spans in Rust, so the view never works the geometry out itself. */
+  covered: boolean;
+  properties?: AppTableCellProperties;
+};
+
+/** Cell-level formatting. Lengths are twips, colours are hex (#rrggbb), and a
+ * null/absent field means the cell inherits that property. */
+export type AppTableCellProperties = {
+  background?: string | null;
+  border_top?: AppCellBorder | null;
+  border_bottom?: AppCellBorder | null;
+  border_start?: AppCellBorder | null;
+  border_end?: AppCellBorder | null;
+  /** "top" | "middle" | "bottom" */
+  vertical_alignment?: string | null;
+  padding_top_twips?: number | null;
+  padding_bottom_twips?: number | null;
+  padding_start_twips?: number | null;
+  padding_end_twips?: number | null;
+};
+
+export type AppCellBorder = {
+  /** "none" | "solid" | "dashed" | "dotted" | "double" */
+  style: string;
+  twips: number;
+  color: string;
+};
+
+/** Block-level paragraph formatting. Lengths are twips (twentieths of a point),
+ * the unit the model stores, so the projection cannot drift by rounding.
+ * A null/absent field means the block inherits that property. */
+export type AppBlockProperties = {
+  /** "start" | "center" | "end" | "justify" */
+  alignment?: string | null;
+  indent_start_twips?: number | null;
+  indent_end_twips?: number | null;
+  /** Negative means a hanging indent. */
+  indent_first_line_twips?: number | null;
+  /** "multiple" | "exact" | "at-least" */
+  line_spacing_mode?: string | null;
+  /** Thousandths of a line for "multiple", twips for the other two modes. */
+  line_spacing_value?: number | null;
+  space_before_twips?: number | null;
+  space_after_twips?: number | null;
+  /** "ltr" | "rtl" */
+  direction?: string | null;
 };
 
 export type AppInline = {
@@ -720,6 +1018,63 @@ export type EditorInput = {
   input_type: string;
   data: string | null;
   html?: string | null;
+};
+
+export type AppFindMatch = {
+  start: EditorPosition;
+  end: EditorPosition;
+  text: string;
+};
+
+export type AppFindMatches = {
+  matches: AppFindMatch[];
+};
+"#
+    .to_string()
+}
+
+fn export_types_ts() -> String {
+    r#"// Generated by cargo run -p opendoc-api --bin generate_command_contract from Rust export DTOs.
+// Do not edit by hand.
+
+import type { AppWarning } from "./audit";
+
+export type AppExportEncoding = "text" | "base64";
+
+export type AppExport = {
+  content: string;
+  encoding: AppExportEncoding;
+  media_type: string;
+  file_extension: string;
+  warnings: AppWarning[];
+};
+"#
+    .to_string()
+}
+
+/// The layout DTOs. Positions are twips — the model's own unit, so a test or
+/// a PDF writer can assert on them without converting — while the one value
+/// the frontend applies verbatim is already a CSS length, so the frontend
+/// does no arithmetic.
+fn layout_types_ts() -> String {
+    r#"// Generated by cargo run -p opendoc-api --bin generate_command_contract from Rust layout DTOs.
+// Do not edit by hand.
+
+export type AppBlockPlacement = {
+  block_id: string;
+  page: number;
+  top_twips: number;
+  height_twips: number;
+  lines: number;
+  page_break_margin?: string;
+  exact: boolean;
+};
+
+export type AppDocumentLayout = {
+  page_count: number;
+  exact: boolean;
+  style: string;
+  blocks: AppBlockPlacement[];
 };
 "#
     .to_string()

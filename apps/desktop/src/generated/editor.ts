@@ -29,3 +29,13 @@ export type EditorInput = {
   data: string | null;
   html?: string | null;
 };
+
+export type AppFindMatch = {
+  start: EditorPosition;
+  end: EditorPosition;
+  text: string;
+};
+
+export type AppFindMatches = {
+  matches: AppFindMatch[];
+};

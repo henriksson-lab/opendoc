@@ -1,6 +1,6 @@
 # OpenDoc Restructure Plan
 
-Status: active cleanup plan, generated 2026-09-06. Last audited 2026-09-09.
+Status: active cleanup plan, generated 2026-09-06. Last audited 2026-09-11.
 
 **Phase:** Phases 0-4 are complete; Phase 5 (frontend) is the current work.
 Phases 6-8 are open, except Phase 8 archiving, which is done.
@@ -13,18 +13,20 @@ and `opendoc-api`. The command contract is fully generated from Rust metadata
 and drift-checked in `npm run verify`. The per-extraction history is in
 [Completed Work](#completed-work); do not re-summarize it here.
 
-**Next.** Split `apps/desktop/src/main.ts` by surface (it is still one
-1,871-line file), move the last TypeScript document semantics behind Rust
-commands, and bring the four oversized Rust files listed in
-[Open Problems](#open-problems) under the 2,000-line target. See
+**Next.** Split `apps/desktop/src/main.ts` by surface (it is still one file,
+now 2,881 lines) and move the last TypeScript document semantics behind Rust
+commands. The Rust side of the 2,000-line target was closed on 2026-09-11; see
+[Open Problems](#open-problems) for the before/after table. See
 [Next Architecture Slice](#next-architecture-slice) for ordering and
 [Outstanding Work](#outstanding-work) for the tracked items.
 
 **Verification baseline.** `npm run verify` from `apps/desktop` last passed on
 2026-09-06 (Rust format, workspace clippy, workspace tests, OpenDAL app tests,
 generated-contract staleness check, TypeScript typecheck, WASM build, desktop
-build, jsdom smoke). The 2026-09-09 audit was a read-only re-verification of
-this document against the tree; it did not rerun the gate.
+build, jsdom smoke). A real-browser harness (`npm run e2e`) has since been
+added alongside it. The 2026-09-09 and 2026-09-11 audits were read-only
+re-verifications of this document against the tree; neither reran the whole
+gate.
 
 Purpose: replace the unclear prototype state with a buildable, well-structured
 Rust-first document system with a Rust/WASM frontend core, a thin TypeScript UI
@@ -42,59 +44,87 @@ list.
 Only problems that are still true today. Everything already fixed is recorded
 once, in [Completed Work](#completed-work).
 
-### The 2,000-line target is not met workspace-wide
+### The 2,000-line target is met across `crates/**` — closed 2026-09-11
 
-Phase 2's exit criterion says no Rust source file exceeds 2,000 lines. That
-holds for `opendoc-app` (largest `editor.rs`, 1,942), `opendoc-api` (largest
-`commands.rs`, 1,971), `opendoc-spreadsheet` (largest `functions_legacy.rs`,
-1,922), and `opendoc-render` (1,169). It does **not** hold for the older
-domain crates, which were never part of the app-monolith extraction:
+Phase 2's exit criterion says no Rust source file exceeds 2,000 lines. Twelve
+files were over it; all twelve were split on 2026-09-11 (PLAN77 G5) and no
+file under `crates/**` is over now. The largest remaining are
+`opendoc-spreadsheet/src/functions_legacy.rs` (1,922),
+`opendoc-import/src/docx_write.rs` (1,893) and
+`opendoc-app/src/repository_io.rs` (1,843) — none of which were touched here.
 
-| File | Total | Non-test (before the trailing `#[cfg(test)]`) |
-| --- | --- | --- |
-| `crates/opendoc-merge/src/lib.rs` | 12,227 | ~3,424 |
-| `crates/opendoc-import/src/lib.rs` | 5,053 | ~2,090 |
-| `crates/opendoc-store/src/lib.rs` | 4,744 | ~2,537 |
-| `crates/opendoc-import/src/docx.rs` | 2,332 | ~2,260 |
-| `crates/opendoc-core/src/lib.rs` | 2,690 | ~1,316 |
+| File | Before | Implementation | Inline tests | After |
+| --- | --- | --- | --- | --- |
+| `opendoc-merge/src/lib.rs` | 14,364 | 4,279 | 10,085 | 61 + 30 modules, largest 1,221 |
+| `opendoc-import/src/lib.rs` | 5,457 | 2,448 | 3,009 | 375 + 8 new modules and 10 new test modules, largest 715 |
+| `opendoc-core/src/lib.rs` | 5,250 | 3,207 | 2,043 | 51 + 20 modules, largest 735 |
+| `opendoc-store/src/lib.rs` | 5,216 | 2,790 | 2,426 | 43 + 14 modules, largest 1,177 |
+| `opendoc-app/src/document_commands.rs` | 2,860 | 1,977 | 883 | 6 command modules + 1 test module, largest 761 |
+| `opendoc-import/src/docx.rs` | 2,853 | 2,781 | 72 | 58 + `docx/` (8 modules + tests), largest 1,276 |
+| `opendoc-api/src/commands.rs` | 2,571 | 2,558 | 13 | 145 + `commands/` (15 spec modules), largest 632 |
+| `opendoc-render/src/lib.rs` | 2,361 | 1,606 | 755 | 197 + 15 modules, largest 687 |
+| `opendoc-app/src/document.rs` | 2,238 | 2,238 | 0 | 8 DTO modules, largest 541 |
+| `opendoc-app/src/repository_io.rs` | 2,068 | 1,841 | 227 | 1,843 + `repository_io/` tests |
+| `opendoc-api/src/command_parse.rs` | 2,021 | 2,021 | 0 | 3 modules, largest 1,259 |
+| `opendoc-app/src/editor.rs` | 2,009 | 1,461 | 548 | 1,464 + `editor/` tests |
 
-Four of the five are over target on implementation lines alone;
-`opendoc-core/src/lib.rs` is over only because of its inline test tail. Reading
-`wc -l crates/*/src/*.rs` and treating the whole workspace as compliant is the
-error this table exists to prevent.
+The split was behaviour-neutral: `cargo test --release --workspace` stayed at
+761 passing / 0 failing, clippy and `cargo fmt --all --check` stayed clean, the
+generated command contract was unchanged (`generate:commands -- --check`), and
+`npm run e2e` stayed at 32/32. Public crate APIs are identical; only
+crate-internal visibility widened where a split moved a caller into a sibling
+module.
+
+Reading `wc -l crates/*/src/*.rs` without also counting the files in the new
+`docx/`, `commands/`, `editor/` and `repository_io/` subdirectories will
+under-report the tree; measure with `find crates -name '*.rs' | xargs wc -l`.
 
 ### `apps/desktop/src/main.ts` is not split by surface
 
-It is 1,871 lines — under the 2,000-line ceiling, but still a single module
-holding home screen, menus, toolbar, status bar, find/replace, side panels,
-spreadsheet grid, and all action handlers. The Phase 5 task is a split by
-surface, not a line count, and it is not done.
+It is 2,881 lines (measured 2026-09-11) — now *over* the 2,000-line ceiling,
+and still a single module holding home screen, menus, toolbar, status bar,
+find/replace, side panels, spreadsheet grid, and all action handlers. The
+Phase 5 task is a split by surface, not a line count, and it is not done; the
+ceiling it was previously under has since been crossed.
 
 ### Remaining TypeScript document semantics
 
-`findMatches()` in `main.ts` walks the document tree and does case-folded text
-matching with code-point offset arithmetic. That is document semantics in
-TypeScript and belongs behind a Rust command, like the selection, mark, style,
-and footnote workflows that already moved.
+**Closed 2026-09-11.** `findMatches()` in `main.ts` walked the document tree
+doing case-folded matching with code-point offset arithmetic. Matching now
+lives in `crates/opendoc-app/src/find.rs` behind `find_in_document`,
+`replace_match_in_document` and `replace_all_in_document`; `findMatches` is
+deleted and `main.ts` keeps only the find bar's DOM.
 
-### `new_sample()` is still the default constructor
+### `new_sample()` is no longer the boot path; the constructor set is still incomplete
 
-`OpenDocApp::new_sample()` is the boot path in both runtimes
-(`apps/desktop/src-tauri/src/main.rs:183`, `crates/opendoc-wasm/src/lib.rs:23`
-and `:47`) and in app tests. Only `new_sample` and `new_document` exist on
-`state.rs`; the Phase 2 rule requiring distinct `new_empty_document`,
-`new_empty_workbook`, `new_sample_document`, and `open_repository`
-constructors is unimplemented, so sample workbook/document assumptions still
-leak into runtime boot.
+Closed on 2026-09-11: both runtimes boot through
+`OpenDocApp::new_empty_document()` (`apps/desktop/src-tauri/src/main.rs`,
+`crates/opendoc-wasm/src/lib.rs` — the thread-local initialiser and `reset()`),
+and `new_sample` is now `#[cfg(test)] pub(crate)`, so booting a runtime into
+demo content is a compile error rather than a convention.
 
-### Support files are still untracked
+Still open:
+
+- `new_empty_workbook` and `new_sample_document` do not exist. A workbook
+  constructor has no caller until there is a `create_workbook` command —
+  today the home screen's "Blank spreadsheet" tile dispatches the same
+  `create_document`, and the doc/sheet distinction lives only in TypeScript
+  view state. `open_repository` construction exists as
+  `open_saved_projection`, an instance method rather than a constructor.
+- `OpenDocApp::new_document` still seeds `SpreadsheetWorkbook::sample()` (the
+  "Prototype Sheet" demo), so "Blank spreadsheet" is not blank — parity FS-19.
+  `OpenDocApp::blank_workbook` exists and is what it should call; the blocker
+  is that the `spreadsheet_tests.rs` fixtures read the demo cells back out of
+  `new_document` and must state their own fixture data first.
+
+### Support files are tracked (closed 2026-09-11)
 
 `apps/desktop/package-lock.json`, `apps/desktop/scripts/build-wasm.mjs`,
 `apps/desktop/scripts/smoke.mjs`, `apps/desktop/src/generated/`,
-`docs/GOOGLE_DOCS_PARITY_TODO.md`, `docs/archive/`, and
-`docs/adr/0004-service-backend-boundary.md` are all untracked in git. The
-Phase 0 *policy* is settled (see Phase 0), and `npm run verify` depends on
-several of them, but the commit has not happened.
+`docs/GOOGLE_DOCS_PARITY_TODO.md`, `docs/archive/`,
+`docs/adr/0004-service-backend-boundary.md` and this plan are all under
+version control now (`git ls-files` resolves each). A clean checkout has what
+`npm run verify` depends on.
 
 ### Dead-code quarantine in `opendoc-spreadsheet`
 
@@ -194,7 +224,7 @@ lines, of which 1,588 are generated under `src/generated/`.
 - `apps/desktop/src/editor.ts` (531 lines): DOM selection/input adapter only.
   **Holds.** `DocumentEditor` plus DOM morphing and code-point/UTF-16 offset
   mapping; no command or document semantics.
-- `apps/desktop/src/main.ts` (1,871 lines): screen composition and event
+- `apps/desktop/src/main.ts` (2,881 lines): screen composition and event
   wiring. **Does not hold yet** — one file per [Open Problems](#open-problems).
   Split it into modules by surface before adding features. Spreadsheet address
   parsing, range normalization, clipboard TSV semantics, formula action
@@ -290,7 +320,9 @@ Rules:
 - JSON command dispatch is an edge adapter, not the core API. Done.
 - App construction must distinguish `new_empty_document`,
   `new_empty_workbook`, `new_sample_document`, and `open_repository`.
-  **Not done** — see [Open Problems](#open-problems).
+  **Partly done** — `new_empty_document` exists and is the boot path for both
+  runtimes; `new_sample` is test-only. The workbook and sample constructors
+  are still missing; see [Open Problems](#open-problems).
 - Rendering must be pure projection. It must never force recalculation or
   persistence side effects.
 - Spreadsheet recalculation must be explicit or occur inside spreadsheet
@@ -298,11 +330,9 @@ Rules:
 
 Exit criteria:
 
-- **Partly met:** no Rust source file over 2,000 lines without an explicit
-  exception. True inside `opendoc-app`, `opendoc-api`, `opendoc-spreadsheet`,
-  and `opendoc-render`; false for the five older-crate files tabulated in
-  [Open Problems](#open-problems). Those are the declared outstanding
-  exceptions, not accepted permanent ones.
+- **Met (2026-09-11):** no Rust source file under `crates/**` is over 2,000
+  lines. The twelve files that were over are tabulated with their before/after
+  numbers in [Open Problems](#open-problems).
 - **Met:** `OpenDocApp` is a facade, not the owner of every domain algorithm.
 - **Met:** there is one source of truth for spreadsheet evaluation.
 - **Met:** Tauri and WASM call the same Rust facade.
@@ -322,9 +352,11 @@ Exit evidence, re-verified 2026-09-09:
   construction, import/export, and repository persistence.
 - `opendoc-spreadsheet` is the single spreadsheet model/evaluator crate and no
   longer exports temporary app-era `App*` compatibility aliases.
-- Every `crates/opendoc-app/src/*.rs` file is under 2,000 lines (largest:
-  `editor.rs` at 1,942), as is every primary desktop TypeScript source file
-  (largest: `main.ts` at 1,871).
+- Every `crates/opendoc-app/src/*.rs` file was under 2,000 lines at the time
+  of the extraction (largest then: `editor.rs` at 1,942). It drifted over
+  during the parity work and was brought back on 2026-09-11: the largest file
+  in the crate is now `repository_io.rs` at 1,843. `main.ts` is tracked
+  separately in [Open Problems](#open-problems).
 
 ## Phase 3: Make Contracts Generated — done
 
@@ -404,14 +436,15 @@ Remaining:
   - panels
   - dialogs
   - runtime/status
-- Move find/replace matching (`findMatches`) out of TypeScript and behind a
-  Rust command.
+- ~~Move find/replace matching (`findMatches`) out of TypeScript and behind a
+  Rust command.~~ Done 2026-09-11.
 - Remove any remaining TypeScript document mutation helpers uncovered by the
   split.
 
 Exit criteria:
 
-- TypeScript has no app-domain duplicate logic. **Not yet** — find/replace.
+- TypeScript has no app-domain duplicate logic. **Met** for find/replace as of
+  2026-09-11; still to check whatever the `main.ts` split uncovers.
 - Browser and Tauri use the same command bindings. **Met.**
 - Clean checkout browser build works after documented commands. **Met.**
 
@@ -519,7 +552,7 @@ Exit criteria:
 10. `core-crate-split`: bring `opendoc-merge`, `opendoc-import`, and
     `opendoc-store` under the 2,000-line target.
 11. `explicit-constructors`: replace `new_sample()` as the default app
-    constructor.
+    constructor. Boot paths done; the workbook/sample constructors remain.
 12. `dependency-prune`: remove stale app-api dependencies after ownership
     moves. Done.
 13. `verify-ci`: make clean-checkout verification deterministic, starting by
@@ -550,40 +583,64 @@ cleanup of the previous mock/app-api boundary:
 
 ## Outstanding Work
 
-Unchecked items are the live list. Each was confirmed against the tree on
-2026-09-09.
+Unchecked items are the live list. Each was re-confirmed against the tree on
+2026-09-11 by reading the code named in its evidence line; a ticked item here
+carries the evidence that closed it.
 
 ### Frontend
 
-- [ ] Split `apps/desktop/src/main.ts` (1,871 lines) into bootstrap, document
-  screen, spreadsheet screen, toolbar/menu bindings, panels, dialogs, and
+- [ ] Split `apps/desktop/src/main.ts` (2,881 lines on 2026-09-11, up from
+  1,871 and now over the 2,000-line ceiling) into bootstrap, document screen,
+  spreadsheet screen, toolbar/menu bindings, panels, dialogs, and
   runtime/status modules.
-- [ ] Move find/replace text matching (`findMatches`, `main.ts`) behind a Rust
-  command and generated binding.
+- [x] Move find/replace text matching (`findMatches`, `main.ts`) behind a Rust
+  command and generated binding. _(done 2026-09-11: `app/find.rs`,
+  `find_in_document` / `replace_match_in_document` / `replace_all_in_document`;
+  matching spans inline runs and carries match case, whole word and regex.)_
 - [ ] Remove any remaining TypeScript document mutation helpers exposed by the
   `main.ts` split.
 
 ### Rust file size
 
-- [ ] `crates/opendoc-merge/src/lib.rs` — 12,227 lines (~3,424 non-test).
-- [ ] `crates/opendoc-import/src/lib.rs` — 5,053 lines (~2,090 non-test).
-- [ ] `crates/opendoc-store/src/lib.rs` — 4,744 lines (~2,537 non-test).
-- [ ] `crates/opendoc-import/src/docx.rs` — 2,332 lines (~2,260 non-test).
-- [ ] `crates/opendoc-core/src/lib.rs` — 2,690 lines (~1,316 non-test); over
-  target only because of its inline test tail. Split the tests into a
-  `*_tests.rs` sibling or record an explicit exception.
+Every one of these grew during the 2026-09-11 waves; the counts are from
+`wc -l` on that date.
+
+- [ ] `crates/opendoc-merge/src/lib.rs` — 13,140 lines (was 12,227).
+- [ ] `crates/opendoc-import/src/lib.rs` — 5,415 lines (was 5,053).
+- [ ] `crates/opendoc-store/src/lib.rs` — 5,210 lines (was 4,744).
+- [ ] `crates/opendoc-import/src/docx.rs` — 2,610 lines (was 2,332).
+- [ ] `crates/opendoc-core/src/lib.rs` — 3,444 lines (was 2,690); over target
+  partly because of its inline test tail. Split the tests into a `*_tests.rs`
+  sibling or record an explicit exception.
 
 ### Domain model and construction
 
-- [ ] Replace `OpenDocApp::new_sample()` as the default constructor with
-  `new_empty_document`, `new_empty_workbook`, `new_sample_document`, and
-  `open_repository`; update the Tauri and WASM boot paths and the tests that
-  depend on sample state.
-- [ ] Introduce typed per-domain IDs (Phase 6).
+- [x] Take `OpenDocApp::new_sample()` off the runtime boot path.
+  `OpenDocApp::new_empty_document()` (`opendoc-app/src/state.rs`) is what the
+  Tauri shell (`apps/desktop/src-tauri/src/main.rs`) and the WASM shell
+  (`crates/opendoc-wasm/src/lib.rs`, both the thread-local initialiser and
+  `reset()`) construct; `new_sample` is `#[cfg(test)] pub(crate)` and is
+  reachable only from the crate's own test modules.
+- [ ] Finish the constructor set: `new_empty_workbook` and
+  `new_sample_document` do not exist, `open_repository` is an instance method
+  (`open_saved_projection`), and `new_document` still seeds the demo workbook
+  (FS-19). See [Open Problems](#open-problems) for what each needs.
+- [ ] Introduce typed per-domain IDs (Phase 6). `opendoc-core` still has only
+  `StableId` (one prefixed string type for blocks, inlines, list runs,
+  footnotes and actors alike) and `HashRef`.
 - [ ] Introduce smart constructors for ranges, marks, list numbering, table
-  shapes, formulas, named ranges, and repository locators (Phase 6).
+  shapes, formulas, named ranges, and repository locators (Phase 6). Partly
+  done: block properties landed as validated types
+  (`BlockProperties`/`Length`/`LineSpacing`/`ListKind`, each with `validate`
+  or a fallible constructor), and list runs now have allocated identities.
+  Marks, table shapes, formulas, named ranges and repository locators are
+  still raw.
 - [ ] Enforce validate-before-commit and validate-after-commit in operation
-  application (Phase 6).
+  application (Phase 6). Half done: `merge_operations` ends with
+  `document.validate()?` (`opendoc-merge/src/lib.rs`), so no invalid document
+  is committed; there is no pre-commit validation of a locally generated
+  operation — `validate_operation_envelopes` (`opendoc-app/src/operation.rs`)
+  guards replayed/imported envelopes only.
 
 ### Crate surface and hygiene
 
@@ -595,11 +652,12 @@ Unchecked items are the live list. Each was confirmed against the tree on
 
 ### Repository hygiene
 
-- [ ] Commit the untracked files the build already depends on:
+- [x] The files the build depends on are tracked:
   `apps/desktop/package-lock.json`, `apps/desktop/scripts/build-wasm.mjs`,
   `apps/desktop/scripts/smoke.mjs`, `apps/desktop/src/generated/`,
   `docs/GOOGLE_DOCS_PARITY_TODO.md`, `docs/archive/`,
-  `docs/adr/0004-service-backend-boundary.md`, and this plan.
+  `docs/adr/0004-service-backend-boundary.md` and this plan all resolve under
+  `git ls-files`.
 
 ### Service backend
 
@@ -613,6 +671,41 @@ Unchecked items are the live list. Each was confirmed against the tree on
 
 The authoritative record of what has been done. Facts here are not repeated in
 the status block, the open-problem list, or the phase bodies.
+
+### 2026-09-11 waves
+
+Verified by reading the named code on 2026-09-11, not from a changelog.
+
+- [x] Runtime boot no longer starts in demo content: both shells construct
+  `OpenDocApp::new_empty_document()` and `new_sample` is `#[cfg(test)]`
+  (`opendoc-app/src/state.rs`). This is the Phase 6 rule "sample fixtures are
+  explicit test/demo data, never default runtime state" for the boot path.
+- [x] Envelope kinds are derived from their payload on all three journals:
+  `rich_document_operation_kind`, `AppSpreadsheetOperation::operation_kind`
+  and `AppBlobOperation::operation_kind` (`opendoc-app/src/operation.rs`),
+  reached through `journal_spreadsheet_operation` and its blob sibling. No
+  call site writes a kind string, so a record cannot disagree with the
+  operation it carries.
+- [x] The stringly-typed block-property bag is gone: `Property` and
+  `Vec<Property>` no longer exist in `opendoc-core`; `Block.properties` is
+  `BlockProperties` with validated optional fields (`opendoc-core/src/lib.rs`),
+  merged last-writer-wins per property (ADR 0006).
+- [x] Crash recovery journal and replay (`opendoc-app/src/recovery_journal.rs`,
+  ADR 0005) and version history (`version.rs`, `version_diff.rs`,
+  `version_service.rs`) exist behind the facade with their own tests. Neither
+  was on this plan's outstanding list; both are recorded here so the
+  authoritative record stays authoritative.
+- [x] Renderer warnings reach the UI: `opendoc-render` returns
+  `Rendering { html, warnings }` and `AppProjectionService::document` maps
+  them onto `AppDocument.warnings` beside the spreadsheet formula warnings
+  (`opendoc-app/src/{render_service,projection_service}.rs`). Rendering stays
+  a pure projection — the warnings are never written back into source state.
+- [x] Adjacent list runs merge again. Deleting the block between two lists
+  re-identifies the later run onto the earlier one, through journalled
+  `SetBlockTextStyle` operations issued from the single choke point every
+  document mutation passes (`OpenDocApp::apply`/`apply_batch`), so a replica
+  replaying the journal reaches the same document. Only runs the edit itself
+  brought together are merged (`document_tree.rs`).
 
 ### Build and repository hygiene
 

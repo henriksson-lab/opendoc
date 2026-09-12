@@ -150,6 +150,19 @@ export type AppOperationRecord = {
   created_at_ms: number;
 };
 
+export type AppRecoverySession = {
+  id: string;
+  document_uuid: string;
+  title: string;
+  started_at_ms: number;
+  operation_count: number;
+  repository_root: string | null;
+  repository_backend: string | null;
+  base_manifest: string | null;
+  operations: AppOperationRecord[];
+  truncated: boolean;
+};
+
 export type AppSignature = {
   target: string;
   signer: string;

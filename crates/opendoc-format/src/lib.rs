@@ -175,6 +175,38 @@ impl SignatureRecord {
     }
 }
 
+/// Human label attached to an already-committed manifest.
+///
+/// Manifests are content addressed, so a label can never live inside the
+/// manifest it names: writing one would change the manifest hash and orphan
+/// every child that points at the old one. Labels are therefore sidecars keyed
+/// by the target manifest hash, exactly like blob signature sidecars.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct VersionLabelRecord {
+    #[serde(with = "hash_ref_serde")]
+    pub manifest: HashRef,
+    pub document_uuid: String,
+    pub branch: String,
+    pub label: String,
+    pub author: String,
+    pub created_at_ms: u64,
+}
+
+impl VersionLabelRecord {
+    pub fn validate(&self) -> Result<(), FormatError> {
+        require_canonical_document_uuid("version label document_uuid", &self.document_uuid)?;
+        require_repository_key_segment("version label branch", &self.branch)?;
+        require_no_surrounding_whitespace("version label label", &self.label)?;
+        require_no_surrounding_whitespace("version label author", &self.author)?;
+        if self.label.is_empty() {
+            return Err(FormatError::InvalidRecord(
+                "version label label is empty".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct LookupRecord {
     pub document_uuid: String,
@@ -525,6 +557,30 @@ impl BinaryRecord for OperationSegmentRecord<Vec<u8>> {
             previous_segment: input.opt_hash()?,
             base_manifest: input.opt_string()?,
             operations: input.bytes_vec()?,
+        })
+    }
+}
+
+impl BinaryRecord for VersionLabelRecord {
+    const TAG: u8 = 9;
+
+    fn encode_body(&self, out: &mut Vec<u8>) {
+        put_hash(out, &self.manifest);
+        put_str(out, &self.document_uuid);
+        put_str(out, &self.branch);
+        put_str(out, &self.label);
+        put_str(out, &self.author);
+        put_u64(out, self.created_at_ms);
+    }
+
+    fn decode_body(input: &mut Reader<'_>) -> Result<Self, FormatError> {
+        Ok(Self {
+            manifest: input.hash()?,
+            document_uuid: input.string()?,
+            branch: input.string()?,
+            label: input.string()?,
+            author: input.string()?,
+            created_at_ms: input.u64()?,
         })
     }
 }

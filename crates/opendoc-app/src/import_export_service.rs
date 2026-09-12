@@ -97,7 +97,8 @@ impl<'a> ImportExportService<'a> {
     }
 
     fn reset_after_document_import(&mut self) {
-        self.app.workbook = AppSpreadsheetWorkbook::sample();
+        // FS-19: an imported document must not carry demo spreadsheet content.
+        self.app.workbook = OpenDocApp::blank_workbook("Untitled");
         self.app.is_open = true;
         self.app.invalidate_source_state();
         self.app.clear_blob_state();
@@ -132,15 +133,123 @@ impl<'a> ImportExportReadService<'a> {
         Self { app }
     }
 
-    pub(crate) fn export_google_docs_json_text(&self) -> Result<String, AppApiError> {
-        let bytes = export_google_docs_json(&self.app.document)
+    /// Google Docs-shaped JSON, plus everything Google's schema could not
+    /// carry.
+    ///
+    /// Nothing here takes `&mut self`: an export reads the document and the
+    /// warnings travel out in the result, so exporting cannot dirty source
+    /// state or move the bytes a signature covers (ADR 0010).
+    pub(crate) fn export_google_docs_json(&self) -> Result<AppExport, AppApiError> {
+        let (bytes, warnings) = export_google_docs_json_with_warnings(&self.app.document)
             .map_err(|err| AppApiError::Import(err.to_string()))?;
-        export_google_docs_json_with_opendoc_blobs(bytes, self.app.projected_blobs())
+        let text = export_google_docs_json_with_opendoc_blobs(bytes, self.app.projected_blobs())?;
+        Ok(AppExport::text(
+            text,
+            "application/json",
+            "json",
+            model_warnings(warnings),
+        ))
     }
 
-    pub(crate) fn export_google_sheets_json_text(&self) -> Result<String, AppApiError> {
-        Ok(export_google_sheets_workbook(
-            &self.app.workbook.evaluated(),
-        )?)
+    pub(crate) fn export_google_sheets_json(&self) -> Result<AppExport, AppApiError> {
+        Ok(AppExport::text(
+            export_google_sheets_workbook(&self.app.workbook.evaluated())?,
+            "application/json",
+            "json",
+            Vec::new(),
+        ))
     }
+
+    /// The document as a `.docx` package (FS-22), plus the 24-odd things
+    /// WordprocessingML cannot carry exactly.
+    ///
+    /// Image blocks store only a content hash, so the bytes behind every
+    /// reachable image are handed to the writer here; a block whose blob is
+    /// not held locally is written as its alt text and named in the export
+    /// warnings rather than vanishing.
+    pub(crate) fn export_docx(&self) -> Result<AppExport, AppApiError> {
+        let images = self.docx_images();
+        let (bytes, warnings) = export_docx_with_warnings(&self.app.document, &images)
+            .map_err(|err| AppApiError::Import(err.to_string()))?;
+        Ok(AppExport::binary(
+            &bytes,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "docx",
+            model_warnings(warnings),
+        ))
+    }
+
+    /// Every blob the document's image blocks point at, with its media type.
+    fn docx_images(&self) -> BTreeMap<String, DocxImage> {
+        let media_types: BTreeMap<&str, &str> = self
+            .app
+            .blobs
+            .iter()
+            .map(|blob| (blob.hash.as_str(), blob.media_type.as_str()))
+            .collect();
+        let mut images = BTreeMap::new();
+        collect_image_hashes(
+            &self.app.document.blocks,
+            &mut images,
+            &media_types,
+            self.app,
+        );
+        for slot in HeaderFooterSlot::ALL {
+            collect_image_hashes(
+                self.app.document.furniture(slot),
+                &mut images,
+                &media_types,
+                self.app,
+            );
+        }
+        images
+    }
+}
+
+/// Walks blocks (including table cells) collecting the bytes behind every
+/// image block that the app still holds.
+fn collect_image_hashes(
+    blocks: &[opendoc_core::Block],
+    images: &mut BTreeMap<String, DocxImage>,
+    media_types: &BTreeMap<&str, &str>,
+    app: &OpenDocApp,
+) {
+    for block in blocks {
+        match &block.kind {
+            opendoc_core::BlockKind::Image { blob_hash, .. } => {
+                if images.contains_key(blob_hash) {
+                    continue;
+                }
+                let Some(bytes) = app.blob_bytes.get(blob_hash) else {
+                    continue;
+                };
+                images.insert(
+                    blob_hash.clone(),
+                    DocxImage {
+                        media_type: media_types
+                            .get(blob_hash.as_str())
+                            .copied()
+                            .unwrap_or("application/octet-stream")
+                            .to_string(),
+                        bytes: bytes.clone(),
+                    },
+                );
+            }
+            opendoc_core::BlockKind::Table { rows, .. } => {
+                for row in rows {
+                    for cell in &row.cells {
+                        collect_image_hashes(&cell.blocks, images, media_types, app);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Exporter warnings as the app's own warning DTO. They are the same shape as
+/// a `ModelWarning` but they never become one: a `ModelWarning` belongs to a
+/// document, and these belong to one export.
+fn model_warnings(warnings: Vec<ModelWarning>) -> Vec<AppWarning> {
+    warnings.iter().map(AppWarning::from_core).collect()
 }

@@ -10,11 +10,15 @@ opendoc-api = { path = "../opendoc-api" }
 opendoc-citations = { path = "../opendoc-citations" }
 opendoc-format = { path = "../opendoc-format" }
 opendoc-import = { path = "../opendoc-import" }
+opendoc-layout = { path = "../opendoc-layout" }
 opendoc-merge = { path = "../opendoc-merge" }
 opendoc-render = { path = "../opendoc-render" }
 opendoc-spreadsheet = { path = "../opendoc-spreadsheet" }
 opendoc-sign = { path = "../opendoc-sign" }
 opendoc-store = { path = "../opendoc-store" }
+# Find and replace compiles user patterns; the regex crate has no
+# backtracking, so a pathological pattern cannot hang the app.
+regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 unicode-segmentation = "1"

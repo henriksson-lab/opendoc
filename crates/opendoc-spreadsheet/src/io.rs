@@ -292,6 +292,9 @@ pub fn import_xlsx(bytes: &[u8], title: &str) -> Result<SpreadsheetWorkbook, Spr
         sheet.ensure_axis_metadata();
         workbook.sheets.push(sheet);
     }
+    // Defined names resolve against the sheet titles just imported, so this
+    // runs once every sheet exists.
+    workbook.named_ranges = import_defined_names(&reader, &workbook);
     Ok(workbook)
 }
 
@@ -542,4 +545,104 @@ pub fn import_defined_names(
         });
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::SpreadsheetWorkbook;
+
+    fn user_value(workbook: &SpreadsheetWorkbook, sheet: usize, address: &str) -> String {
+        workbook.sheets[sheet]
+            .cells
+            .iter()
+            .find(|cell| cell.address == address)
+            .map(|cell| cell.user_value.clone())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn csv_cell_edits_land_at_the_origin_and_honour_the_delimiter() {
+        let edits = SpreadsheetWorkbook::csv_cell_edits("b2", "a,b\n1,2\n", None).unwrap();
+
+        assert_eq!(
+            edits,
+            vec![
+                ("B2".to_string(), "a".to_string()),
+                ("C2".to_string(), "b".to_string()),
+                ("B3".to_string(), "1".to_string()),
+                ("C3".to_string(), "2".to_string()),
+            ]
+        );
+
+        let tabbed = SpreadsheetWorkbook::csv_cell_edits("A1", "a\tb", Some("tab")).unwrap();
+        assert_eq!(tabbed.len(), 2);
+        // Quoted separators stay inside one cell.
+        let quoted = SpreadsheetWorkbook::csv_cell_edits("A1", "\"x,y\",z", None).unwrap();
+        assert_eq!(quoted[0].1, "x,y");
+        assert!(SpreadsheetWorkbook::csv_cell_edits("A1", "a", Some("<>")).is_err());
+    }
+
+    #[test]
+    fn export_csv_writes_display_text_not_raw_values() {
+        let mut workbook = SpreadsheetWorkbook::sample();
+        workbook
+            .set_cell_in_sheet("sheet-1", "C1", "0.25".to_string())
+            .unwrap();
+        workbook
+            .set_cell_format("sheet-1", "C1", "number_format", "percent".to_string())
+            .unwrap()
+            .unwrap();
+        let workbook = workbook.evaluated();
+
+        let csv = workbook.export_csv("sheet-1", None).unwrap();
+
+        assert!(csv.starts_with("Item,Count,25.00%\n"), "{csv}");
+        // The formula in B3 exports as its computed value.
+        assert!(csv.contains("\nTotal,5,"), "{csv}");
+        assert!(workbook.export_csv("missing", None).is_err());
+    }
+
+    #[test]
+    fn xlsx_round_trips_values_formulas_formats_and_named_ranges() {
+        let mut workbook = SpreadsheetWorkbook::sample();
+        workbook
+            .set_cell_in_sheet("sheet-1", "C1", "0.25".to_string())
+            .unwrap();
+        workbook
+            .set_cell_format("sheet-1", "C1", "bold", "true".to_string())
+            .unwrap()
+            .unwrap();
+        workbook
+            .set_column_width("sheet-1", "B", 200)
+            .unwrap()
+            .unwrap();
+        workbook.set_frozen_axes("sheet-1", 1, 0).unwrap();
+        workbook
+            .add_named_range("sheet-1", "Counts", "B1:B3")
+            .unwrap()
+            .unwrap();
+        let workbook = workbook.evaluated();
+
+        let base64 = workbook.to_xlsx_base64().unwrap();
+        let reopened = SpreadsheetWorkbook::from_xlsx_base64(&base64, "Reopened").unwrap();
+
+        assert_eq!(reopened.title, "Reopened");
+        assert_eq!(user_value(&reopened, 0, "A1"), "Item");
+        assert_eq!(user_value(&reopened, 0, "C1"), "0.25");
+        assert_eq!(user_value(&reopened, 0, "B3"), "=SUM(B2:B2)");
+        // Cell styles are deliberately not asserted: the exporter writes
+        // them, but calamine's value reader does not read styles back, so
+        // formatting is a known one-way trip today.
+        // Defined names survive, which is only true because the importer
+        // reads them back.
+        assert_eq!(reopened.named_ranges.len(), 1);
+        assert_eq!(reopened.named_ranges[0].name, "COUNTS");
+        assert_eq!(reopened.named_ranges[0].range, "B1:B3");
+    }
+
+    #[test]
+    fn invalid_xlsx_bytes_are_rejected() {
+        assert!(SpreadsheetWorkbook::from_xlsx_base64("bm90IGEgemlw", "Bad").is_err());
+        assert!(SpreadsheetWorkbook::from_xlsx_base64("not base64!!", "Bad").is_err());
+    }
 }

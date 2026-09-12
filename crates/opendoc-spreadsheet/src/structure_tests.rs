@@ -269,3 +269,93 @@ fn restoring_a_column_reinserts_it_positionally() {
     assert_eq!(user_value(&workbook, "B1"), "Count");
     workbook.validate_source().unwrap();
 }
+
+// ---- Range sort (SH-7) ------------------------------------------------------
+
+fn sortable() -> SpreadsheetWorkbook {
+    let mut workbook = SpreadsheetWorkbook::empty("Sort");
+    workbook.add_sheet_with_id("sheet-1", "Sheet1");
+    for (address, value) in [
+        ("A1", "Name"),
+        ("B1", "Score"),
+        ("A2", "Cleo"),
+        ("B2", "3"),
+        ("A3", "Ada"),
+        ("B3", "10"),
+        ("A4", "Bea"),
+        ("B4", "7"),
+    ] {
+        workbook
+            .set_cell_in_sheet("sheet-1", address, value.to_string())
+            .unwrap();
+    }
+    workbook
+}
+
+#[test]
+fn sort_range_orders_rows_by_a_column_and_keeps_the_header() {
+    let mut workbook = sortable();
+
+    workbook
+        .sort_range("sheet-1", "A1:B4", "B", false, true)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(user_value(&workbook, "A1"), "Name");
+    assert_eq!(user_value(&workbook, "A2"), "Cleo");
+    assert_eq!(user_value(&workbook, "A3"), "Bea");
+    assert_eq!(user_value(&workbook, "A4"), "Ada");
+    assert_eq!(user_value(&workbook, "B4"), "10");
+    workbook.validate_source().unwrap();
+}
+
+#[test]
+fn sort_range_descending_and_without_a_header_moves_every_row() {
+    let mut workbook = sortable();
+
+    workbook
+        .sort_range("sheet-1", "A2:B4", "A", true, false)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(user_value(&workbook, "A2"), "Cleo");
+    assert_eq!(user_value(&workbook, "A3"), "Bea");
+    assert_eq!(user_value(&workbook, "A4"), "Ada");
+}
+
+#[test]
+fn sort_range_moves_formulas_with_their_row() {
+    let mut workbook = sortable();
+    workbook
+        .set_cell_in_sheet("sheet-1", "C2", "=B2*2".to_string())
+        .unwrap();
+    workbook
+        .set_cell_in_sheet("sheet-1", "C3", "=B3*2".to_string())
+        .unwrap();
+    workbook
+        .set_cell_in_sheet("sheet-1", "C4", "=B4*2".to_string())
+        .unwrap();
+
+    workbook
+        .sort_range("sheet-1", "A1:C4", "B", false, true)
+        .unwrap()
+        .unwrap();
+
+    // Ada (10) lands in row 4, and her formula follows and still reads B4.
+    assert_eq!(user_value(&workbook, "A4"), "Ada");
+    assert_eq!(user_value(&workbook, "C4"), "=B4*2");
+    assert_eq!(user_value(&workbook, "C2"), "=B2*2");
+}
+
+#[test]
+fn sort_range_rejects_a_column_outside_the_range() {
+    let mut workbook = sortable();
+
+    assert!(workbook
+        .sort_range("sheet-1", "A1:B4", "D", false, true)
+        .unwrap()
+        .is_err());
+    assert!(workbook
+        .sort_range("missing-sheet", "A1:B4", "A", false, true)
+        .is_none());
+}

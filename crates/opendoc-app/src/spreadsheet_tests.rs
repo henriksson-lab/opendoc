@@ -6,9 +6,26 @@ use super::*;
 use crate::spreadsheet_replay::apply_spreadsheet_envelopes;
 use serde_json::json;
 
+/// A workbook with demo content for these tests to operate on.
+///
+/// `new_document` deliberately starts blank (FS-19: "Blank spreadsheet" must
+/// be blank), so the fixture states the cells it depends on rather than
+/// relying on the constructor to seed them.
 fn app() -> OpenDocApp {
-    let mut app = OpenDocApp::new_sample();
+    let mut app = OpenDocApp::new_empty_document();
     app.new_document("Spreadsheet");
+    let sheet = &mut app.workbook.sheets[0];
+    sheet.frozen_rows = 1;
+    sheet.cells = vec![
+        opendoc_spreadsheet::Cell::new("A1", "string", "Item"),
+        opendoc_spreadsheet::Cell::new("B1", "string", "Count"),
+        opendoc_spreadsheet::Cell::new("A2", "string", "Apples"),
+        opendoc_spreadsheet::Cell::new("B2", "number", "5"),
+        opendoc_spreadsheet::Cell::new("A3", "string", "Total"),
+        opendoc_spreadsheet::Cell::new("B3", "formula", "=SUM(B2:B2)"),
+    ];
+    app.workbook = app.workbook.clone().evaluated();
+    app.invalidate_source_state();
     app
 }
 
@@ -273,4 +290,237 @@ fn out_of_range_and_missing_axis_sizes_are_rejected() {
         .is_err());
     assert!(app.workbook.sheets[0].row_heights.is_empty());
     assert!(app.workbook.sheets[0].column_widths.is_empty());
+}
+
+// ---- Harvested spreadsheet features (PLAN77 A1-A5) --------------------------
+
+fn sheet_value(app: &OpenDocApp, address: &str) -> String {
+    user_value(app, address)
+}
+
+#[test]
+fn sort_range_dispatches_is_journalled_and_replays() {
+    let mut app = app();
+    // sample() is A1 "Item" / B1 "Count", A2 "Apples" / B2 5, A3 "Total".
+    app.set_spreadsheet_cell_in_sheet("sheet-1", "A3", "Zucchini")
+        .unwrap();
+    app.set_spreadsheet_cell_in_sheet("sheet-1", "B3", "1")
+        .unwrap();
+
+    app.dispatch_command(
+        "sort_spreadsheet_range",
+        json!({
+            "sheetId": "sheet-1",
+            "range": "A1:B3",
+            "column": "B",
+            "descending": false,
+            "hasHeader": true,
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(sheet_value(&app, "A2"), "Zucchini");
+    assert_eq!(sheet_value(&app, "A3"), "Apples");
+    assert!(app
+        .operation_journal
+        .iter()
+        .any(|record| record.kind == "sort-spreadsheet-range"));
+
+    let mut replayed = AppSpreadsheetWorkbook::sample();
+    let warnings = apply_spreadsheet_envelopes(&mut replayed, &app.operation_envelopes).unwrap();
+    assert!(
+        warnings.is_empty(),
+        "unexpected replay warnings: {warnings:?}"
+    );
+    assert_eq!(replayed.sheets[0].cells, app.workbook.sheets[0].cells);
+
+    app.undo_current_edit().unwrap();
+    assert_eq!(sheet_value(&app, "A2"), "Apples");
+    app.workbook.validate_source().unwrap();
+}
+
+#[test]
+fn fill_range_extends_a_series_and_is_undoable_and_replayable() {
+    let mut app = app();
+    app.set_spreadsheet_cell_in_sheet("sheet-1", "D1", "2")
+        .unwrap();
+    app.set_spreadsheet_cell_in_sheet("sheet-1", "D2", "4")
+        .unwrap();
+
+    app.dispatch_command(
+        "fill_spreadsheet_range",
+        json!({ "sheetId": "sheet-1", "sourceRange": "D1:D2", "targetRange": "D1:D4" }),
+    )
+    .unwrap();
+
+    assert_eq!(sheet_value(&app, "D3"), "6");
+    assert_eq!(sheet_value(&app, "D4"), "8");
+    assert!(app
+        .operation_journal
+        .iter()
+        .any(|record| record.kind == "fill-spreadsheet-range"));
+
+    let mut replayed = AppSpreadsheetWorkbook::sample();
+    let warnings = apply_spreadsheet_envelopes(&mut replayed, &app.operation_envelopes).unwrap();
+    assert!(
+        warnings.is_empty(),
+        "unexpected replay warnings: {warnings:?}"
+    );
+    assert_eq!(replayed.sheets[0].cells, app.workbook.sheets[0].cells);
+
+    app.undo_current_edit().unwrap();
+    assert_eq!(sheet_value(&app, "D3"), "");
+    app.redo_current_edit().unwrap();
+    assert_eq!(sheet_value(&app, "D3"), "6");
+    app.workbook.validate_source().unwrap();
+}
+
+#[test]
+fn fill_range_rejects_a_target_that_does_not_line_up() {
+    let mut app = app();
+
+    assert!(app
+        .dispatch_command(
+            "fill_spreadsheet_range",
+            json!({ "sheetId": "sheet-1", "sourceRange": "D1:D2", "targetRange": "D1:F4" }),
+        )
+        .is_err());
+    // A rejected fill leaves nothing behind.
+    assert!(!app
+        .operation_journal
+        .iter()
+        .any(|record| record.kind == "fill-spreadsheet-range"));
+}
+
+#[test]
+fn pasting_within_the_workbook_shifts_formulas_and_pasting_from_outside_does_not() {
+    let mut app = app();
+    // B3 holds `=SUM(B2:B2)` in the sample workbook.
+    let copied = app
+        .copy_spreadsheet_selection_tsv("sheet-1", "B3", "B3")
+        .unwrap();
+    assert_eq!(copied, "=SUM(B2:B2)");
+
+    app.dispatch_command(
+        "paste_spreadsheet_tsv",
+        json!({ "sheetId": "sheet-1", "origin": "D5", "text": copied, "sourceOrigin": "B3" }),
+    )
+    .unwrap();
+    assert_eq!(sheet_value(&app, "D5"), "=SUM(D4:D4)");
+
+    app.dispatch_command(
+        "paste_spreadsheet_tsv",
+        json!({ "sheetId": "sheet-1", "origin": "E5", "text": copied }),
+    )
+    .unwrap();
+    assert_eq!(sheet_value(&app, "E5"), "=SUM(B2:B2)");
+    app.workbook.validate_source().unwrap();
+}
+
+#[test]
+fn csv_imports_at_the_selection_and_exports_display_text() {
+    let mut app = app();
+
+    app.dispatch_command(
+        "import_spreadsheet_csv",
+        json!({
+            "sheetId": "sheet-1",
+            "origin": "D1",
+            "text": "a,b\n1,2\n",
+            "delimiter": ",",
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(sheet_value(&app, "D1"), "a");
+    assert_eq!(sheet_value(&app, "E2"), "2");
+    // Imported cells journal as ordinary cell edits, so they replay and undo.
+    let mut replayed = AppSpreadsheetWorkbook::sample();
+    let warnings = apply_spreadsheet_envelopes(&mut replayed, &app.operation_envelopes).unwrap();
+    assert!(
+        warnings.is_empty(),
+        "unexpected replay warnings: {warnings:?}"
+    );
+    assert_eq!(replayed.sheets[0].cells, app.workbook.sheets[0].cells);
+
+    let result = app
+        .dispatch_command("export_spreadsheet_csv", json!({ "sheetId": "sheet-1" }))
+        .unwrap();
+    let AppCommandResult::Text(csv) = result else {
+        panic!("export_spreadsheet_csv returns text");
+    };
+    // Column C is untouched, so the imported block sits in D and E.
+    assert!(csv.starts_with("Item,Count,,a,b\n"), "{csv}");
+
+    app.undo_current_edit().unwrap();
+    assert_eq!(sheet_value(&app, "D1"), "");
+}
+
+#[test]
+fn xlsx_round_trips_through_the_commands_and_is_guarded_and_undoable() {
+    let mut app = app();
+    app.set_spreadsheet_cell_in_sheet("sheet-1", "C1", "Note")
+        .unwrap();
+    let result = app
+        .dispatch_command("export_spreadsheet_xlsx", json!({}))
+        .unwrap();
+    let AppCommandResult::Text(base64) = result else {
+        panic!("export_spreadsheet_xlsx returns text");
+    };
+
+    // Replacing the workbook is guarded like every other replacing command.
+    let guarded = app.dispatch_command(
+        "import_spreadsheet_xlsx",
+        json!({ "title": "Imported", "base64": base64 }),
+    );
+    assert!(
+        matches!(guarded, Err(AppApiError::UnsavedChanges(_))),
+        "expected an unsaved-changes refusal, got {guarded:?}"
+    );
+
+    app.dispatch_command(
+        "import_spreadsheet_xlsx",
+        json!({
+            "title": "Imported",
+            "base64": base64,
+            "discardUnsavedChanges": true,
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(app.workbook.title, "Imported");
+    assert_eq!(sheet_value(&app, "C1"), "Note");
+    assert_eq!(sheet_value(&app, "B3"), "=SUM(B2:B2)");
+    app.workbook.validate_source().unwrap();
+
+    // And an accidental import is recoverable.
+    app.undo_current_edit().unwrap();
+    assert_ne!(app.workbook.title, "Imported");
+}
+
+#[test]
+fn every_journalled_spreadsheet_envelope_carries_the_kind_of_its_payload() {
+    let mut app = app();
+    app.set_spreadsheet_cell_in_sheet("sheet-1", "D1", "1")
+        .unwrap();
+    app.set_spreadsheet_cell_in_sheet("sheet-1", "D2", "2")
+        .unwrap();
+    app.set_spreadsheet_cell_format("sheet-1", "D1", "bold", "true")
+        .unwrap();
+    app.fill_spreadsheet_range("sheet-1", "D1:D2", "D1:D4")
+        .unwrap();
+    app.sort_spreadsheet_range("sheet-1", "D1:D4", "D", true, false)
+        .unwrap();
+    app.add_spreadsheet_sheet("Second").unwrap();
+    app.set_spreadsheet_row_height("sheet-1", "2", 40).unwrap();
+
+    // `validate_operation_envelopes` compares every envelope's record kind
+    // against the kind its payload derives, so a hand-written kind that drifts
+    // from its payload fails here.
+    crate::operation::validate_operation_envelopes(&app.operation_envelopes).unwrap();
+    assert!(app
+        .operation_envelopes
+        .iter()
+        .filter_map(|envelope| envelope.spreadsheet.as_ref().map(|op| (envelope, op)))
+        .all(|(envelope, operation)| envelope.record.kind == operation.operation_kind()));
 }

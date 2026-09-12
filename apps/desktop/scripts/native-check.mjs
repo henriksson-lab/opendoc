@@ -9,7 +9,7 @@ const tauriIcon = join(tauriRoot, "icons", "icon.png");
 checkTauriIcon();
 
 run("desktop native preflight", "npm", ["run", "preflight"], { cwd: desktopRoot });
-run("Tauri backend cargo check", "cargo", ["check"], { cwd: tauriRoot });
+run("Tauri backend cargo check", "cargo", ["check", "--release"], { cwd: tauriRoot });
 
 console.log("\nOpenDoc Tauri native check passed");
 

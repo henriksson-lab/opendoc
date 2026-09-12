@@ -31,9 +31,10 @@ This section is generated from `opendoc-api` Rust command metadata. Do not edit 
 | `redo_current_edit` | `AppDocument` | none | requires `write` |
 | `import_google_docs_json` | `AppDocument` | `title: string`<br>`jsonText: string` | closed-state<br>requires `write` |
 | `import_doc_or_docx_path` | `AppDocument` | `path: string` | closed-state<br>requires `write` |
-| `export_google_docs_json` | `string` | none | requires `read` |
+| `export_google_docs_json` | `AppExport` | none | requires `read` |
+| `export_docx` | `AppExport` | none | requires `read` |
 | `import_google_sheets_json` | `AppDocument` | `jsonText: string` | requires `write` |
-| `export_google_sheets_json` | `string` | none | requires `read` |
+| `export_google_sheets_json` | `AppExport` | none | requires `read` |
 | `add_binary_blob` | `AppDocument` | `name: string`<br>`mediaType: string`<br>`bytes: number[]` | undoable<br>requires `write` |
 | `update_binary_blob_metadata` | `AppDocument` | `blobHash: string`<br>`name: string`<br>`mediaType: string` | undoable<br>requires `write` |
 | `add_image_block` | `AppDocument` | `blobHash: string`<br>`altText: string` | undoable<br>requires `write` |
@@ -54,8 +55,36 @@ This section is generated from `opendoc-api` Rust command metadata. Do not edit 
 | `split_paragraph_at_text_offset` | `AppDocument` | `blockId: string`<br>`inlineId: string`<br>`offset: number` | undoable<br>requires `write` |
 | `join_paragraph_with_previous` | `AppDocument` | `blockId: string` | undoable<br>requires `write` |
 | `delete_block` | `AppDocument` | `blockId: string` | undoable<br>requires `write` |
-| `set_block_text_style` | `AppDocument` | `blockId: string`<br>`style: string`<br>`level: number`<br>`ordered: boolean` | undoable<br>requires `write` |
-| `set_editor_selection_block_style` | `AppDocument` | `selection: EditorSelection`<br>`style: string`<br>`level: number`<br>`ordered: boolean` | undoable<br>requires `write` |
+| `set_block_text_style` | `AppDocument` | `blockId: string`<br>`style: string`<br>`level: number`<br>`listKind: string` | undoable<br>requires `write` |
+| `set_editor_selection_block_style` | `AppDocument` | `selection: EditorSelection`<br>`style: string`<br>`level: number`<br>`listKind: string` | undoable<br>requires `write` |
+| `layout_document` | `AppDocumentLayout` | none | requires `read` |
+| `set_page_setup` | `AppDocument` | `widthTwips: number`<br>`heightTwips: number`<br>`marginTopTwips: number`<br>`marginBottomTwips: number`<br>`marginStartTwips: number`<br>`marginEndTwips: number` | undoable<br>requires `write` |
+| `set_page_orientation` | `AppDocument` | `orientation: string` | undoable<br>requires `write` |
+| `set_page_furniture` | `AppDocument` | `slot: string`<br>`text: string`<br>`field: string`<br>`alignment: string` | undoable<br>requires `write` |
+| `clear_page_furniture` | `AppDocument` | `slot: string` | undoable<br>requires `write` |
+| `set_block_alignment` | `AppDocument` | `blockId: string`<br>`alignment: string` | undoable<br>requires `write` |
+| `set_editor_selection_block_alignment` | `AppDocument` | `selection: EditorSelection`<br>`alignment: string` | undoable<br>requires `write` |
+| `set_block_indent_start` | `AppDocument` | `blockId: string`<br>`twips: number` | undoable<br>requires `write` |
+| `set_editor_selection_block_indent_start` | `AppDocument` | `selection: EditorSelection`<br>`twips: number` | undoable<br>requires `write` |
+| `set_block_indent_end` | `AppDocument` | `blockId: string`<br>`twips: number` | undoable<br>requires `write` |
+| `set_editor_selection_block_indent_end` | `AppDocument` | `selection: EditorSelection`<br>`twips: number` | undoable<br>requires `write` |
+| `set_block_indent_first_line` | `AppDocument` | `blockId: string`<br>`twips: number` | undoable<br>requires `write` |
+| `set_editor_selection_block_indent_first_line` | `AppDocument` | `selection: EditorSelection`<br>`twips: number` | undoable<br>requires `write` |
+| `set_block_line_spacing` | `AppDocument` | `blockId: string`<br>`spacingMode: string`<br>`spacingValue: number` | undoable<br>requires `write` |
+| `set_editor_selection_block_line_spacing` | `AppDocument` | `selection: EditorSelection`<br>`spacingMode: string`<br>`spacingValue: number` | undoable<br>requires `write` |
+| `set_block_space_before` | `AppDocument` | `blockId: string`<br>`twips: number` | undoable<br>requires `write` |
+| `set_editor_selection_block_space_before` | `AppDocument` | `selection: EditorSelection`<br>`twips: number` | undoable<br>requires `write` |
+| `set_block_space_after` | `AppDocument` | `blockId: string`<br>`twips: number` | undoable<br>requires `write` |
+| `set_editor_selection_block_space_after` | `AppDocument` | `selection: EditorSelection`<br>`twips: number` | undoable<br>requires `write` |
+| `set_block_direction` | `AppDocument` | `blockId: string`<br>`direction: string` | undoable<br>requires `write` |
+| `set_editor_selection_block_direction` | `AppDocument` | `selection: EditorSelection`<br>`direction: string` | undoable<br>requires `write` |
+| `clear_block_property` | `AppDocument` | `blockId: string`<br>`key: string` | undoable<br>requires `write` |
+| `clear_editor_selection_block_property` | `AppDocument` | `selection: EditorSelection`<br>`key: string` | undoable<br>requires `write` |
+| `set_list_item_checked` | `AppDocument` | `blockId: string`<br>`checked: boolean` | undoable<br>requires `write` |
+| `find_in_document` | `AppFindMatches` | `query: string`<br>`matchCase: boolean`<br>`wholeWord: boolean`<br>`regex: boolean` | requires `read` |
+| `replace_match_in_document` | `AppDocument` | `query: string`<br>`matchCase: boolean`<br>`wholeWord: boolean`<br>`regex: boolean`<br>`replacement: string`<br>`matchIndex: number` | undoable<br>requires `write` |
+| `replace_all_in_document` | `AppDocument` | `query: string`<br>`matchCase: boolean`<br>`wholeWord: boolean`<br>`regex: boolean`<br>`replacement: string` | undoable<br>requires `write` |
+| `adjust_editor_selection_indent` | `AppDocument` | `selection: EditorSelection`<br>`delta: number` | undoable<br>requires `write` |
 | `add_heading` | `AppDocument` | `text: string`<br>`level: number` | undoable<br>requires `write` |
 | `update_heading_level` | `AppDocument` | `blockId: string`<br>`level: number` | undoable<br>requires `write` |
 | `add_link` | `AppDocument` | `text: string`<br>`href: string` | undoable<br>requires `write` |
@@ -69,9 +98,9 @@ This section is generated from `opendoc-api` Rust command metadata. Do not edit 
 | `insert_equation_after` | `AppDocument` | `blockId: string`<br>`afterInlineId: string|null`<br>`source: string` | undoable<br>requires `write` |
 | `add_equation_block` | `AppDocument` | `source: string` | undoable<br>requires `write` |
 | `insert_equation_block_after` | `AppDocument` | `afterBlockId: string`<br>`source: string` | undoable<br>requires `write` |
-| `add_list_item` | `AppDocument` | `text: string`<br>`level: number`<br>`ordered: boolean` | undoable<br>requires `write` |
-| `insert_list_item_after` | `AppDocument` | `afterBlockId: string`<br>`text: string`<br>`level: number`<br>`ordered: boolean` | undoable<br>requires `write` |
-| `update_list_item` | `AppDocument` | `blockId: string`<br>`level: number`<br>`ordered: boolean` | undoable<br>requires `write` |
+| `add_list_item` | `AppDocument` | `text: string`<br>`level: number`<br>`listKind: string` | undoable<br>requires `write` |
+| `insert_list_item_after` | `AppDocument` | `afterBlockId: string`<br>`text: string`<br>`level: number`<br>`listKind: string` | undoable<br>requires `write` |
+| `update_list_item` | `AppDocument` | `blockId: string`<br>`level: number`<br>`listKind: string` | undoable<br>requires `write` |
 | `adjust_editor_selection_list_indent` | `AppDocument` | `selection: EditorSelection`<br>`delta: number` | undoable<br>requires `write` |
 | `insert_page_break_after` | `AppDocument` | `afterBlockId: string` | undoable<br>requires `write` |
 | `add_page_break` | `AppDocument` | none | undoable<br>requires `write` |
@@ -81,6 +110,17 @@ This section is generated from `opendoc-api` Rust command metadata. Do not edit 
 | `delete_table_row` | `AppDocument` | `tableBlockId: string`<br>`rowId: string` | undoable<br>requires `write` |
 | `add_table_cell` | `AppDocument` | `tableBlockId: string`<br>`rowId: string`<br>`afterCell: string|null`<br>`text: string` | undoable<br>requires `write` |
 | `delete_table_cell` | `AppDocument` | `tableBlockId: string`<br>`rowId: string`<br>`cellId: string` | undoable<br>requires `write` |
+| `insert_table_column` | `AppDocument` | `tableBlockId: string`<br>`afterColumnId: string|null` | undoable<br>requires `write` |
+| `delete_table_column` | `AppDocument` | `tableBlockId: string`<br>`columnId: string` | undoable<br>requires `write` |
+| `set_table_column_width` | `AppDocument` | `tableBlockId: string`<br>`columnId: string`<br>`twips: number` | undoable<br>requires `write` |
+| `clear_table_column_width` | `AppDocument` | `tableBlockId: string`<br>`columnId: string` | undoable<br>requires `write` |
+| `merge_table_cells` | `AppDocument` | `cellId: string`<br>`rowSpan: number`<br>`columnSpan: number` | undoable<br>requires `write` |
+| `split_table_cell` | `AppDocument` | `cellId: string` | undoable<br>requires `write` |
+| `set_table_cell_background` | `AppDocument` | `cellId: string`<br>`color: string` | undoable<br>requires `write` |
+| `set_table_cell_border` | `AppDocument` | `cellId: string`<br>`edge: string`<br>`style: string`<br>`twips: number`<br>`color: string` | undoable<br>requires `write` |
+| `set_table_cell_vertical_alignment` | `AppDocument` | `cellId: string`<br>`alignment: string` | undoable<br>requires `write` |
+| `set_table_cell_padding` | `AppDocument` | `cellId: string`<br>`edge: string`<br>`twips: number` | undoable<br>requires `write` |
+| `clear_table_cell_property` | `AppDocument` | `cellId: string`<br>`key: string` | undoable<br>requires `write` |
 | `add_citation` | `AppDocument` | none | undoable<br>requires `write` |
 | `insert_citation` | `AppDocument` | `referenceId: string`<br>`afterInlineId: string|null`<br>`locator: string|null`<br>`label: string|null`<br>`prefix: string|null`<br>`suffix: string|null`<br>`suppressAuthor: boolean` | undoable<br>requires `write` |
 | `insert_citation_group` | `AppDocument` | `items: AppCitationItem[]`<br>`afterInlineId: string|null` | undoable<br>requires `write` |
@@ -122,11 +162,16 @@ This section is generated from `opendoc-api` Rust command metadata. Do not edit 
 | `update_block_equation_source` | `AppDocument` | `blockId: string`<br>`source: string` | undoable<br>requires `write` |
 | `update_image_alt_text` | `AppDocument` | `blockId: string`<br>`altText: string` | undoable<br>requires `write` |
 | `update_image_blob_hash` | `AppDocument` | `blockId: string`<br>`blobHash: string` | undoable<br>requires `write` |
+| `set_image_block_width` | `AppDocument` | `blockId: string`<br>`twips: number` | undoable<br>requires `write` |
+| `set_image_block_height` | `AppDocument` | `blockId: string`<br>`twips: number` | undoable<br>requires `write` |
+| `set_image_block_size` | `AppDocument` | `blockId: string`<br>`widthTwips: number`<br>`heightTwips: number` | undoable<br>requires `write` |
+| `clear_image_block_size` | `AppDocument` | `blockId: string` | undoable<br>requires `write` |
+| `set_image_block_placement` | `AppDocument` | `blockId: string`<br>`placement: string` | undoable<br>requires `write` |
 | `set_spreadsheet_cell` | `AppDocument` | `address: string`<br>`value: string` | undoable<br>requires `write` |
 | `describe_spreadsheet_selection` | `AppSpreadsheetSelection` | `sheetId: string`<br>`anchor: string`<br>`focus: string` | requires `read` |
 | `reduce_spreadsheet_selection` | `AppSpreadsheetSelection` | `sheetId: string`<br>`anchor: string`<br>`focus: string`<br>`action: string`<br>`value: string`<br>`extend: boolean` | requires `read` |
 | `copy_spreadsheet_selection_tsv` | `string` | `sheetId: string`<br>`anchor: string`<br>`focus: string` | requires `read` |
-| `paste_spreadsheet_tsv` | `AppDocument` | `sheetId: string`<br>`origin: string`<br>`text: string` | undoable<br>requires `write` |
+| `paste_spreadsheet_tsv` | `AppDocument` | `sheetId: string`<br>`origin: string`<br>`text: string`<br>`sourceOrigin: string|null?` | undoable<br>requires `write` |
 | `clear_spreadsheet_selection` | `AppDocument` | `sheetId: string`<br>`anchor: string`<br>`focus: string` | undoable<br>requires `write` |
 | `set_spreadsheet_selection_format` | `AppDocument` | `sheetId: string`<br>`anchor: string`<br>`focus: string`<br>`property: string`<br>`value: string` | undoable<br>requires `write` |
 | `add_spreadsheet_row_after_selection` | `AppDocument` | `sheetId: string`<br>`anchor: string`<br>`focus: string` | undoable<br>requires `write` |
@@ -173,6 +218,12 @@ This section is generated from `opendoc-api` Rust command metadata. Do not edit 
 | `set_spreadsheet_row_height` | `AppDocument` | `sheetId: string`<br>`row: string`<br>`height: number` | undoable<br>requires `write` |
 | `set_spreadsheet_column_width` | `AppDocument` | `sheetId: string`<br>`column: string`<br>`width: number` | undoable<br>requires `write` |
 | `copy_spreadsheet_range` | `AppDocument` | `sheetId: string`<br>`sourceRange: string`<br>`targetAddress: string` | undoable<br>requires `write` |
+| `sort_spreadsheet_range` | `AppDocument` | `sheetId: string`<br>`range: string`<br>`column: string`<br>`descending: boolean`<br>`hasHeader: boolean` | undoable<br>requires `write` |
+| `fill_spreadsheet_range` | `AppDocument` | `sheetId: string`<br>`sourceRange: string`<br>`targetRange: string` | undoable<br>requires `write` |
+| `import_spreadsheet_csv` | `AppDocument` | `sheetId: string`<br>`origin: string`<br>`text: string`<br>`delimiter: string|null?` | undoable<br>requires `write` |
+| `export_spreadsheet_csv` | `string` | `sheetId: string`<br>`delimiter: string|null?` | requires `read` |
+| `import_spreadsheet_xlsx` | `AppDocument` | `title: string`<br>`base64: string` | undoable<br>requires `write` |
+| `export_spreadsheet_xlsx` | `string` | none | requires `read` |
 | `add_spreadsheet_named_range` | `AppDocument` | `sheetId: string`<br>`name: string`<br>`range: string` | undoable<br>requires `write` |
 | `update_spreadsheet_named_range` | `AppDocument` | `sheetId: string`<br>`name: string`<br>`range: string` | undoable<br>requires `write` |
 | `delete_spreadsheet_named_range` | `AppDocument` | `name: string` | undoable<br>requires `write` |
@@ -192,6 +243,8 @@ This section is generated from `opendoc-api` Rust command metadata. Do not edit 
 | `save_opendal_fs_repository_or_candidate` | `AppDocument` | `path: string`<br>`namespace: string` | requires `write` |
 | `autosave_current_repository` | `AppDocument` | none | requires `write` |
 | `open_local_repository` | `AppDocument` | `path: string`<br>`documentUuid: string` | closed-state<br>requires `read` |
+| `recover_session` | `AppDocument` | `sessionId: string` | closed-state<br>requires `write` |
+| `discard_recovery_session` | `AppDocument` | `sessionId: string` | closed-state<br>requires `write` |
 | `scan_local_repository` | `AppDocument` | `path: string` | no runtime action |
 | `open_flat_repository` | `AppDocument` | `path: string`<br>`namespace: string`<br>`documentUuid: string` | closed-state<br>requires `read` |
 | `open_opendal_fs_repository` | `AppDocument` | `path: string`<br>`namespace: string`<br>`documentUuid: string` | closed-state<br>requires `read` |
@@ -205,6 +258,11 @@ This section is generated from `opendoc-api` Rust command metadata. Do not edit 
 | `sign_with_openssh_private_key` | `AppDocument` | `privateKeyPem: string`<br>`signerDisplay: string` | requires `write` |
 | `verify_current_signature` | `string` | `privateKeyPem: string` | requires `read` |
 | `verify_current_signatures` | `string` | none | requires `read` |
+| `list_document_versions` | `AppVersionView` | `limit: number?` | requires `read` |
+| `open_document_at_version` | `AppVersionView` | `manifest: string` | requires `read` |
+| `diff_document_versions` | `AppVersionView` | `fromManifest: string`<br>`toManifest: string` | requires `read` |
+| `name_document_version` | `AppVersionView` | `manifest: string`<br>`label: string`<br>`author: string` | requires `write` |
+| `restore_document_version` | `AppDocument` | `manifest: string` | requires `write` |
 | `describe_editor_selection` | `AppEditorSelection` | `selection: EditorSelection` | requires `read` |
 | `select_all_editor_content` | `EditorResult` | none | requires `read` |
 | `apply_editor_input` | `EditorResult` | `selection: EditorSelection`<br>`input_type: string`<br>`data: string|null`<br>`html: string|null` | undoable<br>no runtime action |

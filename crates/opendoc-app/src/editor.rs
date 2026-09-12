@@ -4,11 +4,15 @@
 //! tests) gets identical editing semantics and the TypeScript layer only
 //! maps DOM selections to [`opendoc_api::EditorPosition`]s.
 
-use super::{AppApiError, AppDocument, AppEditorSelection, EditorSelectionService, OpenDocApp};
+use super::{
+    list_run_split_operations, AppApiError, AppDocument, AppEditorSelection,
+    EditorSelectionService, OpenDocApp,
+};
 use opendoc_api::{EditorInput, EditorMarkInput, EditorPosition, EditorSelection};
-use opendoc_core::{Block, BlockKind, Inline, StableId};
+use opendoc_core::{Block, BlockKind, BlockProperties, Inline, StableId};
 use opendoc_merge::{BlockTextStyle, OperationKind};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::ops::{Deref, DerefMut};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -77,7 +81,8 @@ fn inline_stable_id(inline: &Inline) -> &StableId {
         | Inline::Citation { id, .. }
         | Inline::FootnoteRef { id, .. }
         | Inline::Mention { id, .. }
-        | Inline::Equation { id, .. } => id,
+        | Inline::Equation { id, .. }
+        | Inline::PageNumber { id, .. } => id,
     }
 }
 
@@ -119,7 +124,7 @@ impl DocumentIndex {
                 spans,
                 len,
             });
-            if let BlockKind::Table { rows } = &block.kind {
+            if let BlockKind::Table { rows, .. } = &block.kind {
                 for row in rows {
                     for cell in &row.cells {
                         self.push_blocks(&cell.blocks, false, cell.id.as_str());
@@ -129,7 +134,7 @@ impl DocumentIndex {
         }
     }
 
-    fn block_index(&self, block_id: &str) -> Option<usize> {
+    pub(crate) fn block_index(&self, block_id: &str) -> Option<usize> {
         self.blocks
             .iter()
             .position(|entry| entry.id.as_str() == block_id)
@@ -193,7 +198,7 @@ impl DocumentIndex {
         }
     }
 
-    fn text_of(&self, blocks: &[Block], block: usize) -> String {
+    pub(crate) fn text_of(&self, blocks: &[Block], block: usize) -> String {
         let entry = &self.blocks[block];
         let mut out = String::new();
         if let Some(core) = find_block(blocks, &entry.id) {
@@ -213,7 +218,7 @@ fn find_block<'a>(blocks: &'a [Block], id: &StableId) -> Option<&'a Block> {
         if &block.id == id {
             return Some(block);
         }
-        if let BlockKind::Table { rows } = &block.kind {
+        if let BlockKind::Table { rows, .. } = &block.kind {
             for row in rows {
                 for cell in &row.cells {
                     if let Some(found) = find_block(&cell.blocks, id) {
@@ -226,7 +231,7 @@ fn find_block<'a>(blocks: &'a [Block], id: &StableId) -> Option<&'a Block> {
     None
 }
 
-type PlannedOp = (&'static str, &'static str, OperationKind);
+pub(crate) type PlannedOp = (&'static str, &'static str, OperationKind);
 
 /// Grapheme-aware length of the cluster that ends at character `abs` of
 /// `text` (used for Backspace), or that starts there (Delete).
@@ -480,17 +485,17 @@ impl<'a> EditorCommandService<'a> {
 /// Accumulates operations against a snapshot of the pre-edit document. All
 /// offsets are expressed against that snapshot; the operations are applied
 /// together in one batch so intermediate states never need re-indexing.
-struct EditPlan {
+pub(crate) struct EditPlan {
     blocks: Vec<Block>,
-    index: DocumentIndex,
-    ops: Vec<PlannedOp>,
+    pub(crate) index: DocumentIndex,
+    pub(crate) ops: Vec<PlannedOp>,
     /// Caret expressed as (block id, linear offset) in post-edit
     /// coordinates when the target block did not exist before the edit.
     pending_caret: Option<(StableId, usize)>,
 }
 
 impl EditPlan {
-    fn new(app: &OpenDocApp, index: DocumentIndex) -> Self {
+    pub(crate) fn new(app: &OpenDocApp, index: DocumentIndex) -> Self {
         Self {
             blocks: app.document.blocks.clone(),
             index,
@@ -506,7 +511,7 @@ impl EditPlan {
     /// Delete the characters in `[from, to)` where both ends are in the same
     /// container. Blocks strictly between the ends are removed; the tail of
     /// the end block is joined into the start block.
-    fn delete_range(&mut self, from: Resolved, to: Resolved) {
+    pub(crate) fn delete_range(&mut self, from: Resolved, to: Resolved) {
         if to <= from {
             return;
         }
@@ -635,7 +640,7 @@ impl EditPlan {
     }
 
     /// Insert `text` at `at` and return the caret position after it.
-    fn insert_text(&mut self, at: Resolved, text: &str) -> Resolved {
+    pub(crate) fn insert_text(&mut self, at: Resolved, text: &str) -> Resolved {
         if text.is_empty() {
             return at;
         }
@@ -753,6 +758,15 @@ impl EditPlan {
     /// Enter: split the block at `at`. With `keep_placeholder` the new
     /// block always starts with an editable run (possibly empty) so callers
     /// can insert text at its start.
+    /// A list item that just became a paragraph cuts its run in two. The
+    /// items after it must move to a fresh run, or numbering keeps counting
+    /// across the paragraph now separating the halves.
+    fn split_list_run_after_leaving(&mut self, block_id: &StableId) {
+        let leaving = BTreeSet::from([block_id.clone()]);
+        let operations = list_run_split_operations(&self.blocks, &leaving);
+        self.ops.extend(operations);
+    }
+
     fn split_block(&mut self, at: Resolved, keep_placeholder: bool) -> Option<SplitOutcome> {
         let entry = self.index.blocks[at.block].clone();
         if !entry.text_block {
@@ -784,6 +798,7 @@ impl EditPlan {
                     style: BlockTextStyle::Paragraph,
                 },
             ));
+            self.split_list_run_after_leaving(&block.id);
             let first_inline_id = entry
                 .spans
                 .first()
@@ -851,7 +866,7 @@ impl EditPlan {
             id: new_block_id.clone(),
             kind: new_kind,
             content: vec![first_inline],
-            properties: Vec::new(),
+            properties: BlockProperties::default(),
         };
         self.ops.push((
             "insert-block",
@@ -945,6 +960,7 @@ impl EditPlan {
                     style: BlockTextStyle::Paragraph,
                 },
             ));
+            self.split_list_run_after_leaving(&entry.id);
             return Some(at);
         }
         if !entry.top_level {
@@ -1062,401 +1078,6 @@ fn first_inline_is_empty(ops: &[PlannedOp], inline_id: &StableId) -> bool {
             .unwrap_or(false),
         _ => false,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn app_with(paragraphs: &[&str]) -> OpenDocApp {
-        let mut app = OpenDocApp::new_sample();
-        app.new_document("Editor");
-        app.document.blocks.clear();
-        for text in paragraphs {
-            app.document.blocks.push(Block::paragraph(*text));
-        }
-        app
-    }
-
-    fn pos(app: &OpenDocApp, block: usize, offset: usize) -> EditorPosition {
-        let block = &app.document.blocks[block];
-        EditorPosition {
-            block_id: block.id.to_string(),
-            inline_id: block
-                .content
-                .first()
-                .map(|inline| inline_stable_id(inline).to_string()),
-            offset,
-        }
-    }
-
-    fn input(selection: EditorSelection, input_type: &str, data: Option<&str>) -> EditorInput {
-        EditorInput {
-            selection,
-            input_type: input_type.to_string(),
-            data: data.map(str::to_string),
-            html: None,
-        }
-    }
-
-    fn texts(app: &OpenDocApp) -> Vec<String> {
-        app.document
-            .blocks
-            .iter()
-            .map(|block| {
-                block
-                    .content
-                    .iter()
-                    .map(|inline| inline_text(inline).unwrap_or("\u{FFFC}"))
-                    .collect::<String>()
-            })
-            .collect()
-    }
-
-    fn list_levels(app: &OpenDocApp) -> Vec<(u8, bool)> {
-        app.document
-            .blocks
-            .iter()
-            .filter_map(|block| match block.kind {
-                BlockKind::ListItem { level, ordered, .. } => Some((level, ordered)),
-                _ => None,
-            })
-            .collect()
-    }
-
-    #[test]
-    fn describes_editor_selection_in_document_order() {
-        let app = app_with(&["first", "middle", "last"]);
-        let context = app
-            .describe_editor_selection(EditorSelection {
-                anchor: pos(&app, 2, 1),
-                focus: pos(&app, 0, 2),
-            })
-            .unwrap();
-        let expected_blocks = app
-            .document
-            .blocks
-            .iter()
-            .map(|block| block.id.to_string())
-            .collect::<Vec<_>>();
-        assert_eq!(context.selected_block_ids, expected_blocks);
-        assert_eq!(
-            context.focus_block_id,
-            Some(app.document.blocks[0].id.to_string())
-        );
-        assert_eq!(
-            context.inline_range.unwrap().start,
-            inline_stable_id(&app.document.blocks[0].content[0]).to_string()
-        );
-    }
-
-    #[test]
-    fn select_all_editor_content_is_rust_owned() {
-        let app = app_with(&["first", "last"]);
-        let result = app.select_all_editor_content().unwrap();
-
-        assert!(result.handled);
-        assert_eq!(result.selection.anchor, pos(&app, 0, 0));
-        assert_eq!(result.selection.focus, pos(&app, 1, 4));
-    }
-
-    #[test]
-    fn selection_block_style_and_indent_commands_are_rust_owned() {
-        let mut app = app_with(&["first", "middle"]);
-        let selection = EditorSelection {
-            anchor: pos(&app, 0, 0),
-            focus: pos(&app, 1, 1),
-        };
-        app.set_editor_selection_block_style(selection.clone(), "list-item", 0, false)
-            .unwrap();
-        assert_eq!(list_levels(&app), vec![(0, false), (0, false)]);
-        app.adjust_editor_selection_list_indent(selection.clone(), 1)
-            .unwrap();
-        assert_eq!(list_levels(&app), vec![(1, false), (1, false)]);
-        app.adjust_editor_selection_list_indent(selection, -8)
-            .unwrap();
-        assert_eq!(list_levels(&app), vec![(0, false), (0, false)]);
-    }
-
-    #[test]
-    fn typing_inserts_at_caret_and_moves_it() {
-        let mut app = app_with(&["Hello world"]);
-        let result = app
-            .apply_editor_input(input(
-                EditorSelection::collapsed(pos(&app, 0, 5)),
-                "insertText",
-                Some(","),
-            ))
-            .unwrap();
-        assert!(result.handled);
-        assert_eq!(texts(&app), vec!["Hello, world"]);
-        assert_eq!(result.selection.focus.offset, 6);
-        assert_eq!(
-            result.selection.focus.block_id,
-            app.document.blocks[0].id.to_string()
-        );
-    }
-
-    #[test]
-    fn typing_replaces_a_selection_across_blocks() {
-        let mut app = app_with(&["first line", "middle", "last line"]);
-        let result = app
-            .apply_editor_input(input(
-                EditorSelection {
-                    anchor: pos(&app, 2, 5),
-                    focus: pos(&app, 0, 5),
-                },
-                "insertText",
-                Some("-"),
-            ))
-            .unwrap();
-        assert!(result.handled);
-        assert_eq!(texts(&app), vec!["first-line"]);
-        assert_eq!(result.selection.focus.offset, 6);
-    }
-
-    #[test]
-    fn enter_splits_and_backspace_joins() {
-        let mut app = app_with(&["Hello world"]);
-        let result = app
-            .apply_editor_input(input(
-                EditorSelection::collapsed(pos(&app, 0, 5)),
-                "insertParagraph",
-                None,
-            ))
-            .unwrap();
-        assert_eq!(texts(&app), vec!["Hello", " world"]);
-        assert_eq!(
-            result.selection.focus.block_id,
-            app.document.blocks[1].id.to_string()
-        );
-        assert_eq!(result.selection.focus.offset, 0);
-
-        let result = app
-            .apply_editor_input(input(
-                EditorSelection::collapsed(pos(&app, 1, 0)),
-                "deleteContentBackward",
-                None,
-            ))
-            .unwrap();
-        assert!(result.handled);
-        assert_eq!(texts(&app), vec!["Hello world"]);
-        assert_eq!(result.selection.focus.offset, 5);
-    }
-
-    #[test]
-    fn enter_at_end_of_heading_creates_paragraph_and_empty_list_item_leaves_list() {
-        let mut app = app_with(&["Title"]);
-        app.document.blocks[0].kind = BlockKind::Heading { level: 1 };
-        app.apply_editor_input(input(
-            EditorSelection::collapsed(pos(&app, 0, 5)),
-            "insertParagraph",
-            None,
-        ))
-        .unwrap();
-        assert!(matches!(app.document.blocks[1].kind, BlockKind::Paragraph));
-        assert!(matches!(
-            app.document.blocks[0].kind,
-            BlockKind::Heading { level: 1 }
-        ));
-
-        let mut app = app_with(&[""]);
-        app.document.blocks[0].kind = BlockKind::ListItem {
-            list_id: StableId::new("list"),
-            level: 0,
-            ordered: false,
-        };
-        app.apply_editor_input(input(
-            EditorSelection::collapsed(pos(&app, 0, 0)),
-            "insertParagraph",
-            None,
-        ))
-        .unwrap();
-        assert_eq!(app.document.blocks.len(), 1);
-        assert!(matches!(app.document.blocks[0].kind, BlockKind::Paragraph));
-    }
-
-    #[test]
-    fn enter_in_a_list_item_continues_the_list() {
-        for ordered in [false, true] {
-            let mut app = app_with(&["first item", "after"]);
-            let list_id = StableId::new("list");
-            app.document.blocks[0].kind = BlockKind::ListItem {
-                list_id: list_id.clone(),
-                level: 1,
-                ordered,
-            };
-            let result = app
-                .apply_editor_input(input(
-                    EditorSelection::collapsed(pos(&app, 0, char_len("first item"))),
-                    "insertParagraph",
-                    None,
-                ))
-                .unwrap();
-            assert!(result.handled);
-            assert_eq!(texts(&app), vec!["first item", "", "after"]);
-            // The continuation stays in the same list, at the same level and
-            // with the same numbering, so ordered lists keep counting.
-            match &app.document.blocks[1].kind {
-                BlockKind::ListItem {
-                    list_id: next_list,
-                    level,
-                    ordered: next_ordered,
-                } => {
-                    assert_eq!(next_list, &list_id);
-                    assert_eq!(*level, 1);
-                    assert_eq!(*next_ordered, ordered);
-                }
-                other => panic!("expected a list item, got {other:?}"),
-            }
-            assert_eq!(
-                result.selection.focus.block_id,
-                app.document.blocks[1].id.to_string()
-            );
-            assert_eq!(result.selection.focus.offset, 0);
-
-            // Enter on the now-empty continuation leaves the list instead of
-            // adding another empty bullet.
-            let result = app
-                .apply_editor_input(input(
-                    EditorSelection::collapsed(pos(&app, 1, 0)),
-                    "insertParagraph",
-                    None,
-                ))
-                .unwrap();
-            assert!(result.handled);
-            assert_eq!(texts(&app), vec!["first item", "", "after"]);
-            assert!(matches!(app.document.blocks[1].kind, BlockKind::Paragraph));
-            assert_eq!(list_levels(&app), vec![(1, ordered)]);
-        }
-    }
-
-    #[test]
-    fn backspace_deletes_whole_grapheme_and_atomic_inlines() {
-        let mut app = app_with(&["ok 👨‍👩‍👧"]);
-        let len = char_len("ok 👨‍👩‍👧");
-        let result = app
-            .apply_editor_input(input(
-                EditorSelection::collapsed(pos(&app, 0, len)),
-                "deleteContentBackward",
-                None,
-            ))
-            .unwrap();
-        assert_eq!(texts(&app), vec!["ok "]);
-        assert_eq!(result.selection.focus.offset, 3);
-
-        let mut app = app_with(&["see "]);
-        app.document.blocks[0].content.push(Inline::Mention {
-            id: StableId::new("mention"),
-            label: "@bob".to_string(),
-        });
-        let block_id = app.document.blocks[0].id.to_string();
-        let result = app
-            .apply_editor_input(input(
-                EditorSelection::collapsed(EditorPosition {
-                    block_id,
-                    inline_id: Some(
-                        inline_stable_id(&app.document.blocks[0].content[1]).to_string(),
-                    ),
-                    offset: 1,
-                }),
-                "deleteContentBackward",
-                None,
-            ))
-            .unwrap();
-        assert!(result.handled);
-        assert_eq!(app.document.blocks[0].content.len(), 1);
-        assert_eq!(texts(&app), vec!["see "]);
-    }
-
-    #[test]
-    fn delete_word_backward_and_paste_multiline() {
-        let mut app = app_with(&["alpha beta gamma"]);
-        let result = app
-            .apply_editor_input(input(
-                EditorSelection::collapsed(pos(&app, 0, 10)),
-                "deleteWordBackward",
-                None,
-            ))
-            .unwrap();
-        assert_eq!(texts(&app), vec!["alpha  gamma"]);
-        assert_eq!(result.selection.focus.offset, 6);
-
-        let mut app = app_with(&["ab"]);
-        let result = app
-            .apply_editor_input(input(
-                EditorSelection::collapsed(pos(&app, 0, 1)),
-                "insertFromPaste",
-                Some("X\nY\nZ"),
-            ))
-            .unwrap();
-        assert!(result.handled);
-        assert_eq!(texts(&app), vec!["aX", "Y", "Zb"]);
-    }
-
-    #[test]
-    fn unsupported_gestures_are_reported_unhandled() {
-        let mut app = app_with(&["only"]);
-        let result = app
-            .apply_editor_input(input(
-                EditorSelection::collapsed(pos(&app, 0, 0)),
-                "deleteContentBackward",
-                None,
-            ))
-            .unwrap();
-        assert!(!result.handled);
-        assert_eq!(texts(&app), vec!["only"]);
-        let result = app
-            .apply_editor_input(input(
-                EditorSelection::collapsed(pos(&app, 0, 0)),
-                "historyUndo",
-                None,
-            ))
-            .unwrap();
-        assert!(!result.handled);
-    }
-
-    #[test]
-    fn editing_inside_table_cells_stays_within_the_cell() {
-        let mut app = OpenDocApp::new_sample();
-        app.new_document("Table");
-        app.add_table();
-        let table = app
-            .document
-            .blocks
-            .iter()
-            .find(|block| matches!(block.kind, BlockKind::Table { .. }))
-            .unwrap()
-            .clone();
-        let BlockKind::Table { rows } = &table.kind else {
-            unreachable!()
-        };
-        let cell_block = &rows[0].cells[0].blocks[0];
-        let position = EditorPosition {
-            block_id: cell_block.id.to_string(),
-            inline_id: Some(inline_stable_id(&cell_block.content[0]).to_string()),
-            offset: 0,
-        };
-        let result = app
-            .apply_editor_input(input(
-                EditorSelection::collapsed(position.clone()),
-                "insertText",
-                Some("cell "),
-            ))
-            .unwrap();
-        assert!(result.handled);
-        assert!(app.document.visible_text().contains("cell A1"));
-        // Enter inside a cell becomes a soft line break rather than a split.
-        let result = app
-            .apply_editor_input(input(
-                EditorSelection::collapsed(position),
-                "insertParagraph",
-                None,
-            ))
-            .unwrap();
-        assert!(result.handled);
-        assert!(app.document.visible_text().contains("\ncell A1"));
-    }
 }
 
 // ---- Marks and structural helpers ------------------------------------------
@@ -1805,16 +1426,7 @@ impl EditorCommandService<'_> {
         let rows = rows.clamp(1, 200);
         let columns = columns.clamp(1, 50);
         let table_rows = (0..rows)
-            .map(|_| opendoc_core::TableRow {
-                id: StableId::new("row"),
-                cells: (0..columns)
-                    .map(|_| opendoc_core::TableCell {
-                        id: StableId::new("cell"),
-                        blocks: vec![Block::paragraph("")],
-                        properties: Vec::new(),
-                    })
-                    .collect(),
-            })
+            .map(|_| opendoc_core::TableRow::empty(columns))
             .collect();
         Ok(self.apply_batch(vec![(
             "insert-block",
@@ -1823,9 +1435,9 @@ impl EditorCommandService<'_> {
                 after: Some(after),
                 block: Block {
                     id: StableId::new("block"),
-                    kind: BlockKind::Table { rows: table_rows },
+                    kind: BlockKind::table(table_rows),
                     content: Vec::new(),
-                    properties: Vec::new(),
+                    properties: BlockProperties::default(),
                 },
             },
         )]))
@@ -1847,151 +1459,6 @@ impl DerefMut for EditorCommandService<'_> {
 }
 
 #[cfg(test)]
-mod mark_tests {
-    use super::*;
-    use opendoc_core::MarkKind;
-
-    fn app_with(text: &str) -> OpenDocApp {
-        let mut app = OpenDocApp::new_sample();
-        app.new_document("Marks");
-        app.document.blocks.clear();
-        app.document.blocks.push(Block::paragraph(text));
-        app
-    }
-
-    fn selection(app: &OpenDocApp, from: usize, to: usize) -> EditorSelection {
-        let block = &app.document.blocks[0];
-        let inline_id = inline_stable_id(&block.content[0]).to_string();
-        EditorSelection {
-            anchor: EditorPosition {
-                block_id: block.id.to_string(),
-                inline_id: Some(inline_id.clone()),
-                offset: from,
-            },
-            focus: EditorPosition {
-                block_id: block.id.to_string(),
-                inline_id: Some(inline_id),
-                offset: to,
-            },
-        }
-    }
-
-    #[test]
-    fn bold_toggles_on_a_partial_run_and_splits_it() {
-        let mut app = app_with("hello world");
-        let result = app
-            .apply_editor_mark(EditorMarkInput {
-                selection: selection(&app, 6, 11),
-                mark_kind: "bold".to_string(),
-                value: None,
-                action: None,
-            })
-            .unwrap();
-        assert!(result.handled);
-        let block = &app.document.blocks[0];
-        assert_eq!(block.content.len(), 2);
-        match &block.content[1] {
-            Inline::Text { text, marks, .. } => {
-                assert_eq!(text, "world");
-                assert!(marks.iter().any(|mark| mark.kind == MarkKind::Bold));
-            }
-            other => panic!("unexpected {other:?}"),
-        }
-        // The anchor sits at the boundary: end of the first run or start
-        // of the bold run are both valid.
-        assert!(matches!(result.selection.anchor.offset, 0 | 6));
-        assert_eq!(result.selection.focus.offset, 5);
-        // Toggle again removes it.
-        let bold_id = inline_stable_id(&block.content[1]).to_string();
-        let block_id = block.id.to_string();
-        let again = app
-            .apply_editor_mark(EditorMarkInput {
-                selection: EditorSelection {
-                    anchor: EditorPosition {
-                        block_id: block_id.clone(),
-                        inline_id: Some(bold_id.clone()),
-                        offset: 0,
-                    },
-                    focus: EditorPosition {
-                        block_id,
-                        inline_id: Some(bold_id),
-                        offset: 5,
-                    },
-                },
-                mark_kind: "bold".to_string(),
-                value: None,
-                action: None,
-            })
-            .unwrap();
-        assert!(again.handled);
-        match &app.document.blocks[0].content[1] {
-            Inline::Text { marks, .. } => assert!(marks.is_empty()),
-            other => panic!("unexpected {other:?}"),
-        }
-    }
-
-    #[test]
-    fn middle_split_link_and_clear_all() {
-        let mut app = app_with("abcdef");
-        app.apply_editor_mark(EditorMarkInput {
-            selection: selection(&app, 2, 4),
-            mark_kind: "color".to_string(),
-            value: Some("#ff0000".to_string()),
-            action: Some("set".to_string()),
-        })
-        .unwrap();
-        let texts: Vec<String> = app.document.blocks[0]
-            .content
-            .iter()
-            .map(|inline| inline_text(inline).unwrap_or_default().to_string())
-            .collect();
-        assert_eq!(texts, vec!["ab", "cd", "ef"]);
-
-        let mut app = app_with("visit site");
-        app.apply_editor_mark(EditorMarkInput {
-            selection: selection(&app, 6, 10),
-            mark_kind: "link".to_string(),
-            value: Some("https://example.org".to_string()),
-            action: Some("set".to_string()),
-        })
-        .unwrap();
-        assert!(matches!(
-            app.document.blocks[0].content[1],
-            Inline::Link { .. }
-        ));
-
-        let mut app = app_with("plain");
-        app.apply_editor_mark(EditorMarkInput {
-            selection: selection(&app, 0, 5),
-            mark_kind: "italic".to_string(),
-            value: None,
-            action: None,
-        })
-        .unwrap();
-        app.apply_editor_mark(EditorMarkInput {
-            selection: selection(&app, 0, 5),
-            mark_kind: "all".to_string(),
-            value: None,
-            action: Some("remove".to_string()),
-        })
-        .unwrap();
-        match &app.document.blocks[0].content[0] {
-            Inline::Text { marks, .. } => assert!(marks.is_empty()),
-            other => panic!("unexpected {other:?}"),
-        }
-    }
-
-    #[test]
-    fn sized_table_insertion() {
-        let mut app = app_with("before");
-        let block_id = app.document.blocks[0].id.to_string();
-        let doc = app.insert_table_after_sized(&block_id, 3, 4).unwrap();
-        let table = doc
-            .blocks
-            .iter()
-            .find(|block| block.kind == "table")
-            .unwrap();
-        assert_eq!(table.rows.len(), 3);
-        assert_eq!(table.rows[0].len(), 4);
-    }
-}
+mod mark_tests;
+#[cfg(test)]
+mod tests;

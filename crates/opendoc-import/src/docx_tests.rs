@@ -2,7 +2,8 @@
 
 use crate::{import_doc_or_docx, ImportError, ImportReport};
 use opendoc_core::{
-    Anchor, Block, BlockKind, Inline, Mark, MarkKind, StableId, SuggestionKind, SuggestionState,
+    Alignment, Anchor, Block, BlockKind, Inline, Length, LineSpacing, Mark, MarkKind, StableId,
+    SuggestionKind, SuggestionState, TextDirection,
 };
 use std::io::{Cursor, Write};
 use std::path::PathBuf;
@@ -283,8 +284,8 @@ fn numbered_and_bulleted_lists_share_one_list_id_per_numbering_instance() {
             BlockKind::ListItem {
                 list_id,
                 level,
-                ordered,
-            } => (list_id.clone(), *level, *ordered),
+                kind,
+            } => (list_id.clone(), *level, kind.is_ordered()),
             other => panic!("expected list item, got {other:?}"),
         })
         .collect();
@@ -339,7 +340,7 @@ fn resolves_title_subtitle_heading_and_run_styles_through_based_on_chains() {
     assert!(matches!(
         blocks[3].kind,
         BlockKind::ListItem {
-            ordered: true,
+            kind: opendoc_core::ListKind::Ordered,
             level: 0,
             ..
         }
@@ -611,7 +612,7 @@ fn imports_docx_standalone_image_as_content_addressed_blob() {
     assert_eq!(report.document.blocks.len(), 3);
     assert!(matches!(
         &report.document.blocks[1].kind,
-        BlockKind::Image { blob_hash, alt_text }
+        BlockKind::Image { blob_hash, alt_text, .. }
             if blob_hash == &expected_hash && alt_text == "Imported & described figure"
     ));
     assert_eq!(
@@ -722,12 +723,15 @@ fn nested_tables_import_as_table_blocks_inside_cells_with_warning() {
 </w:tbl>"#,
         &[],
     );
-    let BlockKind::Table { rows } = &report.document.blocks[0].kind else {
+    let BlockKind::Table { rows, .. } = &report.document.blocks[0].kind else {
         panic!("expected table");
     };
     let cell = &rows[0].cells[0];
     assert_eq!(cell.blocks.len(), 3);
-    let BlockKind::Table { rows: inner_rows } = &cell.blocks[1].kind else {
+    let BlockKind::Table {
+        rows: inner_rows, ..
+    } = &cell.blocks[1].kind
+    else {
         panic!("expected nested table, got {:?}", cell.blocks[1].kind);
     };
     assert_eq!(inner_rows.len(), 1);
@@ -741,7 +745,7 @@ fn nested_tables_import_as_table_blocks_inside_cells_with_warning() {
 }
 
 #[test]
-fn dropped_paragraph_properties_and_headers_emit_one_warning_per_kind_with_counts() {
+fn paragraph_properties_import_and_unrepresentable_ones_warn_once_per_kind() {
     let rels = document_rels(
         r#"<Relationship Id="rIdH" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>
 <Relationship Id="rIdF" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/>"#,
@@ -759,17 +763,46 @@ fn dropped_paragraph_properties_and_headers_emit_one_warning_per_kind_with_count
         ],
     );
     assert_eq!(report.document.visible_text(), "Centered\nRight\n");
-    assert!(warning_message(&report, "docx-dropped-alignment").contains("(2 occurrences)"));
-    assert!(warning_message(&report, "docx-dropped-indent").contains("(1 occurrence)"));
-    assert!(warning_message(&report, "docx-dropped-spacing").contains("(1 occurrence)"));
+    // Alignment, indents and spacing are representable now, so they arrive as
+    // values rather than as warnings.
+    assert_eq!(
+        report.document.blocks[0].properties.alignment,
+        Some(Alignment::Center)
+    );
+    assert_eq!(
+        report.document.blocks[0].properties.indent_start,
+        Some(Length::from_twips(720).unwrap())
+    );
+    assert_eq!(
+        report.document.blocks[1].properties.alignment,
+        Some(Alignment::End)
+    );
+    assert_eq!(
+        report.document.blocks[1].properties.space_before,
+        Some(Length::from_twips(120).unwrap())
+    );
+    assert!(!has_warning(&report, "docx-dropped-alignment"));
+    assert!(!has_warning(&report, "docx-dropped-indent"));
+    assert!(!has_warning(&report, "docx-dropped-spacing"));
+    // What OpenDoc still cannot hold keeps warning, once per kind with a count.
     assert!(has_warning(&report, "docx-dropped-paragraph-border"));
-    assert!(warning_message(&report, "docx-dropped-header-footer").contains("(2 occurrences)"));
-    assert!(has_warning(&report, "docx-dropped-section-properties"));
+    // The header, the footer and the section's page geometry are read now
+    // (ADR 0009's model, this reader's half of the round trip), so they are
+    // no longer counted as dropped.
+    for slot in [&report.document.header, &report.document.footer] {
+        assert!(
+            matches!(&slot[0].content[0], Inline::Text { text, .. } if text == "Header"),
+            "{:?}",
+            slot[0].content
+        );
+    }
+    assert!(!has_warning(&report, "docx-dropped-header-footer"));
+    assert!(!has_warning(&report, "docx-dropped-section-properties"));
     assert_eq!(
         report
             .warnings
             .iter()
-            .filter(|warning| warning.code == "docx-dropped-alignment")
+            .filter(|warning| warning.code == "docx-dropped-paragraph-border")
             .count(),
         1
     );
@@ -901,5 +934,199 @@ fn attribute_parsing_accepts_single_quotes_and_alternate_prefixes() {
     assert_eq!(
         inline_marks(&report.document.blocks[0], "Prefixed "),
         vec![MarkKind::Bold]
+    );
+}
+
+#[test]
+fn docx_paragraph_properties_map_to_twips_without_rounding_drift() {
+    let report = import_body(
+        "para-props",
+        r#"<w:p><w:pPr>
+    <w:jc w:val="both"/>
+    <w:ind w:start="1440" w:end="720" w:firstLine="360"/>
+    <w:spacing w:before="240" w:after="120" w:line="360" w:lineRule="auto"/>
+    <w:bidi/>
+  </w:pPr><w:r><w:t>Justified</w:t></w:r></w:p>"#,
+        &[],
+    );
+    let properties = &report.document.blocks[0].properties;
+    assert_eq!(properties.alignment, Some(Alignment::Justify));
+    // DOCX already speaks twips, so these are equalities, not approximations.
+    assert_eq!(
+        properties.indent_start,
+        Some(Length::from_twips(1440).unwrap())
+    );
+    assert_eq!(
+        properties.indent_end,
+        Some(Length::from_twips(720).unwrap())
+    );
+    assert_eq!(
+        properties.indent_first_line,
+        Some(Length::from_twips(360).unwrap())
+    );
+    assert_eq!(
+        properties.space_before,
+        Some(Length::from_twips(240).unwrap())
+    );
+    assert_eq!(
+        properties.space_after,
+        Some(Length::from_twips(120).unwrap())
+    );
+    // w:line is 240ths of a line under the default "auto" rule.
+    assert_eq!(
+        properties.line_spacing,
+        Some(LineSpacing::multiple(1.5).unwrap())
+    );
+    assert_eq!(properties.direction, Some(TextDirection::RightToLeft));
+    assert!(!has_warning(&report, "docx-dropped-alignment"));
+    assert!(!has_warning(&report, "docx-dropped-indent"));
+    assert!(!has_warning(&report, "docx-dropped-spacing"));
+    assert!(report.document.validate().is_ok());
+}
+
+#[test]
+fn docx_hanging_indent_is_a_negative_first_line_indent() {
+    let report = import_body(
+        "hanging",
+        r#"<w:p><w:pPr><w:ind w:left="720" w:hanging="360" w:firstLine="180"/></w:pPr><w:r><w:t>Hang</w:t></w:r></w:p>"#,
+        &[],
+    );
+    let properties = &report.document.blocks[0].properties;
+    assert_eq!(
+        properties.indent_start,
+        Some(Length::from_twips(720).unwrap())
+    );
+    // `w:hanging` wins over `w:firstLine` when both are present.
+    assert_eq!(
+        properties.indent_first_line,
+        Some(Length::from_twips(-360).unwrap())
+    );
+}
+
+#[test]
+fn docx_exact_and_at_least_line_rules_keep_their_rule() {
+    let report = import_body(
+        "line-rules",
+        r#"<w:p><w:pPr><w:spacing w:line="280" w:lineRule="exact"/></w:pPr><w:r><w:t>Exact</w:t></w:r></w:p>
+<w:p><w:pPr><w:spacing w:line="280" w:lineRule="atLeast"/></w:pPr><w:r><w:t>AtLeast</w:t></w:r></w:p>"#,
+        &[],
+    );
+    assert_eq!(
+        report.document.blocks[0].properties.line_spacing,
+        Some(LineSpacing::Exact(Length::from_twips(280).unwrap()))
+    );
+    assert_eq!(
+        report.document.blocks[1].properties.line_spacing,
+        Some(LineSpacing::AtLeast(Length::from_twips(280).unwrap()))
+    );
+}
+
+#[test]
+fn docx_paragraph_properties_inherit_through_the_style_chain_and_direct_values_win() {
+    let styles = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="paragraph" w:styleId="Base">
+    <w:name w:val="Base"/>
+    <w:pPr><w:jc w:val="center"/><w:spacing w:after="200"/></w:pPr>
+  </w:style>
+  <w:style w:type="paragraph" w:styleId="Quote">
+    <w:name w:val="Quote"/>
+    <w:basedOn w:val="Base"/>
+    <w:pPr><w:ind w:left="720"/></w:pPr>
+  </w:style>
+</w:styles>"#;
+    let report = import_body(
+        "style-chain-props",
+        r#"<w:p><w:pPr><w:pStyle w:val="Quote"/></w:pPr><w:r><w:t>Inherited</w:t></w:r></w:p>
+<w:p><w:pPr><w:pStyle w:val="Quote"/><w:jc w:val="right"/></w:pPr><w:r><w:t>Overridden</w:t></w:r></w:p>"#,
+        &[("word/styles.xml", styles.as_bytes())],
+    );
+    let inherited = &report.document.blocks[0].properties;
+    assert_eq!(inherited.alignment, Some(Alignment::Center));
+    assert_eq!(
+        inherited.indent_start,
+        Some(Length::from_twips(720).unwrap())
+    );
+    assert_eq!(
+        inherited.space_after,
+        Some(Length::from_twips(200).unwrap())
+    );
+    let overridden = &report.document.blocks[1].properties;
+    assert_eq!(overridden.alignment, Some(Alignment::End));
+    assert_eq!(
+        overridden.indent_start,
+        Some(Length::from_twips(720).unwrap())
+    );
+}
+
+#[test]
+fn docx_paragraph_properties_that_cannot_be_represented_still_warn() {
+    let report = import_body(
+        "unrepresentable-props",
+        r#"<w:p><w:pPr>
+    <w:jc w:val="highKashida"/>
+    <w:ind w:leftChars="200"/>
+    <w:spacing w:before="-120" w:beforeAutospacing="1"/>
+  </w:pPr><w:r><w:t>Odd</w:t></w:r></w:p>
+<w:p><w:pPr><w:jc w:val="distribute"/></w:pPr><w:r><w:t>Distributed</w:t></w:r></w:p>"#,
+        &[],
+    );
+    assert_eq!(report.document.blocks[0].properties.alignment, None);
+    assert_eq!(report.document.blocks[0].properties.indent_start, None);
+    assert_eq!(report.document.blocks[0].properties.space_before, None);
+    assert!(has_warning(&report, "docx-dropped-alignment"));
+    assert!(has_warning(&report, "docx-dropped-indent"));
+    assert!(has_warning(&report, "docx-dropped-spacing"));
+    assert_eq!(
+        report.document.blocks[1].properties.alignment,
+        Some(Alignment::Justify)
+    );
+    assert!(warning_message(&report, "docx-approximated-alignment").contains("justified"));
+}
+
+#[test]
+fn docx_paragraph_properties_survive_export_to_google_docs_json_and_back() {
+    let report = import_body(
+        "docx-to-google",
+        r#"<w:p><w:pPr>
+    <w:jc w:val="center"/>
+    <w:ind w:start="720" w:end="360" w:hanging="360"/>
+    <w:spacing w:before="240" w:after="120" w:line="480" w:lineRule="auto"/>
+  </w:pPr><w:r><w:t>Round trip</w:t></w:r></w:p>"#,
+        &[],
+    );
+    let expected = report.document.blocks[0].properties.clone();
+    assert_eq!(expected.alignment, Some(Alignment::Center));
+    assert_eq!(
+        expected.indent_first_line,
+        Some(Length::from_twips(-360).unwrap())
+    );
+    let (bytes, warnings) = crate::export_google_docs_json_with_warnings(&report.document).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let reimported = crate::import_google_docs_json("Round trip", &bytes).unwrap();
+    assert_eq!(reimported.document.blocks[0].properties, expected);
+    assert!(reimported.warnings.is_empty(), "{:?}", reimported.warnings);
+}
+
+#[test]
+fn docx_paragraph_properties_reach_every_fragment_of_a_split_paragraph() {
+    let report = import_body(
+        "split-props",
+        r#"<w:p><w:pPr><w:jc w:val="center"/></w:pPr>
+  <w:r><w:t>Before</w:t></w:r>
+  <w:r><w:br w:type="page"/></w:r>
+  <w:r><w:t>After</w:t></w:r>
+</w:p>"#,
+        &[],
+    );
+    assert_eq!(report.document.blocks.len(), 3);
+    assert_eq!(
+        report.document.blocks[0].properties.alignment,
+        Some(Alignment::Center)
+    );
+    assert!(report.document.blocks[1].properties.is_empty());
+    assert_eq!(
+        report.document.blocks[2].properties.alignment,
+        Some(Alignment::Center)
     );
 }

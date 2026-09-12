@@ -88,6 +88,7 @@ This is the project's central rule (`docs/RESTRUCTURE_PLAN.md` "Non-Negotiable D
 | `opendoc-import` | Google Docs/Sheets JSON, `.docx`, `.doc` adapters |
 | `opendoc-citations` | Citation model/parse/render (hayagriva-backed) |
 | `opendoc-render` | Pure HTML/debug projections — must never mutate source state or force recalculation |
+| `opendoc-layout` | Deterministic document layout: line breaking, block flow and pagination against a bundled font subset. Pure, no host measurement, builds for wasm32 |
 | `opendoc-api` | Command registry/specs, typed command enum, arg DTOs, JSON parsing, contract generator binary |
 | `opendoc-app` | Application facade composing domain services; the runtime-facing entry point |
 | `opendoc-wasm` | wasm-bindgen adapter (`cdylib`) |

@@ -7,3 +7,6 @@ edition = "2021"
 opendoc-citations = { path = "../opendoc-citations" }
 opendoc-core = { path = "../opendoc-core" }
 serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+opendoc-format = { path = "../opendoc-format" }

@@ -264,7 +264,7 @@ fn migrated_commands_exist_in_rust_metadata() {
             block_id: "block".to_string(),
             style: "heading".to_string(),
             level: 1,
-            ordered: false,
+            list_kind: "bullet".to_string(),
         }),
         OpenDocCommand::AddHeading(AddHeadingArgs {
             text: "Heading".to_string(),
@@ -319,18 +319,18 @@ fn migrated_commands_exist_in_rust_metadata() {
         OpenDocCommand::AddListItem(AddListItemArgs {
             text: "Item".to_string(),
             level: 0,
-            ordered: false,
+            list_kind: "bullet".to_string(),
         }),
         OpenDocCommand::InsertListItemAfter(InsertListItemAfterArgs {
             after_block_id: "block".to_string(),
             text: "Item".to_string(),
             level: 0,
-            ordered: false,
+            list_kind: "bullet".to_string(),
         }),
         OpenDocCommand::UpdateListItem(UpdateListItemArgs {
             block_id: "block".to_string(),
             level: 0,
-            ordered: false,
+            list_kind: "bullet".to_string(),
         }),
         OpenDocCommand::InsertPageBreakAfter(AfterBlockArgs {
             after_block_id: "block".to_string(),
@@ -602,6 +602,7 @@ fn migrated_commands_exist_in_rust_metadata() {
             sheet_id: "sheet".to_string(),
             origin: "A1".to_string(),
             text: "1\t2".to_string(),
+            source_origin: Some("B2".to_string()),
         }),
         OpenDocCommand::ClearSpreadsheetSelection(SpreadsheetSelectionArgs {
             sheet_id: "sheet".to_string(),
@@ -943,6 +944,11 @@ fn sample_string(name: &str) -> &'static str {
         "suggestionId" => "suggestion",
         "acceptedBy" | "rejectedBy" | "author" => "Author",
         "markKind" => "bold",
+        "listKind" => "bullet",
+        "alignment" => "center",
+        "direction" => "ltr",
+        "spacingMode" => "multiple",
+        "key" => "alignment",
         "style" => "apa",
         "locale" => "en-US",
         "timezone" => "UTC",

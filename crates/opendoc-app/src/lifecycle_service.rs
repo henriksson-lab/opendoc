@@ -116,6 +116,17 @@ impl<'a> AppLifecycleService<'a> {
 }
 
 impl OpenDocApp {
+    /// Does the open document hold work that the repository does not have?
+    ///
+    /// The one dirty-state signal in the system. The `has_unsaved_changes`
+    /// field of the document projection, the autosave loop, the window-close
+    /// guard and the document-replacement guard in `dispatch` all read this,
+    /// so none of them can drift from one another or from a flag kept in the
+    /// frontend.
+    pub fn has_unsaved_changes(&self) -> bool {
+        self.projection_service().has_pending_save_changes()
+    }
+
     pub(crate) fn clear_blob_state(&mut self) {
         self.lifecycle_service().clear_blob_state();
     }

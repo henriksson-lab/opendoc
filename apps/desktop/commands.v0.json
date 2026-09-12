@@ -130,7 +130,12 @@
     },
     {
       "name": "export_google_docs_json",
-      "returns": "string",
+      "returns": "AppExport",
+      "args": {}
+    },
+    {
+      "name": "export_docx",
+      "returns": "AppExport",
       "args": {}
     },
     {
@@ -142,7 +147,7 @@
     },
     {
       "name": "export_google_sheets_json",
-      "returns": "string",
+      "returns": "AppExport",
       "args": {}
     },
     {
@@ -314,7 +319,7 @@
         "blockId": "string",
         "style": "string",
         "level": "number",
-        "ordered": "boolean"
+        "listKind": "string"
       }
     },
     {
@@ -324,7 +329,243 @@
         "selection": "EditorSelection",
         "style": "string",
         "level": "number",
-        "ordered": "boolean"
+        "listKind": "string"
+      }
+    },
+    {
+      "name": "layout_document",
+      "returns": "AppDocumentLayout",
+      "args": {}
+    },
+    {
+      "name": "set_page_setup",
+      "returns": "AppDocument",
+      "args": {
+        "widthTwips": "number",
+        "heightTwips": "number",
+        "marginTopTwips": "number",
+        "marginBottomTwips": "number",
+        "marginStartTwips": "number",
+        "marginEndTwips": "number"
+      }
+    },
+    {
+      "name": "set_page_orientation",
+      "returns": "AppDocument",
+      "args": {
+        "orientation": "string"
+      }
+    },
+    {
+      "name": "set_page_furniture",
+      "returns": "AppDocument",
+      "args": {
+        "slot": "string",
+        "text": "string",
+        "field": "string",
+        "alignment": "string"
+      }
+    },
+    {
+      "name": "clear_page_furniture",
+      "returns": "AppDocument",
+      "args": {
+        "slot": "string"
+      }
+    },
+    {
+      "name": "set_block_alignment",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "alignment": "string"
+      }
+    },
+    {
+      "name": "set_editor_selection_block_alignment",
+      "returns": "AppDocument",
+      "args": {
+        "selection": "EditorSelection",
+        "alignment": "string"
+      }
+    },
+    {
+      "name": "set_block_indent_start",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "twips": "number"
+      }
+    },
+    {
+      "name": "set_editor_selection_block_indent_start",
+      "returns": "AppDocument",
+      "args": {
+        "selection": "EditorSelection",
+        "twips": "number"
+      }
+    },
+    {
+      "name": "set_block_indent_end",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "twips": "number"
+      }
+    },
+    {
+      "name": "set_editor_selection_block_indent_end",
+      "returns": "AppDocument",
+      "args": {
+        "selection": "EditorSelection",
+        "twips": "number"
+      }
+    },
+    {
+      "name": "set_block_indent_first_line",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "twips": "number"
+      }
+    },
+    {
+      "name": "set_editor_selection_block_indent_first_line",
+      "returns": "AppDocument",
+      "args": {
+        "selection": "EditorSelection",
+        "twips": "number"
+      }
+    },
+    {
+      "name": "set_block_line_spacing",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "spacingMode": "string",
+        "spacingValue": "number"
+      }
+    },
+    {
+      "name": "set_editor_selection_block_line_spacing",
+      "returns": "AppDocument",
+      "args": {
+        "selection": "EditorSelection",
+        "spacingMode": "string",
+        "spacingValue": "number"
+      }
+    },
+    {
+      "name": "set_block_space_before",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "twips": "number"
+      }
+    },
+    {
+      "name": "set_editor_selection_block_space_before",
+      "returns": "AppDocument",
+      "args": {
+        "selection": "EditorSelection",
+        "twips": "number"
+      }
+    },
+    {
+      "name": "set_block_space_after",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "twips": "number"
+      }
+    },
+    {
+      "name": "set_editor_selection_block_space_after",
+      "returns": "AppDocument",
+      "args": {
+        "selection": "EditorSelection",
+        "twips": "number"
+      }
+    },
+    {
+      "name": "set_block_direction",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "direction": "string"
+      }
+    },
+    {
+      "name": "set_editor_selection_block_direction",
+      "returns": "AppDocument",
+      "args": {
+        "selection": "EditorSelection",
+        "direction": "string"
+      }
+    },
+    {
+      "name": "clear_block_property",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "key": "string"
+      }
+    },
+    {
+      "name": "clear_editor_selection_block_property",
+      "returns": "AppDocument",
+      "args": {
+        "selection": "EditorSelection",
+        "key": "string"
+      }
+    },
+    {
+      "name": "set_list_item_checked",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "checked": "boolean"
+      }
+    },
+    {
+      "name": "find_in_document",
+      "returns": "AppFindMatches",
+      "args": {
+        "query": "string",
+        "matchCase": "boolean",
+        "wholeWord": "boolean",
+        "regex": "boolean"
+      }
+    },
+    {
+      "name": "replace_match_in_document",
+      "returns": "AppDocument",
+      "args": {
+        "query": "string",
+        "matchCase": "boolean",
+        "wholeWord": "boolean",
+        "regex": "boolean",
+        "replacement": "string",
+        "matchIndex": "number"
+      }
+    },
+    {
+      "name": "replace_all_in_document",
+      "returns": "AppDocument",
+      "args": {
+        "query": "string",
+        "matchCase": "boolean",
+        "wholeWord": "boolean",
+        "regex": "boolean",
+        "replacement": "string"
+      }
+    },
+    {
+      "name": "adjust_editor_selection_indent",
+      "returns": "AppDocument",
+      "args": {
+        "selection": "EditorSelection",
+        "delta": "number"
       }
     },
     {
@@ -433,7 +674,7 @@
       "args": {
         "text": "string",
         "level": "number",
-        "ordered": "boolean"
+        "listKind": "string"
       }
     },
     {
@@ -443,7 +684,7 @@
         "afterBlockId": "string",
         "text": "string",
         "level": "number",
-        "ordered": "boolean"
+        "listKind": "string"
       }
     },
     {
@@ -452,7 +693,7 @@
       "args": {
         "blockId": "string",
         "level": "number",
-        "ordered": "boolean"
+        "listKind": "string"
       }
     },
     {
@@ -523,6 +764,99 @@
         "tableBlockId": "string",
         "rowId": "string",
         "cellId": "string"
+      }
+    },
+    {
+      "name": "insert_table_column",
+      "returns": "AppDocument",
+      "args": {
+        "tableBlockId": "string",
+        "afterColumnId": "string|null"
+      }
+    },
+    {
+      "name": "delete_table_column",
+      "returns": "AppDocument",
+      "args": {
+        "tableBlockId": "string",
+        "columnId": "string"
+      }
+    },
+    {
+      "name": "set_table_column_width",
+      "returns": "AppDocument",
+      "args": {
+        "tableBlockId": "string",
+        "columnId": "string",
+        "twips": "number"
+      }
+    },
+    {
+      "name": "clear_table_column_width",
+      "returns": "AppDocument",
+      "args": {
+        "tableBlockId": "string",
+        "columnId": "string"
+      }
+    },
+    {
+      "name": "merge_table_cells",
+      "returns": "AppDocument",
+      "args": {
+        "cellId": "string",
+        "rowSpan": "number",
+        "columnSpan": "number"
+      }
+    },
+    {
+      "name": "split_table_cell",
+      "returns": "AppDocument",
+      "args": {
+        "cellId": "string"
+      }
+    },
+    {
+      "name": "set_table_cell_background",
+      "returns": "AppDocument",
+      "args": {
+        "cellId": "string",
+        "color": "string"
+      }
+    },
+    {
+      "name": "set_table_cell_border",
+      "returns": "AppDocument",
+      "args": {
+        "cellId": "string",
+        "edge": "string",
+        "style": "string",
+        "twips": "number",
+        "color": "string"
+      }
+    },
+    {
+      "name": "set_table_cell_vertical_alignment",
+      "returns": "AppDocument",
+      "args": {
+        "cellId": "string",
+        "alignment": "string"
+      }
+    },
+    {
+      "name": "set_table_cell_padding",
+      "returns": "AppDocument",
+      "args": {
+        "cellId": "string",
+        "edge": "string",
+        "twips": "number"
+      }
+    },
+    {
+      "name": "clear_table_cell_property",
+      "returns": "AppDocument",
+      "args": {
+        "cellId": "string",
+        "key": "string"
       }
     },
     {
@@ -875,6 +1209,46 @@
       }
     },
     {
+      "name": "set_image_block_width",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "twips": "number"
+      }
+    },
+    {
+      "name": "set_image_block_height",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "twips": "number"
+      }
+    },
+    {
+      "name": "set_image_block_size",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "widthTwips": "number",
+        "heightTwips": "number"
+      }
+    },
+    {
+      "name": "clear_image_block_size",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string"
+      }
+    },
+    {
+      "name": "set_image_block_placement",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "placement": "string"
+      }
+    },
+    {
       "name": "set_spreadsheet_cell",
       "returns": "AppDocument",
       "args": {
@@ -918,7 +1292,8 @@
       "args": {
         "sheetId": "string",
         "origin": "string",
-        "text": "string"
+        "text": "string",
+        "sourceOrigin": "string|null?"
       }
     },
     {
@@ -1311,6 +1686,57 @@
       }
     },
     {
+      "name": "sort_spreadsheet_range",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string",
+        "range": "string",
+        "column": "string",
+        "descending": "boolean",
+        "hasHeader": "boolean"
+      }
+    },
+    {
+      "name": "fill_spreadsheet_range",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string",
+        "sourceRange": "string",
+        "targetRange": "string"
+      }
+    },
+    {
+      "name": "import_spreadsheet_csv",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string",
+        "origin": "string",
+        "text": "string",
+        "delimiter": "string|null?"
+      }
+    },
+    {
+      "name": "export_spreadsheet_csv",
+      "returns": "string",
+      "args": {
+        "sheetId": "string",
+        "delimiter": "string|null?"
+      }
+    },
+    {
+      "name": "import_spreadsheet_xlsx",
+      "returns": "AppDocument",
+      "args": {
+        "title": "string",
+        "base64": "string"
+      }
+    },
+    {
+      "name": "export_spreadsheet_xlsx",
+      "returns": "string",
+      "args": {}
+    },
+    {
       "name": "add_spreadsheet_named_range",
       "returns": "AppDocument",
       "args": {
@@ -1462,6 +1888,20 @@
       }
     },
     {
+      "name": "recover_session",
+      "returns": "AppDocument",
+      "args": {
+        "sessionId": "string"
+      }
+    },
+    {
+      "name": "discard_recovery_session",
+      "returns": "AppDocument",
+      "args": {
+        "sessionId": "string"
+      }
+    },
+    {
       "name": "scan_local_repository",
       "returns": "AppDocument",
       "args": {
@@ -1565,6 +2005,44 @@
       "name": "verify_current_signatures",
       "returns": "string",
       "args": {}
+    },
+    {
+      "name": "list_document_versions",
+      "returns": "AppVersionView",
+      "args": {
+        "limit": "number?"
+      }
+    },
+    {
+      "name": "open_document_at_version",
+      "returns": "AppVersionView",
+      "args": {
+        "manifest": "string"
+      }
+    },
+    {
+      "name": "diff_document_versions",
+      "returns": "AppVersionView",
+      "args": {
+        "fromManifest": "string",
+        "toManifest": "string"
+      }
+    },
+    {
+      "name": "name_document_version",
+      "returns": "AppVersionView",
+      "args": {
+        "manifest": "string",
+        "label": "string",
+        "author": "string"
+      }
+    },
+    {
+      "name": "restore_document_version",
+      "returns": "AppDocument",
+      "args": {
+        "manifest": "string"
+      }
     },
     {
       "name": "describe_editor_selection",
