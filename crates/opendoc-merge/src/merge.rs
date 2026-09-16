@@ -10,7 +10,9 @@ use crate::citations::{
 use crate::footnotes::{repair_missing_footnote_references, repair_unreferenced_footnotes};
 use crate::inline_edit::edit_inline_text;
 use crate::operation::{Operation, OperationKind};
-use crate::text_sequence::{collect_text_run_edits, is_offset_addressed, resolve_run, RunEdit};
+use crate::text_sequence::{
+    collect_text_run_edits, is_offset_addressed, resolve_text_sequence, RunEdit,
+};
 use crate::validate::marks_valid_for_merge;
 use opendoc_core::{Document, ModelError, ModelWarning, StableId};
 use std::collections::{BTreeMap, BTreeSet};
@@ -129,6 +131,19 @@ pub fn merge_operations_into(
         .into_iter()
         .map(|index| &operations[index])
         .collect();
+
+    // A character edit is the explicit migration boundary for legacy source:
+    // capture the base tokens before any whole-run writer changes its visible
+    // string.  Documents that already carry tokens also need the later
+    // synchronization pass for structural writers, even without a character
+    // edit in this batch.
+    let tracks_text_sequences = !document.text_sequences.is_empty()
+        || ordered
+            .iter()
+            .any(|operation| is_offset_addressed(&operation.kind));
+    if tracks_text_sequences && document.text_sequences.is_empty() {
+        document.materialize_legacy_text_sequences()?;
+    }
 
     for message in invalid_operation_id_warnings {
         warnings.push(ModelWarning {
@@ -315,6 +330,9 @@ pub fn merge_operations_into(
             apply_mark_range(document, &mut warnings, range, mark);
         }
     }
+    if tracks_text_sequences {
+        document.synchronize_text_sequences()?;
+    }
     apply_text_run_edits(document, &mut warnings, text_run_edits, &text_run_resets);
     repair_comment_anchors(document, &mut warnings);
     repair_suggestion_anchors(document, &mut warnings);
@@ -355,11 +373,41 @@ pub(crate) fn apply_text_run_edits(
             continue;
         }
         let edit_count = edits.len();
+        let Some(sequence) = document.text_sequences.get(&inline_id_to_edit).cloned() else {
+            let (code, message) = match edit_inline_text(document, &inline_id_to_edit, |_| {}) {
+                Some(false) => (
+                    "non-editable-inline",
+                    format!("inline {inline_id_to_edit} is derived from structured state"),
+                ),
+                None => (
+                    "missing-inline",
+                    format!("inline {inline_id_to_edit} was missing"),
+                ),
+                Some(true) => (
+                    "missing-text-sequence",
+                    format!("inline {inline_id_to_edit} was missing durable token source"),
+                ),
+            };
+            for _ in 0..edit_count {
+                warnings.push(ModelWarning {
+                    code: code.to_string(),
+                    message: message.clone(),
+                });
+            }
+            continue;
+        };
+        let resolved_sequence = resolve_text_sequence(&sequence, &edits);
+        let resolved_text = resolved_sequence.visible_text();
         let resolved = edit_inline_text(document, &inline_id_to_edit, |value| {
-            *value = resolve_run(value, &edits);
+            *value = resolved_text.clone();
         });
+        if resolved == Some(true) {
+            document
+                .text_sequences
+                .insert(inline_id_to_edit.clone(), resolved_sequence);
+            continue;
+        }
         let (code, message) = match resolved {
-            Some(true) => continue,
             Some(false) => (
                 "non-editable-inline",
                 format!("inline {inline_id_to_edit} is derived from structured state"),
@@ -368,6 +416,7 @@ pub(crate) fn apply_text_run_edits(
                 "missing-inline",
                 format!("inline {inline_id_to_edit} was missing"),
             ),
+            Some(true) => unreachable!("successful edit returned above"),
         };
         for _ in 0..edit_count {
             warnings.push(ModelWarning {

@@ -960,7 +960,7 @@ impl Engine<'_> {
                 // Reached only for a lone item outside `fragments`' run walk.
                 self.text_fragment(block, frame, self.scale.body_size)
             }
-            BlockKind::PageBreak => Fragment {
+            BlockKind::PageBreak | BlockKind::SectionBreak { .. } => Fragment {
                 block_id: block.id.to_string(),
                 margin_top: i64::from(self.scale.page_break_space) * MILLI,
                 margin_bottom: i64::from(self.scale.page_break_space) * MILLI,

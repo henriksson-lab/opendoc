@@ -7,7 +7,79 @@ use crate::operation::{Operation, OperationKind};
 use opendoc_core::{
     Block, BlockKind, BlockProperties, CellSpan, Document, DropdownOption, Equation,
     EquationSourceFormat, Inline, InsertPosition, ListKind, Mark, MarkExpand, MarkKind, StableId,
+    TextTokenId,
 };
+
+#[test]
+fn character_edits_materialize_and_preserve_durable_token_provenance() {
+    let mut base = Document::new("Durable text");
+    let run = Inline::Text {
+        id: StableId::parse("text-run").unwrap(),
+        text: "abc".to_string(),
+        marks: Vec::new(),
+    };
+    let run_id = inline_id(&run).clone();
+    base.blocks.push(Block {
+        id: StableId::parse("paragraph").unwrap(),
+        kind: BlockKind::Paragraph,
+        content: vec![run],
+        properties: BlockProperties::default(),
+    });
+
+    let result = merge_operations(
+        &base,
+        &[vec![
+            Operation::new(
+                OperationId {
+                    actor: ActorId("alice".to_string()),
+                    seq: 7,
+                },
+                OperationKind::InsertText {
+                    inline_id: run_id.clone(),
+                    offset: 1,
+                    text: "X😀".to_string(),
+                },
+            ),
+            Operation::new(
+                OperationId {
+                    actor: ActorId("alice".to_string()),
+                    seq: 8,
+                },
+                OperationKind::DeleteText {
+                    inline_id: run_id.clone(),
+                    start: 2,
+                    end: 3,
+                },
+            ),
+        ]],
+    )
+    .unwrap();
+
+    assert_eq!(result.document.visible_text(), "aXbc\n");
+    let sequence = result.document.text_sequences.get(&run_id).unwrap();
+    assert_eq!(sequence.visible_text(), "aXbc");
+    assert!(sequence.tokens.iter().any(|token| {
+        token.id
+            == (TextTokenId::Operation {
+                actor: "alice".to_string(),
+                sequence: 7,
+                ordinal: 0,
+            })
+            && token.scalar == 'X'
+            && !token.tombstoned
+    }));
+    assert!(sequence.tokens.iter().any(|token| {
+        token.id
+            == (TextTokenId::Operation {
+                actor: "alice".to_string(),
+                sequence: 7,
+                ordinal: 1,
+            })
+            && token.scalar == '😀'
+            && token.tombstoned
+    }));
+    result.document.validate().unwrap();
+}
 
 #[test]
 fn dropdown_selection_is_atomic_and_undoable() {

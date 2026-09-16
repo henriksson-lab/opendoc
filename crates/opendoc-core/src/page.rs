@@ -29,6 +29,68 @@ pub enum HeaderFooterSlot {
     EvenPageFooter,
 }
 
+/// The page context that begins at a [`BlockKind::SectionBreak`].
+///
+/// A section owns physical page geometry and all repeated furniture.  The
+/// optional first/even slots deliberately retain the distinction between
+/// inheriting the ordinary slot (`None`) and explicitly suppressing it
+/// (`Some(vec![])`).  Section ordering belongs to the document body: the
+/// root section is implicit, and each later section is named by its boundary
+/// block.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct Section {
+    pub id: crate::ids::StableId,
+    #[serde(default)]
+    pub page_setup: PageSetup,
+    #[serde(default)]
+    pub header: Vec<Block>,
+    #[serde(default)]
+    pub footer: Vec<Block>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_page_header: Option<Vec<Block>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_page_footer: Option<Vec<Block>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub even_page_header: Option<Vec<Block>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub even_page_footer: Option<Vec<Block>>,
+}
+
+impl Section {
+    /// The blocks in a declared furniture slot, without inheritance.
+    pub fn furniture(&self, slot: HeaderFooterSlot) -> &[Block] {
+        match slot {
+            HeaderFooterSlot::Header => &self.header,
+            HeaderFooterSlot::Footer => &self.footer,
+            HeaderFooterSlot::FirstPageHeader => self.first_page_header.as_deref().unwrap_or(&[]),
+            HeaderFooterSlot::FirstPageFooter => self.first_page_footer.as_deref().unwrap_or(&[]),
+            HeaderFooterSlot::EvenPageHeader => self.even_page_header.as_deref().unwrap_or(&[]),
+            HeaderFooterSlot::EvenPageFooter => self.even_page_footer.as_deref().unwrap_or(&[]),
+        }
+    }
+
+    /// The furniture which appears at this section-relative page index.
+    pub fn furniture_for_page(&self, slot: HeaderFooterSlot, page_index: usize) -> &[Block] {
+        match (slot.base_slot(), page_index == 0, page_index % 2 == 1) {
+            (HeaderFooterSlot::Header, true, _) => {
+                self.first_page_header.as_deref().unwrap_or(&self.header)
+            }
+            (HeaderFooterSlot::Footer, true, _) => {
+                self.first_page_footer.as_deref().unwrap_or(&self.footer)
+            }
+            (HeaderFooterSlot::Header, false, true) => {
+                self.even_page_header.as_deref().unwrap_or(&self.header)
+            }
+            (HeaderFooterSlot::Footer, false, true) => {
+                self.even_page_footer.as_deref().unwrap_or(&self.footer)
+            }
+            (HeaderFooterSlot::Header, false, false) => &self.header,
+            (HeaderFooterSlot::Footer, false, false) => &self.footer,
+            _ => unreachable!("base_slot only returns an ordinary furniture slot"),
+        }
+    }
+}
+
 impl HeaderFooterSlot {
     pub const ALL: [HeaderFooterSlot; 6] = [
         HeaderFooterSlot::Header,

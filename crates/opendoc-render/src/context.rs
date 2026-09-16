@@ -184,6 +184,14 @@ impl<'a> RenderContext<'a> {
                             .push(thread.id.to_string());
                     }
                 }
+                // The renderer's current review decoration unit is an inline
+                // run. Keep the token-addressed thread discoverable on its
+                // owning run until character-span decoration lands; never
+                // substitute a different run or block.
+                Anchor::TokenRange(range) => comment_inlines
+                    .entry(range.inline_id.to_string())
+                    .or_default()
+                    .push(thread.id.to_string()),
                 Anchor::NearestBlock { block_id, .. } => comment_blocks
                     .entry(block_id.to_string())
                     .or_default()
@@ -229,6 +237,10 @@ impl<'a> RenderContext<'a> {
                 SuggestionKind::Insert { anchor, .. } => match anchor {
                     Anchor::TextRange(range) => insert_after_inline
                         .entry(range.end.to_string())
+                        .or_default()
+                        .push(suggestion),
+                    Anchor::TokenRange(range) => insert_after_inline
+                        .entry(range.inline_id.to_string())
                         .or_default()
                         .push(suggestion),
                     Anchor::NearestBlock { block_id, .. } => insert_in_block
@@ -912,7 +924,7 @@ impl<'a> RenderContext<'a> {
                 }
                 out.push_str("</figure>");
             }
-            BlockKind::PageBreak => {
+            BlockKind::PageBreak | BlockKind::SectionBreak { .. } => {
                 self.render_block_attributes(block, "hr", " contenteditable=\"false\"", out);
             }
             BlockKind::HorizontalRule => {

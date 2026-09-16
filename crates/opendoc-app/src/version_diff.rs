@@ -456,6 +456,7 @@ pub(crate) fn block_kind_label(kind: &BlockKind) -> String {
         BlockKind::EquationBlock { .. } => "equation".to_string(),
         BlockKind::Image { .. } => "image".to_string(),
         BlockKind::PageBreak => "page break".to_string(),
+        BlockKind::SectionBreak { .. } => "section break".to_string(),
         BlockKind::HorizontalRule => "horizontal rule".to_string(),
         BlockKind::TableOfContents { .. } => "table of contents".to_string(),
         BlockKind::Bibliography => "bibliography".to_string(),

@@ -1012,6 +1012,14 @@ fn append_google_footnote_block(
                 warnings,
             );
         }
+        BlockKind::SectionBreak { .. } => {
+            append_google_footnote_marker(
+                "Section break",
+                "a section break in a Google Docs footnote was replaced with an explicit text marker because OpenDoc footnote bodies cannot carry body-flow section boundaries",
+                body,
+                warnings,
+            );
+        }
         BlockKind::TableOfContents { .. } => {
             append_google_footnote_marker(
                 "Table of contents",

@@ -10,7 +10,7 @@ use crate::block_edit::{
 };
 use crate::blocks::{
     block_exists, delete_block, delete_would_empty_table_cell, find_block_mut, insert_block,
-    move_block, MoveBlockResult,
+    is_section_break, move_block, MoveBlockResult,
 };
 use crate::citations::{
     invalidate_all_citation_caches, invalidate_citation_caches_for_reference,
@@ -67,7 +67,7 @@ pub(crate) fn apply(
         .iter()
         .filter(|thread| !thread.deleted && anchor_resolves(document, &thread.anchor))
         .filter_map(|thread| {
-            comment_anchor_evidence(&document.blocks, &thread.anchor)
+            comment_anchor_evidence(document, &thread.anchor)
                 .map(|(quote, context)| (thread.id.clone(), quote, context))
         })
         .collect();
@@ -177,7 +177,14 @@ pub(crate) fn apply(
             }
         }
         OperationKind::DeleteBlock { block_id } => {
-            if delete_would_empty_table_cell(document, &block_id) {
+            if is_section_break(&document.blocks, &block_id) {
+                warnings.push(ModelWarning {
+                    code: "section-break-requires-section-operation".to_string(),
+                    message: format!(
+                        "generic delete cannot remove section boundary {block_id}; use an atomic section operation"
+                    ),
+                });
+            } else if delete_would_empty_table_cell(document, &block_id) {
                 warnings.push(ModelWarning {
                     code: "table-cell-requires-block".to_string(),
                     message: format!("deleting block {block_id} would leave its table cell empty"),
@@ -190,28 +197,37 @@ pub(crate) fn apply(
             }
         }
         OperationKind::MoveBlock { block_id, position } => {
-            match move_block(document, &block_id, position) {
-                MoveBlockResult::Moved => {}
-                MoveBlockResult::MissingSource => warnings.push(ModelWarning {
-                    code: "missing-block".to_string(),
-                    message: format!("block move source {block_id} was missing"),
-                }),
-                MoveBlockResult::MissingAnchor => warnings.push(ModelWarning {
-                    code: "block-anchor-missing".to_string(),
-                    message: format!("block move anchor for {block_id} was missing"),
-                }),
-                MoveBlockResult::SameBlockAnchor => warnings.push(ModelWarning {
-                    code: "block-move-self-anchor".to_string(),
-                    message: format!("block {block_id} cannot be moved relative to itself"),
-                }),
-                MoveBlockResult::DescendantAnchor => warnings.push(ModelWarning {
-                    code: "block-move-descendant-anchor".to_string(),
-                    message: format!("block {block_id} cannot be moved into its own subtree"),
-                }),
-                MoveBlockResult::WouldEmptyCell => warnings.push(ModelWarning {
-                    code: "table-cell-requires-block".to_string(),
-                    message: format!("moving block {block_id} would leave a table cell empty"),
-                }),
+            if is_section_break(&document.blocks, &block_id) {
+                warnings.push(ModelWarning {
+                    code: "section-break-requires-section-operation".to_string(),
+                    message: format!(
+                        "generic move cannot relocate section boundary {block_id}; use an atomic section operation"
+                    ),
+                });
+            } else {
+                match move_block(document, &block_id, position) {
+                    MoveBlockResult::Moved => {}
+                    MoveBlockResult::MissingSource => warnings.push(ModelWarning {
+                        code: "missing-block".to_string(),
+                        message: format!("block move source {block_id} was missing"),
+                    }),
+                    MoveBlockResult::MissingAnchor => warnings.push(ModelWarning {
+                        code: "block-anchor-missing".to_string(),
+                        message: format!("block move anchor for {block_id} was missing"),
+                    }),
+                    MoveBlockResult::SameBlockAnchor => warnings.push(ModelWarning {
+                        code: "block-move-self-anchor".to_string(),
+                        message: format!("block {block_id} cannot be moved relative to itself"),
+                    }),
+                    MoveBlockResult::DescendantAnchor => warnings.push(ModelWarning {
+                        code: "block-move-descendant-anchor".to_string(),
+                        message: format!("block {block_id} cannot be moved into its own subtree"),
+                    }),
+                    MoveBlockResult::WouldEmptyCell => warnings.push(ModelWarning {
+                        code: "table-cell-requires-block".to_string(),
+                        message: format!("moving block {block_id} would leave a table cell empty"),
+                    }),
+                }
             }
         }
         OperationKind::SetBlockTextStyle { block_id, style } => {
@@ -1487,9 +1503,29 @@ pub(crate) fn apply(
             // whole when it arrived.
             let was_valid = document.validate().is_ok();
             let previous = std::mem::replace(document.furniture_mut(slot), blocks);
+            // A durable text map covers furniture too.  This whole-slot
+            // writer validates its candidate immediately, unlike most merge
+            // operations that wait for the final validation pass, so its map
+            // has to be synchronized before that check rather than only by
+            // merge's post-pass reconciliation.
+            let previous_sequences = document.text_sequences.clone();
+            if !document.text_sequences.is_empty() && document.synchronize_text_sequences().is_err()
+            {
+                *document.furniture_mut(slot) = previous;
+                document.text_sequences = previous_sequences;
+                warnings.push(ModelWarning {
+                    code: "invalid-page-furniture".to_string(),
+                    message: format!(
+                        "{} content was rejected: invalid durable text source",
+                        slot.as_str()
+                    ),
+                });
+                return;
+            }
             if was_valid {
                 if let Err(err) = document.validate() {
                     *document.furniture_mut(slot) = previous;
+                    document.text_sequences = previous_sequences;
                     warnings.push(ModelWarning {
                         code: "invalid-page-furniture".to_string(),
                         message: format!("{} content was rejected: {err}", slot.as_str()),
@@ -1968,7 +2004,7 @@ pub(crate) fn apply(
             .iter()
             .find(|thread| thread.id == thread_id)
             .is_some_and(|thread| {
-                !thread.deleted && anchor_has_no_surviving_target(&document.blocks, &thread.anchor)
+                !thread.deleted && anchor_has_no_surviving_target(document, &thread.anchor)
             });
         if !became_orphaned {
             continue;

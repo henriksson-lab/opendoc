@@ -20,6 +20,9 @@ pub(crate) fn insert_inlines_after_anchor(
                 AnchorInsertResult::Missing
             }
         }
+        // Inline insertion has no character atom representation yet. Refuse
+        // rather than rounding a durable gap to the end of its whole run.
+        Anchor::TokenRange(_) => AnchorInsertResult::Missing,
         Anchor::NearestBlock { block_id, .. } => {
             let Some(block) = find_block_mut(&mut document.blocks, block_id) else {
                 return if insert_inlines_at_document_end(document, content) {

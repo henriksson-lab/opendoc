@@ -145,7 +145,7 @@ fn stylesheet(document: &Document) -> String {
         ".doc-image[data-placement=\"wrap-start\"] { float: inline-start; margin: var(--doc-image-clearance-top, 0) var(--doc-image-clearance-end, var(--doc-float-space)) var(--doc-image-clearance-bottom, var(--doc-float-space)) var(--doc-image-clearance-start, 0); }\n",
         ".doc-image[data-placement=\"wrap-end\"] { float: inline-end; margin: var(--doc-image-clearance-top, 0) var(--doc-image-clearance-end, 0) var(--doc-image-clearance-bottom, var(--doc-float-space)) var(--doc-image-clearance-start, var(--doc-float-space)); }\n",
         ".doc-equation-block { margin: var(--doc-float-space) 0; }\n",
-        ".doc-page-break { border: 0; border-top: var(--doc-page-break-rule) dashed #bdc1c6; margin: var(--doc-page-break-space) 0; }\n",
+        ".doc-page-break, .doc-section-break { border: 0; border-top: var(--doc-page-break-rule) dashed #bdc1c6; margin: var(--doc-page-break-space) 0; }\n",
         ".doc-horizontal-rule { border: 0; border-top: var(--doc-horizontal-rule-width) solid var(--doc-horizontal-rule-color); margin: var(--doc-horizontal-rule-space) 0; }\n",
         ".doc-table-of-contents { margin: var(--doc-block-space-after) 0; padding: var(--doc-toc-padding-block) var(--doc-toc-padding-inline); border: var(--doc-toc-border-width) solid #9ca3af; } .doc-table-of-contents ol { margin: 0; padding-inline-start: calc(1.4 * var(--doc-toc-indent-step)); }\n",
         ".doc-bibliography { margin: var(--doc-block-space-after) 0; } .doc-bibliography h2 { margin: 0 0 var(--doc-block-space-after); } .doc-bibliography ol { margin: 0; padding-inline-start: var(--doc-list-indent); }\n",

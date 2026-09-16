@@ -34,6 +34,14 @@ pub(crate) fn block_exists(blocks: &[Block], block_id: &StableId) -> bool {
     })
 }
 
+/// Section boundaries own a second source record and are therefore not
+/// ordinary movable/deletable blocks. Their dedicated operations will change
+/// both records atomically; generic block operations must leave them alone.
+pub(crate) fn is_section_break(blocks: &[Block], block_id: &StableId) -> bool {
+    block_ref(blocks, block_id)
+        .is_some_and(|block| matches!(block.kind, BlockKind::SectionBreak { .. }))
+}
+
 /// Adds a block at `position`, answering whether the anchor had gone missing.
 ///
 /// Only an anchored insert can degrade, and only when the anchor is gone:

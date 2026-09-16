@@ -186,6 +186,8 @@ const OBJECTS: &[ObjectEntry] = objects![
 
     "document.ts" / "AppDocument" => crate::AppDocument,
     "document.ts" / "AppListProperties" => opendoc_core::ListProperties,
+    "document.ts" / "AppTextSequence" => opendoc_core::TextSequence,
+    "document.ts" / "AppTextToken" => opendoc_core::TextToken,
     "document.ts" / "AppBookmark" => opendoc_core::Bookmark,
     "document.ts" / "AppCommentHistoryEntry" => opendoc_core::CommentHistoryEntry,
     "document.ts" / "AppCommentActivityEntry" => opendoc_core::CommentActivityEntry,

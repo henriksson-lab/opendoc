@@ -77,6 +77,59 @@ pub struct TextGap {
     pub bias: TextGapBias,
 }
 
+/// A character-granular interval inside one durable editable run.
+///
+/// The endpoints are gaps rather than scalar offsets.  They deliberately keep
+/// naming tombstoned neighbouring tokens: deleting selected text must not make
+/// a comment, suggestion, bookmark, or internal target silently drift to a
+/// surviving character.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TextTokenRange {
+    pub inline_id: StableId,
+    pub start: TextGap,
+    pub end: TextGap,
+}
+
+impl TextTokenRange {
+    /// Validate fields which do not need the owning document's token map.
+    pub fn validate(&self) -> Result<(), ModelError> {
+        validate_stable_id("token range inline id", &self.inline_id)?;
+        self.start.validate()?;
+        self.end.validate()
+    }
+
+    /// Confirm that both gaps name retained tokens in this exact run and that
+    /// the interval is ordered in its current deterministic linearization.
+    pub fn validate_against(&self, sequence: &TextSequence) -> Result<(), ModelError> {
+        self.validate()?;
+        if !sequence.tokens.is_empty()
+            && ([&self.start, &self.end]
+                .into_iter()
+                .any(|gap| gap.left.is_none() && gap.right.is_none()))
+        {
+            return Err(ModelError::InvalidDocument(
+                "empty token gap belongs only to an empty text sequence",
+            ));
+        }
+        let Some(start) = sequence.visible_offset_of_gap(&self.start) else {
+            return Err(ModelError::InvalidDocument(
+                "token range start is not in its text sequence",
+            ));
+        };
+        let Some(end) = sequence.visible_offset_of_gap(&self.end) else {
+            return Err(ModelError::InvalidDocument(
+                "token range end is not in its text sequence",
+            ));
+        };
+        if start > end {
+            return Err(ModelError::InvalidDocument(
+                "token range endpoints are reversed",
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl TextGap {
     pub fn validate(&self) -> Result<(), ModelError> {
         if self.left.is_none() && self.right.is_none() {

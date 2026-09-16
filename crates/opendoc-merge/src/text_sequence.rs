@@ -15,7 +15,7 @@
 use crate::causal::{CausalContext, OperationId};
 use crate::inline_ops::inline_id as inline_id_of;
 use crate::operation::{Operation, OperationKind};
-use opendoc_core::{Block, BlockKind, Inline, StableId};
+use opendoc_core::{Block, BlockKind, Inline, StableId, TextSequence, TextToken, TextTokenId};
 use std::collections::BTreeMap;
 
 /// One character operation, already narrowed to a single run.
@@ -81,6 +81,7 @@ impl Atom {
 /// both of which are properties of the operation set. Feeding concurrent edits
 /// in either order gives the same string — which is the property the whole
 /// design exists for, and which `crate` tests assert directly.
+#[cfg(test)]
 pub(crate) fn resolve_run(base: &str, edits: &[RunEdit]) -> String {
     if edits.is_empty() {
         return base.to_string();
@@ -185,6 +186,130 @@ pub(crate) fn resolve_run_atoms(base: &str, edits: &[RunEdit]) -> Vec<Atom> {
     }
 
     atoms
+}
+
+/// Resolve character edits while retaining the durable token source that
+/// produced the visible string.  The temporary atom CRDT above remains the
+/// compatibility oracle for legacy offsets; this spelling gives every new
+/// scalar an operation-derived id and turns deletes into persisted
+/// tombstones.
+pub(crate) fn resolve_text_sequence(base: &TextSequence, edits: &[RunEdit]) -> TextSequence {
+    #[derive(Clone)]
+    struct DurableAtom {
+        token: TextToken,
+        inserted_by: Option<usize>,
+        /// A delete that belongs to the merge base.  New operations never see
+        /// it, whereas a delete from this `edits` set remains visible to an
+        /// operation that did not causally observe it.
+        tombstoned_before: bool,
+        deleted_by: Vec<usize>,
+    }
+
+    let mut atoms = base
+        .tokens
+        .iter()
+        .cloned()
+        .map(|token| DurableAtom {
+            inserted_by: None,
+            tombstoned_before: token.tombstoned,
+            deleted_by: Vec::new(),
+            token,
+        })
+        .collect::<Vec<_>>();
+
+    for (index, edit) in edits.iter().enumerate() {
+        let visible = (0..atoms.len())
+            .filter(|position| {
+                let atom = &atoms[*position];
+                let inserted_visible = match atom.inserted_by {
+                    None => true,
+                    Some(other) => edit.observes(&edits[other].id),
+                };
+                inserted_visible
+                    // A sequence carried in the merge base has already
+                    // resolved its historic deletes.  Its tombstones stay in
+                    // the physical order for anchors, but must not reappear
+                    // in the offsets of a new operation; `resolve_run` sees
+                    // only the base's visible string for exactly this reason.
+                    && !atom.tombstoned_before
+                    && !atom
+                        .deleted_by
+                        .iter()
+                        .any(|other| edit.observes(&edits[*other].id))
+            })
+            .collect::<Vec<_>>();
+        match &edit.kind {
+            RunEditKind::Insert { offset, text } => {
+                if text.is_empty() {
+                    continue;
+                }
+                let offset = (*offset).min(visible.len());
+                let mut at = if offset == 0 {
+                    0
+                } else {
+                    visible[offset - 1] + 1
+                };
+                while at < atoms.len() {
+                    match atoms[at].inserted_by {
+                        Some(other)
+                            if edits[other].rank > edit.rank
+                                && !edit.observes(&edits[other].id) =>
+                        {
+                            at += 1;
+                        }
+                        _ => break,
+                    }
+                }
+                let mut predecessor = at
+                    .checked_sub(1)
+                    .map(|position| atoms[position].token.id.clone());
+                let inserted = text
+                    .chars()
+                    .enumerate()
+                    .map(|(ordinal, scalar)| {
+                        let id = TextTokenId::Operation {
+                            actor: edit.id.actor.0.clone(),
+                            sequence: edit.id.seq,
+                            ordinal: ordinal as u32,
+                        };
+                        let token = TextToken {
+                            id: id.clone(),
+                            predecessor: predecessor.clone(),
+                            scalar,
+                            tombstoned: false,
+                        };
+                        predecessor = Some(id);
+                        DurableAtom {
+                            token,
+                            inserted_by: Some(index),
+                            tombstoned_before: false,
+                            deleted_by: Vec::new(),
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                atoms.splice(at..at, inserted);
+            }
+            RunEditKind::Delete { start, end } => {
+                let start = (*start).min(visible.len());
+                let end = (*end).min(visible.len());
+                for position in &visible[start..end.max(start)] {
+                    if !atoms[*position].deleted_by.contains(&index) {
+                        atoms[*position].deleted_by.push(index);
+                    }
+                }
+            }
+        }
+    }
+
+    TextSequence {
+        tokens: atoms
+            .into_iter()
+            .map(|atom| TextToken {
+                tombstoned: atom.tombstoned_before || !atom.deleted_by.is_empty(),
+                ..atom.token
+            })
+            .collect(),
+    }
 }
 
 /// Collect every character operation in `ordered` into per-run edit lists, and

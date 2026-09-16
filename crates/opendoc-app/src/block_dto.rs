@@ -293,6 +293,17 @@ impl AppBlock {
                     Vec::new(),
                     Vec::new(),
                 ),
+                BlockKind::SectionBreak { section_id } => (
+                    format!("section-break:{section_id}"),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                ),
             };
         Self {
             id: block.id.to_string(),
@@ -521,6 +532,9 @@ impl AppBlock {
                     }
                 }
                 "page-break" => BlockKind::PageBreak,
+                kind if kind.starts_with("section-break:") => BlockKind::SectionBreak {
+                    section_id: parse_id(&kind["section-break:".len()..])?,
+                },
                 "horizontal-rule" => BlockKind::HorizontalRule,
                 "table-of-contents" => BlockKind::TableOfContents {
                     max_level: self.level.unwrap_or(3),

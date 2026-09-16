@@ -8,7 +8,7 @@ use crate::test_support::assert_mark_kinds;
 use opendoc_core::{
     Block, BlockKind, BlockProperties, Bookmark, Document, Footnote, ImageLayout, Inline,
     InsertPosition, Mark, MarkExpand, MarkKind, PositionedImage, PositionedImageAnchor,
-    PositionedImageLayer, StableId, TextRange,
+    PositionedImageLayer, Section, StableId, TextRange,
 };
 
 #[test]
@@ -67,6 +67,87 @@ fn concurrent_operations_converge_independent_of_stream_order() {
     assert_eq!(block.content.len(), 2, "{:?}", block.content);
     assert_mark_kinds(&block.content[0], &[MarkKind::Bold]);
     assert_mark_kinds(&block.content[1], &[]);
+}
+
+#[test]
+fn generic_block_operations_cannot_separate_a_section_from_its_record() {
+    let mut base = Document::new("Sections");
+    let before = Block::paragraph("before");
+    let after = Block::paragraph("after");
+    let boundary_id = StableId::parse("section-break").unwrap();
+    let section_id = StableId::parse("section-two").unwrap();
+    base.blocks = vec![
+        before,
+        Block {
+            id: boundary_id.clone(),
+            kind: BlockKind::SectionBreak {
+                section_id: section_id.clone(),
+            },
+            content: Vec::new(),
+            properties: BlockProperties::default(),
+        },
+        after,
+    ];
+    // Materialize before adding the later boundary, exactly as section
+    // authoring will do. This makes the base a valid signed source document.
+    base.blocks.remove(1);
+    base.materialize_legacy_sections().unwrap();
+    base.sections.insert(
+        section_id.clone(),
+        Section {
+            id: section_id.clone(),
+            page_setup: Default::default(),
+            header: Vec::new(),
+            footer: Vec::new(),
+            first_page_header: None,
+            first_page_footer: None,
+            even_page_header: None,
+            even_page_footer: None,
+        },
+    );
+    base.blocks.insert(
+        1,
+        Block {
+            id: boundary_id.clone(),
+            kind: BlockKind::SectionBreak { section_id },
+            content: Vec::new(),
+            properties: BlockProperties::default(),
+        },
+    );
+    base.validate().unwrap();
+
+    let delete = Operation {
+        id: OperationId {
+            actor: ActorId("a".to_string()),
+            seq: 1,
+        },
+        kind: OperationKind::DeleteBlock {
+            block_id: boundary_id.clone(),
+        },
+        context: None,
+    };
+    let move_boundary = Operation {
+        id: OperationId {
+            actor: ActorId("b".to_string()),
+            seq: 1,
+        },
+        kind: OperationKind::MoveBlock {
+            block_id: boundary_id.clone(),
+            position: InsertPosition::First,
+        },
+        context: None,
+    };
+    let merged = merge_operations(&base, &[vec![delete], vec![move_boundary]]).unwrap();
+    assert_eq!(merged.document.blocks, base.blocks);
+    assert_eq!(merged.document.sections, base.sections);
+    assert_eq!(
+        merged
+            .warnings
+            .iter()
+            .filter(|warning| warning.code == "section-break-requires-section-operation")
+            .count(),
+        2
+    );
 }
 
 #[test]

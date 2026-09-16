@@ -669,6 +669,20 @@ impl<'a> Exporter<'a> {
                 xml.close("w:r");
                 xml.close("w:p");
             }
+            BlockKind::SectionBreak { .. } => {
+                // This first vertical slice preserves the forced new page.
+                // A later DOCX section writer will emit the section's
+                // `sectPr` rather than pretending its setup is global.
+                self.warn(
+                    "docx-export-section-setup-unmapped",
+                    "a section boundary was exported as a page break; per-section setup and furniture are retained in OpenDoc source but are not yet emitted as DOCX sectPr",
+                );
+                xml.open("w:p", &[]);
+                xml.open("w:r", &[]);
+                xml.empty("w:br", &[("w:type", "page")]);
+                xml.close("w:r");
+                xml.close("w:p");
+            }
         }
     }
 

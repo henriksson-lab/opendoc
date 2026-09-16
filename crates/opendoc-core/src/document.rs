@@ -1,18 +1,19 @@
 //! The document root and the validation walk over its block tree.
 
 use crate::annotation::{
-    CommentActivityEntry, CommentHistoryEntry, CommentThread, Suggestion,
+    Anchor, CommentActivityEntry, CommentHistoryEntry, CommentThread, Suggestion, SuggestionKind,
     MAX_COMMENT_ACTIVITY_ENTRIES,
 };
 use crate::block::{Block, BlockKind, Footnote, TextScope};
 use crate::bookmark::Bookmark;
 use crate::citation::CitationDatabase;
 use crate::ids::validate_stable_id;
-use crate::ids::{DocumentUuid, HashRef, StableId};
+use crate::ids::{derived_stable_id, DocumentUuid, HashRef, StableId};
 use crate::inline::{Equation, Inline, Mark, MarkKind};
 use crate::list::ListProperties;
-use crate::page::{validate_furniture_payload, HeaderFooterSlot, PageSetup};
+use crate::page::{validate_furniture_payload, HeaderFooterSlot, PageSetup, Section};
 use crate::table::validate_table_geometry;
+use crate::text_sequence::{TextSequence, TextTokenId};
 use crate::warning::{ModelError, ModelWarning};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -52,11 +53,22 @@ pub struct Document {
     /// Optional even-page footer override. See [`Self::even_page_header`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub even_page_footer: Option<Vec<Block>>,
+    /// Per-section source state. An empty map is a legacy document whose
+    /// document-wide page fields are its implicit root section. New section
+    /// authoring first materializes that deterministic root through
+    /// [`Self::materialize_legacy_sections`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sections: BTreeMap<StableId, Section>,
     /// Numbering settings keyed by list-run identity.  This is deliberately
     /// document-level rather than an item field: a restart applies to the
     /// wrapper, even when a later edit changes which item is first.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub list_properties: BTreeMap<StableId, ListProperties>,
+    /// Durable character-token source, keyed by its editable text or link
+    /// inline id. An absent map denotes a legacy snapshot; a present map must
+    /// cover every editable run exactly once.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub text_sequences: BTreeMap<StableId, TextSequence>,
     /// Durable named block targets used by links and generated navigation.
     /// Tombstones are retained so an old replica cannot resurrect a deleted
     /// bookmark during collaboration.
@@ -103,7 +115,9 @@ impl Document {
             first_page_footer: None,
             even_page_header: None,
             even_page_footer: None,
+            sections: BTreeMap::new(),
             list_properties: BTreeMap::new(),
+            text_sequences: BTreeMap::new(),
             bookmarks: Vec::new(),
             blocks: Vec::new(),
             footnotes: Vec::new(),
@@ -115,6 +129,41 @@ impl Document {
             citation_database: CitationDatabase::default(),
             warnings: Vec::new(),
         }
+    }
+
+    /// The stable identity of this document's implicit root section.
+    pub fn root_section_id(&self) -> StableId {
+        derived_stable_id("section-root", &[self.uuid.as_str()])
+    }
+
+    /// Materialize legacy document-wide page context as the deterministic root
+    /// section before creating a section boundary or a section-targeted
+    /// operation. This mirrors token-source materialization: a read of an old
+    /// document does not silently claim a new durable representation.
+    pub fn materialize_legacy_sections(&mut self) -> Result<bool, ModelError> {
+        if !self.sections.is_empty() {
+            self.validate_sections()?;
+            return Ok(false);
+        }
+        let root = Section {
+            id: self.root_section_id(),
+            page_setup: self.page_setup,
+            header: self.header.clone(),
+            footer: self.footer.clone(),
+            first_page_header: self.first_page_header.clone(),
+            first_page_footer: self.first_page_footer.clone(),
+            even_page_header: self.even_page_header.clone(),
+            even_page_footer: self.even_page_footer.clone(),
+        };
+        self.sections.insert(root.id.clone(), root);
+        if let Err(error) = self.validate_sections() {
+            // Migration is a source transition, not best-effort repair.  A
+            // malformed legacy body must therefore remain byte-for-byte in
+            // its legacy representation when materialization is refused.
+            self.sections.clear();
+            return Err(error);
+        }
+        Ok(true)
     }
 
     /// The document degraded to plain text: what a `.txt` export carries.
@@ -226,6 +275,64 @@ impl Document {
         true
     }
 
+    /// Persist deterministic baseline token identities for every editable
+    /// text/link run in a legacy document. This is deliberately an explicit
+    /// migration: merely reading an old snapshot continues to leave the map
+    /// absent, so it cannot claim durable character-anchor support until the
+    /// migrated source is saved.
+    ///
+    /// Returns `true` when legacy source was materialized. A partially
+    /// populated map is invalid source and is never silently completed.
+    pub fn materialize_legacy_text_sequences(&mut self) -> Result<bool, ModelError> {
+        if !self.text_sequences.is_empty() {
+            self.validate_text_sequences()?;
+            return Ok(false);
+        }
+        let runs = editable_text_runs(self);
+        if runs.is_empty() {
+            return Ok(false);
+        }
+        self.text_sequences = runs
+            .into_iter()
+            .map(|(inline_id, text)| {
+                let sequence = TextSequence::materialize_legacy(&self.uuid, &inline_id, &text);
+                (inline_id, sequence)
+            })
+            .collect();
+        self.validate_text_sequences()?;
+        Ok(true)
+    }
+
+    /// Bring an already-materialized token map back into coverage after a
+    /// whole-run or structural write.  Unchanged runs keep their durable
+    /// tokens (including tombstones); a run whose visible projection was
+    /// replaced wholesale starts a new baseline for its new source text.
+    ///
+    /// This is intentionally not a migration: an empty map remains the
+    /// legacy representation.  Merge uses it only after it has explicitly
+    /// materialized a map for a character edit, or when the input snapshot
+    /// already carried one.
+    pub fn synchronize_text_sequences(&mut self) -> Result<(), ModelError> {
+        if self.text_sequences.is_empty() {
+            return Ok(());
+        }
+        let runs = editable_text_runs(self);
+        self.text_sequences = runs
+            .into_iter()
+            .map(|(inline_id, text)| {
+                let sequence = self
+                    .text_sequences
+                    .remove(&inline_id)
+                    .filter(|sequence| sequence.visible_text() == text)
+                    .unwrap_or_else(|| {
+                        TextSequence::materialize_legacy(&self.uuid, &inline_id, &text)
+                    });
+                (inline_id, sequence)
+            })
+            .collect();
+        self.validate_text_sequences()
+    }
+
     pub fn validate(&self) -> Result<(), ModelError> {
         self.uuid.validate()?;
         if self.title.trim().is_empty() {
@@ -254,11 +361,15 @@ impl Document {
                 ));
             }
         }
-        self.page_setup.validate()?;
+        if self.sections.is_empty() {
+            self.page_setup.validate()?;
+        }
+        self.validate_sections()?;
         for (list_id, properties) in &self.list_properties {
             validate_stable_id("list properties id", list_id)?;
             properties.validate()?;
         }
+        self.validate_text_sequences()?;
         let mut bookmark_ids = BTreeSet::new();
         let mut live_bookmark_names = BTreeSet::new();
         for bookmark in &self.bookmarks {
@@ -276,11 +387,39 @@ impl Document {
         let mut block_ids = BTreeSet::new();
         let mut inline_ids = BTreeSet::new();
         let mut cell_ids = BTreeSet::new();
-        validate_blocks(&self.blocks, &mut block_ids, &mut inline_ids, &mut cell_ids)?;
-        for slot in HeaderFooterSlot::ALL {
-            let furniture = self.furniture(slot);
-            validate_blocks(furniture, &mut block_ids, &mut inline_ids, &mut cell_ids)?;
-            validate_furniture_payload(furniture)?;
+        validate_blocks(
+            &self.blocks,
+            &mut block_ids,
+            &mut inline_ids,
+            &mut cell_ids,
+            true,
+        )?;
+        if self.sections.is_empty() {
+            for slot in HeaderFooterSlot::ALL {
+                let furniture = self.furniture(slot);
+                validate_blocks(
+                    furniture,
+                    &mut block_ids,
+                    &mut inline_ids,
+                    &mut cell_ids,
+                    false,
+                )?;
+                validate_furniture_payload(furniture)?;
+            }
+        } else {
+            for section in self.sections.values() {
+                for slot in HeaderFooterSlot::ALL {
+                    let furniture = section.furniture(slot);
+                    validate_blocks(
+                        furniture,
+                        &mut block_ids,
+                        &mut inline_ids,
+                        &mut cell_ids,
+                        false,
+                    )?;
+                    validate_furniture_payload(furniture)?;
+                }
+            }
         }
         let mut comment_thread_ids = BTreeSet::new();
         for comment in &self.comments {
@@ -288,6 +427,7 @@ impl Document {
                 return Err(ModelError::InvalidDocument("duplicate comment thread id"));
             }
             comment.validate()?;
+            self.validate_token_anchor(&comment.anchor)?;
         }
         let mut comment_history_operation_ids = BTreeSet::new();
         for entry in &self.comment_history {
@@ -378,6 +518,9 @@ impl Document {
                 return Err(ModelError::InvalidDocument("duplicate suggestion id"));
             }
             suggestion.validate()?;
+            if let SuggestionKind::Insert { anchor, .. } = &suggestion.kind {
+                self.validate_token_anchor(anchor)?;
+            }
         }
         let mut footnote_ids = BTreeSet::new();
         for footnote in &self.footnotes {
@@ -410,13 +553,211 @@ impl Document {
         }
         Ok(())
     }
+
+    fn validate_sections(&self) -> Result<(), ModelError> {
+        if self.sections.is_empty() {
+            if self
+                .blocks
+                .iter()
+                .any(|block| matches!(block.kind, BlockKind::SectionBreak { .. }))
+            {
+                return Err(ModelError::InvalidDocument(
+                    "section break requires materialized section source",
+                ));
+            }
+            return Ok(());
+        }
+
+        let root_id = self.root_section_id();
+        let Some(root) = self.sections.get(&root_id) else {
+            return Err(ModelError::InvalidDocument(
+                "section source has no root section",
+            ));
+        };
+        if root.id != root_id {
+            return Err(ModelError::InvalidDocument(
+                "root section id does not match document",
+            ));
+        }
+        for (section_id, section) in &self.sections {
+            validate_stable_id("section id", section_id)?;
+            if &section.id != section_id {
+                return Err(ModelError::InvalidDocument(
+                    "section map key does not match section id",
+                ));
+            }
+            section.page_setup.validate()?;
+        }
+
+        let mut boundary_sections = BTreeSet::new();
+        for (index, block) in self.blocks.iter().enumerate() {
+            let BlockKind::SectionBreak { section_id } = &block.kind else {
+                continue;
+            };
+            if index == 0 || index + 1 == self.blocks.len() {
+                return Err(ModelError::InvalidDocument(
+                    "section break cannot be first or last body block",
+                ));
+            }
+            if matches!(self.blocks[index - 1].kind, BlockKind::SectionBreak { .. })
+                || matches!(self.blocks[index + 1].kind, BlockKind::SectionBreak { .. })
+            {
+                return Err(ModelError::InvalidDocument(
+                    "section breaks cannot be adjacent",
+                ));
+            }
+            if section_id == &root_id || !self.sections.contains_key(section_id) {
+                return Err(ModelError::InvalidDocument(
+                    "section break refers to an unknown or root section",
+                ));
+            }
+            if !boundary_sections.insert(section_id.clone()) {
+                return Err(ModelError::InvalidDocument(
+                    "more than one section break refers to a section",
+                ));
+            }
+        }
+        if self.sections.len() != boundary_sections.len() + 1 {
+            return Err(ModelError::InvalidDocument(
+                "every non-root section requires one section break",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_text_sequences(&self) -> Result<(), ModelError> {
+        // Empty is the unambiguous legacy representation. It is intentionally
+        // valid until an explicit signed migration materializes the map.
+        if self.text_sequences.is_empty() {
+            return Ok(());
+        }
+        let runs = editable_text_runs(self);
+        if self.text_sequences.len() != runs.len()
+            || self.text_sequences.keys().any(|id| !runs.contains_key(id))
+        {
+            return Err(ModelError::InvalidDocument(
+                "text sequence map does not cover editable runs exactly",
+            ));
+        }
+        for (inline_id, text) in runs {
+            let sequence =
+                self.text_sequences
+                    .get(&inline_id)
+                    .ok_or(ModelError::InvalidDocument(
+                        "text sequence map does not cover editable runs exactly",
+                    ))?;
+            sequence.validate()?;
+            if sequence.visible_text() != text {
+                return Err(ModelError::InvalidDocument(
+                    "text sequence visible text differs from inline text",
+                ));
+            }
+            let mut baseline_ordinals = BTreeSet::new();
+            let mut previous_baseline_ordinal = None;
+            for token in &sequence.tokens {
+                if let TextTokenId::Baseline {
+                    document_uuid,
+                    inline_id: token_inline_id,
+                    ordinal: token_ordinal,
+                } = &token.id
+                {
+                    if document_uuid != &self.uuid || token_inline_id != &inline_id {
+                        return Err(ModelError::InvalidDocument(
+                            "baseline text token belongs to another editable run",
+                        ));
+                    }
+                    if !baseline_ordinals.insert(*token_ordinal)
+                        || previous_baseline_ordinal
+                            .is_some_and(|previous| *token_ordinal <= previous)
+                    {
+                        return Err(ModelError::InvalidDocument(
+                            "baseline text token ordinals are not strictly ordered",
+                        ));
+                    }
+                    previous_baseline_ordinal = Some(*token_ordinal);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Token anchors require an explicitly persisted sequence map.  This is
+    /// intentionally stricter than legacy whole-inline anchors: accepting a
+    /// character range without its source atoms would fabricate durability on
+    /// the next concurrent edit.
+    fn validate_token_anchor(&self, anchor: &Anchor) -> Result<(), ModelError> {
+        let Anchor::TokenRange(range) = anchor else {
+            return Ok(());
+        };
+        let sequence =
+            self.text_sequences
+                .get(&range.inline_id)
+                .ok_or(ModelError::InvalidDocument(
+                    "token anchor requires a persisted text sequence",
+                ))?;
+        range.validate_against(sequence)
+    }
+}
+
+fn editable_text_runs(document: &Document) -> BTreeMap<StableId, String> {
+    let mut runs = BTreeMap::new();
+    collect_editable_text_runs(&document.blocks, &mut runs);
+    if document.sections.is_empty() {
+        collect_editable_text_runs(&document.header, &mut runs);
+        collect_editable_text_runs(&document.footer, &mut runs);
+        if let Some(blocks) = &document.first_page_header {
+            collect_editable_text_runs(blocks, &mut runs);
+        }
+        if let Some(blocks) = &document.first_page_footer {
+            collect_editable_text_runs(blocks, &mut runs);
+        }
+        if let Some(blocks) = &document.even_page_header {
+            collect_editable_text_runs(blocks, &mut runs);
+        }
+        if let Some(blocks) = &document.even_page_footer {
+            collect_editable_text_runs(blocks, &mut runs);
+        }
+    } else {
+        for section in document.sections.values() {
+            for slot in HeaderFooterSlot::ALL {
+                collect_editable_text_runs(section.furniture(slot), &mut runs);
+            }
+        }
+    }
+    runs
+}
+
+fn collect_editable_text_runs(blocks: &[Block], runs: &mut BTreeMap<StableId, String>) {
+    for block in blocks {
+        for inline in &block.content {
+            match inline {
+                Inline::Text { id, text, .. } | Inline::Link { id, text, .. } => {
+                    runs.insert(id.clone(), text.clone());
+                }
+                _ => {}
+            }
+        }
+        if let BlockKind::Table { rows, .. } = &block.kind {
+            for row in rows {
+                for cell in &row.cells {
+                    collect_editable_text_runs(&cell.blocks, runs);
+                }
+            }
+        }
+    }
 }
 
 pub(crate) fn validate_block_tree(blocks: &[Block]) -> Result<(), ModelError> {
     let mut block_ids = BTreeSet::new();
     let mut inline_ids = BTreeSet::new();
     let mut cell_ids = BTreeSet::new();
-    validate_blocks(blocks, &mut block_ids, &mut inline_ids, &mut cell_ids)
+    validate_blocks(
+        blocks,
+        &mut block_ids,
+        &mut inline_ids,
+        &mut cell_ids,
+        false,
+    )
 }
 
 pub(crate) fn validate_blocks(
@@ -424,11 +765,17 @@ pub(crate) fn validate_blocks(
     block_ids: &mut BTreeSet<StableId>,
     inline_ids: &mut BTreeSet<StableId>,
     cell_ids: &mut BTreeSet<StableId>,
+    section_breaks_allowed: bool,
 ) -> Result<(), ModelError> {
     for block in blocks {
         validate_stable_id("block id", &block.id)?;
         if !block_ids.insert(block.id.clone()) {
             return Err(ModelError::InvalidDocument("duplicate block id"));
+        }
+        if matches!(block.kind, BlockKind::SectionBreak { .. }) && !section_breaks_allowed {
+            return Err(ModelError::InvalidDocument(
+                "section break is only allowed in document body flow",
+            ));
         }
         for inline in &block.content {
             let id = inline_stable_id(inline);
@@ -469,7 +816,7 @@ pub(crate) fn validate_blocks(
                         return Err(ModelError::InvalidDocument("table cell has no blocks"));
                     }
                     cell.properties.validate()?;
-                    validate_blocks(&cell.blocks, block_ids, inline_ids, cell_ids)?;
+                    validate_blocks(&cell.blocks, block_ids, inline_ids, cell_ids, false)?;
                 }
             }
             validate_table_geometry(columns, rows)?;
@@ -532,6 +879,15 @@ pub(crate) fn validate_block_payload(block: &Block) -> Result<(), ModelError> {
         BlockKind::Bibliography if !block.properties.is_empty() => Err(
             ModelError::InvalidDocument("bibliography cannot contain block properties"),
         ),
+        BlockKind::SectionBreak { .. } if !block.content.is_empty() => Err(
+            ModelError::InvalidDocument("section break cannot contain inline content"),
+        ),
+        BlockKind::SectionBreak { .. } if !block.properties.is_empty() => Err(
+            ModelError::InvalidDocument("section break cannot contain block properties"),
+        ),
+        BlockKind::SectionBreak { section_id } => {
+            validate_stable_id("section break id", section_id)
+        }
         BlockKind::HorizontalRule if !block.content.is_empty() => Err(ModelError::InvalidDocument(
             "horizontal rule cannot contain inline content",
         )),

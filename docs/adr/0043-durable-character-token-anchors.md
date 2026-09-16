@@ -18,13 +18,17 @@ ordinal)`. A sequence retains predecessor edges and tombstones; its visible
 string is only a projection. An annotation endpoint is a pair of token gaps
 with `Before`/`After` affinity, not a scalar offset.
 
-The first landed step supplies deterministic legacy materialisation,
-validation, and gap projection, without claiming that annotations can yet
-author token gaps. The next change must add sequences to `Document`, include
-them in signed snapshots, make merge operations mint/tombstone these exact
-ids, and then add a token-range anchor variant. Until all those pieces land,
-imports retain their existing truthful degraded anchors rather than storing
-offsets.
+The first two landed steps supply deterministic legacy materialisation,
+validation, gap projection, and a `Document`-owned map keyed by editable
+text/link inline id. An empty map remains the unambiguous legacy snapshot
+form; `Document::materialize_legacy_text_sequences` explicitly migrates it,
+and a nonempty map must cover every editable run exactly once, project to its
+stored text, and retain baseline provenance for that document/run. The app
+snapshot DTO carries the map so signed source state cannot silently lose it.
+This still does not claim annotations can author token gaps: merge operations
+must mint/tombstone these exact ids before a token-range anchor variant can
+land. Until all those pieces land, imports retain their existing truthful
+degraded anchors rather than storing offsets.
 
 ## Consequences
 

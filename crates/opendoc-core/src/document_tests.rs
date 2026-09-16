@@ -42,6 +42,287 @@ fn minimal_document_is_valid() {
 }
 
 #[test]
+fn sections_materialize_a_deterministic_root_and_require_atomic_body_boundaries() {
+    let mut document = Document::new("Section source");
+    let root_id = document.root_section_id();
+    document.blocks = vec![
+        Block::paragraph("before"),
+        Block {
+            id: StableId::parse("section-break").unwrap(),
+            kind: BlockKind::SectionBreak {
+                section_id: StableId::parse("section-two").unwrap(),
+            },
+            content: Vec::new(),
+            properties: BlockProperties::default(),
+        },
+        Block::paragraph("after"),
+    ];
+    assert!(matches!(
+        document.validate(),
+        Err(ModelError::InvalidDocument(
+            "section break requires materialized section source"
+        ))
+    ));
+
+    // A materialized root has the same page context as the legacy projection,
+    // but the later section must still be an actual source record.
+    assert!(matches!(
+        document.materialize_legacy_sections(),
+        Err(ModelError::InvalidDocument(
+            "section break refers to an unknown or root section"
+        ))
+    ));
+    assert!(document.sections.is_empty());
+    document.blocks.remove(1);
+    assert!(document.materialize_legacy_sections().unwrap());
+    assert_eq!(document.sections[&root_id].page_setup, document.page_setup);
+    document.sections.insert(
+        StableId::parse("section-two").unwrap(),
+        Section {
+            id: StableId::parse("section-two").unwrap(),
+            page_setup: PageSetup::default(),
+            header: Vec::new(),
+            footer: Vec::new(),
+            first_page_header: None,
+            first_page_footer: None,
+            even_page_header: None,
+            even_page_footer: None,
+        },
+    );
+    document.blocks.insert(
+        1,
+        Block {
+            id: StableId::parse("section-break").unwrap(),
+            kind: BlockKind::SectionBreak {
+                section_id: StableId::parse("section-two").unwrap(),
+            },
+            content: Vec::new(),
+            properties: BlockProperties::default(),
+        },
+    );
+    document.validate().unwrap();
+    assert!(!document.materialize_legacy_sections().unwrap());
+
+    document.blocks[0].kind = BlockKind::SectionBreak {
+        section_id: StableId::parse("section-two").unwrap(),
+    };
+    assert!(matches!(
+        document.validate(),
+        Err(ModelError::InvalidDocument(
+            "section break cannot be first or last body block"
+        ))
+    ));
+}
+
+#[test]
+fn section_breaks_are_not_generic_content_or_furniture() {
+    let section_id = StableId::parse("section-two").unwrap();
+    let section_break = Block {
+        id: StableId::parse("section-break").unwrap(),
+        kind: BlockKind::SectionBreak { section_id },
+        content: vec![Inline::text("not allowed")],
+        properties: BlockProperties::default(),
+    };
+    assert!(matches!(
+        section_break.validate_isolated(),
+        Err(ModelError::InvalidDocument(
+            "section break is only allowed in document body flow"
+        ))
+    ));
+}
+
+#[test]
+fn section_furniture_participates_in_durable_text_source() {
+    let mut document = Document::new("Section furniture tokens");
+    document.blocks.push(Block::paragraph("body"));
+    document.materialize_legacy_sections().unwrap();
+    let root_id = document.root_section_id();
+    let header = Block {
+        id: StableId::parse("section-header").unwrap(),
+        kind: BlockKind::Paragraph,
+        content: vec![Inline::Text {
+            id: StableId::parse("section-header-text").unwrap(),
+            text: "header".to_string(),
+            marks: Vec::new(),
+        }],
+        properties: BlockProperties::default(),
+    };
+    document.sections.get_mut(&root_id).unwrap().header = vec![header];
+    document.materialize_legacy_text_sequences().unwrap();
+    assert!(document
+        .text_sequences
+        .contains_key(&StableId::parse("section-header-text").unwrap()));
+    document.validate().unwrap();
+}
+
+#[test]
+fn legacy_text_sequences_materialize_once_for_every_editable_run() {
+    let mut document = Document::new("Token migration");
+    document.blocks.push(Block {
+        id: StableId::parse("paragraph").unwrap(),
+        kind: BlockKind::Paragraph,
+        content: vec![
+            Inline::Text {
+                id: StableId::parse("text-run").unwrap(),
+                text: "a😀".to_string(),
+                marks: Vec::new(),
+            },
+            Inline::Link {
+                id: StableId::parse("link-run").unwrap(),
+                text: "link".to_string(),
+                href: "https://example.test".to_string(),
+                marks: Vec::new(),
+            },
+        ],
+        properties: BlockProperties::default(),
+    });
+    document.validate().unwrap();
+    assert!(
+        document.text_sequences.is_empty(),
+        "old source stays legacy"
+    );
+
+    assert!(document.materialize_legacy_text_sequences().unwrap());
+    assert_eq!(document.text_sequences.len(), 2);
+    assert_eq!(
+        document
+            .text_sequences
+            .get(&StableId::parse("text-run").unwrap())
+            .unwrap()
+            .visible_text(),
+        "a😀"
+    );
+    document.validate().unwrap();
+    assert!(!document.materialize_legacy_text_sequences().unwrap());
+}
+
+#[test]
+fn persisted_text_sequences_must_cover_runs_and_match_their_projection() {
+    let mut document = Document::new("Token validation");
+    document.blocks.push(Block {
+        id: StableId::parse("paragraph").unwrap(),
+        kind: BlockKind::Paragraph,
+        content: vec![Inline::Text {
+            id: StableId::parse("text-run").unwrap(),
+            text: "body".to_string(),
+            marks: Vec::new(),
+        }],
+        properties: BlockProperties::default(),
+    });
+    document.materialize_legacy_text_sequences().unwrap();
+    document.text_sequences.insert(
+        StableId::parse("unknown-run").unwrap(),
+        TextSequence::default(),
+    );
+    assert!(matches!(
+        document.validate(),
+        Err(ModelError::InvalidDocument(
+            "text sequence map does not cover editable runs exactly"
+        ))
+    ));
+
+    document
+        .text_sequences
+        .remove(&StableId::parse("unknown-run").unwrap());
+    document
+        .text_sequences
+        .get_mut(&StableId::parse("text-run").unwrap())
+        .unwrap()
+        .tokens[0]
+        .tombstoned = true;
+    assert!(matches!(
+        document.validate(),
+        Err(ModelError::InvalidDocument(
+            "text sequence visible text differs from inline text"
+        ))
+    ));
+}
+
+#[test]
+fn baseline_tokens_cannot_be_reused_by_another_editable_run() {
+    let mut document = Document::new("Token provenance");
+    document.blocks.push(Block {
+        id: StableId::parse("paragraph").unwrap(),
+        kind: BlockKind::Paragraph,
+        content: vec![Inline::Text {
+            id: StableId::parse("text-run").unwrap(),
+            text: "x".to_string(),
+            marks: Vec::new(),
+        }],
+        properties: BlockProperties::default(),
+    });
+    document.materialize_legacy_text_sequences().unwrap();
+    let token = &mut document
+        .text_sequences
+        .get_mut(&StableId::parse("text-run").unwrap())
+        .unwrap()
+        .tokens[0];
+    if let TextTokenId::Baseline { inline_id, .. } = &mut token.id {
+        *inline_id = StableId::parse("other-run").unwrap();
+    } else {
+        panic!("legacy migration must materialize a baseline token");
+    }
+    assert!(matches!(
+        document.validate(),
+        Err(ModelError::InvalidDocument(
+            "baseline text token belongs to another editable run"
+        ))
+    ));
+}
+
+#[test]
+fn token_comment_anchor_requires_its_persisted_ordered_sequence() {
+    let run_id = StableId::parse("token-comment-run").unwrap();
+    let mut document = Document::new("Token comment");
+    document.blocks.push(Block {
+        id: StableId::parse("token-comment-block").unwrap(),
+        kind: BlockKind::Paragraph,
+        content: vec![Inline::Text {
+            id: run_id.clone(),
+            text: "a😀b".to_string(),
+            marks: Vec::new(),
+        }],
+        properties: BlockProperties::default(),
+    });
+    document.materialize_legacy_text_sequences().unwrap();
+    let sequence = document.text_sequences.get(&run_id).unwrap();
+    let anchor = Anchor::TokenRange(TextTokenRange {
+        inline_id: run_id.clone(),
+        start: sequence.gap_at_visible_offset(1, TextGapBias::Before),
+        end: sequence.gap_at_visible_offset(2, TextGapBias::After),
+    });
+    document.comments.push(CommentThread {
+        id: StableId::parse("token-comment-thread").unwrap(),
+        anchor,
+        comments: vec![Comment {
+            id: StableId::parse("token-comment").unwrap(),
+            author: "Ada".to_string(),
+            body: vec![Inline::text("check this")],
+            created_at_ms: 1,
+            deleted: false,
+        }],
+        state: CommentThreadState::Open,
+        resolved_by: None,
+        resolved_at_ms: None,
+        action_assignee: None,
+        action_due_at_ms: None,
+        action_completed_by: None,
+        action_completed_at_ms: None,
+        reactions: Vec::new(),
+        deleted: false,
+    });
+    document.validate().unwrap();
+
+    document.text_sequences.remove(&run_id);
+    assert!(matches!(
+        document.validate(),
+        Err(ModelError::InvalidDocument(
+            "token anchor requires a persisted text sequence"
+        ))
+    ));
+}
+
+#[test]
 fn horizontal_rule_is_content_free_structural_block() {
     let mut doc = Document::new("Rules");
     doc.blocks.push(Block {

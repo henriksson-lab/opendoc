@@ -799,6 +799,9 @@ export type AppDocument = {
   /** Numbering starts keyed by stable list-run id. Missing level entries start
    * at one; this is source state rather than a renderer inference. */
   list_properties?: Record<string, AppListProperties>;
+  /** Durable character-token source keyed by editable text/link inline id.
+   * Missing means a legacy snapshot which has not yet been materialized. */
+  text_sequences?: Record<string, AppTextSequence>;
   /** Durable named navigation targets. Deleted entries are retained as
    * tombstones so an old replica cannot resurrect them. */
   bookmarks: AppBookmark[];
@@ -862,6 +865,21 @@ export type AppListProperties = {
   ordered_formats?: Record<string, "decimal" | "lower-alpha" | "upper-alpha" | "lower-roman" | "upper-roman">;
   /** Explicit safe Unicode unordered-list glyphs. Missing levels use disc/circle/square. */
   bullet_markers?: Record<string, string>;
+};
+
+/** The persisted token sequence for one editable text/link inline. */
+export type AppTextSequence = {
+  tokens: AppTextToken[];
+};
+
+/** One scalar atom in a persisted text sequence. The token identity is serde's
+ * externally tagged `TextTokenId` enum; predecessors are retained even when
+ * a token is tombstoned. */
+export type AppTextToken = {
+  id: { Baseline: { document_uuid: string; inline_id: string; ordinal: number } } | { Operation: { actor: string; sequence: number; ordinal: number } };
+  predecessor: { Baseline: { document_uuid: string; inline_id: string; ordinal: number } } | { Operation: { actor: string; sequence: number; ordinal: number } } | null;
+  scalar: string;
+  tombstoned: boolean;
 };
 
 /** A named stable block target with a revisioned deletion tombstone. */

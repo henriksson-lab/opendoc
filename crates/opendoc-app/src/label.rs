@@ -5,6 +5,7 @@ use super::*;
 pub(crate) fn anchor_label(anchor: &Anchor) -> String {
     match anchor {
         Anchor::TextRange(range) => format!("{}..{}", range.start, range.end),
+        Anchor::TokenRange(range) => format!("{}:character-range", range.inline_id),
         Anchor::NearestBlock { block_id, .. } => format!("nearest:{block_id}"),
         Anchor::Orphaned { .. } => "orphaned".to_string(),
         Anchor::Document => "document".to_string(),
@@ -14,6 +15,14 @@ pub(crate) fn anchor_label(anchor: &Anchor) -> String {
 pub(crate) fn anchor_display_label(anchor: &Anchor, blocks: &[Block]) -> String {
     match anchor {
         Anchor::TextRange(range) => range_display_label(range, blocks),
+        Anchor::TokenRange(range) => find_inline_in_blocks(blocks, &range.inline_id)
+            .map(|inline| {
+                format!(
+                    "In: \"{}\"",
+                    truncate_label(&inline_display_text(inline), 60)
+                )
+            })
+            .unwrap_or_else(|| "On a removed character range".to_string()),
         Anchor::NearestBlock { block_id, .. } => find_block_in_blocks(blocks, block_id)
             .map(|block| format!("On: \"{}\"", truncate_label(&block_display_text(block), 60)))
             .unwrap_or_else(|| "On a removed block".to_string()),

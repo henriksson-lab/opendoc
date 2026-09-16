@@ -11,10 +11,19 @@ use opendoc_core::{
 
 pub(crate) fn repair_comment_anchors(document: &mut Document, warnings: &mut Vec<ModelWarning>) {
     let mut degraded = Vec::new();
+    // The comment loop mutates thread anchors. Keep the immutable persisted
+    // token source separate so a token range can be checked without borrowing
+    // the document through that mutable iteration.
+    let sequences = document.text_sequences.clone();
     for thread in &mut document.comments {
         if thread.deleted
             || matches!(&thread.anchor, Anchor::Orphaned { .. })
-            || anchor_resolves_in_blocks(&document.blocks, &thread.anchor)
+            || match &thread.anchor {
+                Anchor::TokenRange(range) => sequences
+                    .get(&range.inline_id)
+                    .is_some_and(|sequence| range.validate_against(sequence).is_ok()),
+                _ => anchor_resolves_in_blocks(&document.blocks, &thread.anchor),
+            }
         {
             continue;
         }
@@ -46,6 +55,11 @@ pub(crate) fn repair_comment_anchor(blocks: &[Block], anchor: &mut Anchor, warni
                 (true, true) => {}
             }
         }
+        // Token gaps stay attached through character edits, including endpoint
+        // tombstones.  `apply` snapshots their exact source evidence before a
+        // destructive operation and turns a removed run into `Orphaned`; do
+        // not degrade it to an unrelated block here.
+        Anchor::TokenRange(_) => {}
         Anchor::NearestBlock { .. } if !anchor_resolves_in_blocks(blocks, anchor) => {
             *anchor = nearest_block_anchor_in_blocks(blocks, warning);
         }
@@ -305,7 +319,13 @@ pub(crate) fn repair_text_range(
 }
 
 pub(crate) fn anchor_resolves(document: &Document, anchor: &Anchor) -> bool {
-    anchor_resolves_in_blocks(&document.blocks, anchor)
+    match anchor {
+        Anchor::TokenRange(range) => document
+            .text_sequences
+            .get(&range.inline_id)
+            .is_some_and(|sequence| range.validate_against(sequence).is_ok()),
+        _ => anchor_resolves_in_blocks(&document.blocks, anchor),
+    }
 }
 
 pub(crate) fn anchor_resolves_in_blocks(blocks: &[Block], anchor: &Anchor) -> bool {
@@ -333,19 +353,23 @@ pub(crate) fn anchor_resolves_in_blocks(blocks: &[Block], anchor: &Anchor) -> bo
             }
             found_start && found_end
         }
+        // This helper has no sequence map. Callers with a `Document` use
+        // `anchor_resolves`, which validates the retained token source.
+        Anchor::TokenRange(_) => false,
     }
 }
 
 /// Whether an anchor has lost every meaningful target.  A partially deleted
 /// text range deliberately remains repairable by collapsing it to its live
 /// endpoint; only this fully-missing case becomes durable orphan evidence.
-pub(crate) fn anchor_has_no_surviving_target(blocks: &[Block], anchor: &Anchor) -> bool {
+pub(crate) fn anchor_has_no_surviving_target(document: &Document, anchor: &Anchor) -> bool {
     match anchor {
         Anchor::TextRange(range) => {
-            !anchor_endpoint_resolves(blocks, &range.start)
-                && !anchor_endpoint_resolves(blocks, &range.end)
+            !anchor_endpoint_resolves(&document.blocks, &range.start)
+                && !anchor_endpoint_resolves(&document.blocks, &range.end)
         }
-        Anchor::NearestBlock { block_id, .. } => !block_exists(blocks, block_id),
+        Anchor::TokenRange(range) => !anchor_resolves(document, &Anchor::TokenRange(range.clone())),
+        Anchor::NearestBlock { block_id, .. } => !block_exists(&document.blocks, block_id),
         Anchor::Orphaned { .. } => true,
         Anchor::Document => false,
     }
@@ -355,15 +379,30 @@ pub(crate) fn anchor_has_no_surviving_target(blocks: &[Block], anchor: &Anchor) 
 /// The evidence is deliberately plain text: it is a review label, not a
 /// second rich-text fragment with independent formatting semantics.
 pub(crate) fn comment_anchor_evidence(
-    blocks: &[Block],
+    document: &Document,
     anchor: &Anchor,
 ) -> Option<(String, String)> {
     match anchor {
-        Anchor::TextRange(range) => text_range_evidence(blocks, range),
-        Anchor::NearestBlock { block_id, .. } => find_block(blocks, block_id).and_then(|block| {
-            let context = block_text(block);
-            (!context.is_empty()).then(|| (context.clone(), context))
-        }),
+        Anchor::TextRange(range) => text_range_evidence(&document.blocks, range),
+        Anchor::TokenRange(range) => {
+            let sequence = document.text_sequences.get(&range.inline_id)?;
+            let start = sequence.visible_offset_of_gap(&range.start)?;
+            let end = sequence.visible_offset_of_gap(&range.end)?;
+            let quote = sequence
+                .visible_text()
+                .chars()
+                .skip(start)
+                .take(end.checked_sub(start)?)
+                .collect::<String>();
+            let (_, context) = find_inline_with_context(&document.blocks, &range.inline_id)?;
+            (!quote.trim().is_empty() && !context.trim().is_empty()).then_some((quote, context))
+        }
+        Anchor::NearestBlock { block_id, .. } => {
+            find_block(&document.blocks, block_id).and_then(|block| {
+                let context = block_text(block);
+                (!context.is_empty()).then(|| (context.clone(), context))
+            })
+        }
         Anchor::Orphaned { .. } | Anchor::Document => None,
     }
 }

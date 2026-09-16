@@ -621,6 +621,13 @@ impl<'a> Exporter<'a> {
                 }
                 self.pending_page_break = true;
             }
+            BlockKind::SectionBreak { .. } => {
+                self.warn(
+                    "odt-export-section-setup-unmapped",
+                    "a section boundary was exported as a page break; per-section setup and furniture are retained in OpenDoc source but are not yet emitted as ODT master-page sequencing",
+                );
+                self.pending_page_break = true;
+            }
         }
     }
 

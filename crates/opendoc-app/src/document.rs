@@ -33,12 +33,21 @@ pub struct AppDocument {
     /// `None` inherits `footer`; an empty vector suppresses even-page footers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub even_page_footer: Option<Vec<AppBlock>>,
+    /// Section source is retained verbatim while the desktop editor has no
+    /// section authoring surface. Keeping it here prevents a read/modify/write
+    /// client from silently flattening imported mixed-page documents.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sections: BTreeMap<String, opendoc_core::Section>,
     /// List-run numbering settings.  The key is the stable `list_id`, not a
     /// block id: a restart survives inserts which change the run's first
     /// item.  This is source state and therefore deliberately not derived in
     /// the renderer.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub list_properties: BTreeMap<String, opendoc_core::ListProperties>,
+    /// Durable character-token source keyed by editable inline id. This is
+    /// source state, so snapshots and signing must retain it verbatim.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub text_sequences: BTreeMap<String, opendoc_core::TextSequence>,
     /// Durable named navigation targets. A deleted entry is a source-state
     /// tombstone, not a UI-only absence.
     #[serde(default)]
@@ -325,10 +334,20 @@ impl AppDocument {
                     .map(|block| AppBlock::from_core(block, &document.citation_database))
                     .collect()
             }),
+            sections: document
+                .sections
+                .iter()
+                .map(|(id, section)| (id.to_string(), section.clone()))
+                .collect(),
             list_properties: document
                 .list_properties
                 .iter()
                 .map(|(id, properties)| (id.to_string(), properties.clone()))
+                .collect(),
+            text_sequences: document
+                .text_sequences
+                .iter()
+                .map(|(id, sequence)| (id.to_string(), sequence.clone()))
                 .collect(),
             bookmarks: document.bookmarks.clone(),
             // Projection only: see the field's documentation.
@@ -456,6 +475,17 @@ impl AppDocument {
                 .as_ref()
                 .map(|blocks| blocks.iter().map(AppBlock::to_core).collect())
                 .transpose()?,
+            sections: self
+                .sections
+                .iter()
+                .map(|(id, section)| {
+                    Ok((
+                        opendoc_core::StableId::parse(id.clone())
+                            .map_err(|err| AppApiError::Model(err.to_string()))?,
+                        section.clone(),
+                    ))
+                })
+                .collect::<Result<_, AppApiError>>()?,
             list_properties: self
                 .list_properties
                 .iter()
@@ -464,6 +494,17 @@ impl AppDocument {
                         opendoc_core::StableId::parse(id.clone())
                             .map_err(|err| AppApiError::Model(err.to_string()))?,
                         properties.clone(),
+                    ))
+                })
+                .collect::<Result<_, AppApiError>>()?,
+            text_sequences: self
+                .text_sequences
+                .iter()
+                .map(|(id, sequence)| {
+                    Ok((
+                        opendoc_core::StableId::parse(id.clone())
+                            .map_err(|err| AppApiError::Model(err.to_string()))?,
+                        sequence.clone(),
                     ))
                 })
                 .collect::<Result<_, AppApiError>>()?,

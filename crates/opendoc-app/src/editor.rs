@@ -158,6 +158,7 @@ fn inline_width(inline: &Inline) -> usize {
 fn is_atomic_object_block(kind: &BlockKind) -> bool {
     match kind {
         BlockKind::PageBreak
+        | BlockKind::SectionBreak { .. }
         | BlockKind::HorizontalRule
         | BlockKind::TableOfContents { .. }
         | BlockKind::Bibliography

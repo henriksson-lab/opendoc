@@ -7,6 +7,7 @@ use crate::document::{
 use crate::ids::validate_stable_id;
 use crate::ids::{InsertPosition, StableId};
 use crate::inline::{Inline, Mark, TextRange};
+use crate::text_sequence::TextTokenRange;
 use crate::warning::ModelError;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -350,6 +351,10 @@ impl Comment {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Anchor {
     TextRange(TextRange),
+    /// A durable character-granular interval.  Unlike `TextRange`, its
+    /// endpoints name gaps in a persisted CRDT sequence rather than complete
+    /// inline runs, so concurrent edits and tombstones cannot retarget it.
+    TokenRange(TextTokenRange),
     NearestBlock {
         block_id: StableId,
         warning: String,
@@ -541,6 +546,7 @@ fn validate_structural_suggestion_position(position: &InsertPosition) -> Result<
 pub(crate) fn validate_anchor(anchor: &Anchor) -> Result<(), ModelError> {
     match anchor {
         Anchor::TextRange(range) => validate_text_range(range),
+        Anchor::TokenRange(range) => range.validate(),
         Anchor::NearestBlock { block_id, warning } => {
             validate_stable_id("nearest block anchor block id", block_id)?;
             if warning.trim().is_empty() {

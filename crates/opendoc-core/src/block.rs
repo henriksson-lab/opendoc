@@ -211,6 +211,12 @@ pub enum BlockKind {
     /// style or metadata edit would leave them stale.
     Bibliography,
     PageBreak,
+    /// Starts the following top-level body block in the named page section.
+    /// The section record lives in [`Document`](crate::Document); keeping the
+    /// boundary atomic prevents ordinary inline editing from destroying it.
+    SectionBreak {
+        section_id: StableId,
+    },
 }
 
 impl BlockKind {

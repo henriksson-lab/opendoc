@@ -289,6 +289,7 @@ pub(crate) fn block_kind_label(kind: &BlockKind) -> &'static str {
         BlockKind::TableOfContents { .. } => "table-of-contents",
         BlockKind::Bibliography => "bibliography",
         BlockKind::PageBreak => "page-break",
+        BlockKind::SectionBreak { .. } => "section-break",
     }
 }
 

@@ -117,6 +117,16 @@ pub(crate) fn export_google_block(
             vec![json!({ "pageBreak": {} })],
             warnings,
         )),
+        BlockKind::SectionBreak { section_id } => {
+            warnings.push(warning(
+                "google-export-section-as-opendoc-extension",
+                "a section boundary was retained in an OpenDoc extension; native Google section-style requests are not emitted yet",
+            ));
+            Ok(json!({ "opendocSectionBreak": {
+                "blockId": block.id.to_string(),
+                "sectionId": section_id.to_string(),
+            }}))
+        }
         BlockKind::HorizontalRule => Ok(export_google_paragraph(
             block,
             None,
@@ -815,6 +825,15 @@ pub(crate) fn export_google_anchor(anchor: &Anchor) -> Value {
             value["type"] = json!("textRange");
             value
         }
+        // OpenDoc extension data, not a native Google offset. The two gaps
+        // preserve tombstone-aware source identity across an OpenDoc-shaped
+        // interchange round trip.
+        Anchor::TokenRange(range) => json!({
+            "type": "tokenRange",
+            "inlineId": range.inline_id.to_string(),
+            "start": range.start,
+            "end": range.end,
+        }),
         Anchor::NearestBlock { block_id, warning } => json!({
             "type": "nearestBlock",
             "blockId": block_id.to_string(),
