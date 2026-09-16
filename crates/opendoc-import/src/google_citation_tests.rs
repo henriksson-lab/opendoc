@@ -1,11 +1,9 @@
 use crate::*;
-use opendoc_core::{
-    BlockKind, CitationPlacement, CitationSourceFormat, EquationSourceFormat, Inline, StableId,
-};
+use opendoc_core::{BlockKind, CitationPlacement, CitationSourceFormat, Inline, StableId};
 use serde_json::json;
 
 #[test]
-fn imports_google_docs_equation_as_placeholder_with_warning() {
+fn drops_google_docs_equation_without_fabricating_equation_source() {
     let input = json!({
         "body": { "content": [{
             "paragraph": { "elements": [
@@ -19,13 +17,52 @@ fn imports_google_docs_equation_as_placeholder_with_warning() {
         .warnings
         .iter()
         .any(|warning| warning.code == "google-equation-source-unavailable"));
-    match &report.document.blocks[0].content[1] {
-        Inline::Equation { equation, .. } => {
-            assert_eq!(equation.source, "\\placeholder{}");
-            assert_eq!(equation.source_format, EquationSourceFormat::LatexLike);
-        }
-        other => panic!("expected equation inline, got {other:?}"),
-    }
+    assert_eq!(report.document.blocks[0].content.len(), 1);
+    assert!(matches!(
+        &report.document.blocks[0].content[0],
+        Inline::Text { text, .. } if text == "Equation: "
+    ));
+}
+
+#[test]
+fn native_google_equation_metadata_is_not_treated_as_latex_or_visible_text() {
+    // Native Docs equation objects can carry review metadata. Neither that
+    // metadata nor arbitrary, undocumented JSON is a source/accessible-text
+    // contract, so accepting it would create a false editable equation.
+    let input = json!({
+        "body": { "content": [{
+            "paragraph": { "elements": [
+                { "textRun": { "content": "Before ", "textStyle": {} } },
+                { "equation": {
+                    "suggestedInsertionIds": ["suggestion-1"],
+                    "source": "x^2",
+                    "content": "x squared"
+                } },
+                { "textRun": { "content": " after\n", "textStyle": {} } }
+            ] }
+        }] }
+    });
+
+    let report = import_google_docs_json("Google", input.to_string().as_bytes()).unwrap();
+    let warning = report
+        .warnings
+        .iter()
+        .find(|warning| warning.code == "google-equation-source-unavailable")
+        .expect("native equation must disclose its unavailable source");
+    assert!(warning.message.contains("neither equation source"));
+    assert!(report.document.blocks[0]
+        .content
+        .iter()
+        .all(|inline| !matches!(inline, Inline::Equation { .. })));
+    let visible_text: String = report.document.blocks[0]
+        .content
+        .iter()
+        .filter_map(|inline| match inline {
+            Inline::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(visible_text, "Before  after");
 }
 
 #[test]
@@ -284,6 +321,86 @@ fn google_docs_citation_import_clears_stale_labels_for_missing_groups() {
         .warnings
         .iter()
         .any(|warning| warning.code == "citation-group-missing"));
+    assert!(report.document.validate().is_ok());
+}
+
+#[test]
+fn google_docs_citation_import_clears_stale_footnote_label_for_missing_group() {
+    // Footnote bodies are a separate inline container in the Docs resource.
+    // A body-only repair used to leave this attacker-controlled cache visible
+    // even after reporting that the group did not exist.
+    let input = json!({
+        "body": { "content": [{
+            "paragraph": { "elements": [{
+                "footnoteReference": { "footnoteId": "fn-stale-label" }
+            }] }
+        }] },
+        "footnotes": {
+            "fn-stale-label": {
+                "footnoteId": "fn-stale-label",
+                "content": [{ "paragraph": { "elements": [{
+                    "opendocCitation": {
+                        "citationId": "cite-no-group",
+                        "renderedCache": "(stale label)"
+                    }
+                }] } }]
+            }
+        }
+    });
+
+    let report = import_google_docs_json("Google", input.to_string().as_bytes()).unwrap();
+    match &report.document.footnotes[0].body[0] {
+        Inline::Citation { rendered_cache, .. } => assert_eq!(rendered_cache, &None),
+        other => panic!("expected citation inline, got {other:?}"),
+    }
+    assert!(report
+        .warnings
+        .iter()
+        .any(|warning| warning.code == "citation-group-missing"));
+    assert!(report.document.validate().is_ok());
+}
+
+#[test]
+fn google_docs_citation_import_clears_stale_footnote_label_for_missing_reference() {
+    let input = json!({
+        "body": { "content": [{
+            "paragraph": { "elements": [{
+                "footnoteReference": { "footnoteId": "fn-stale-reference" }
+            }] }
+        }] },
+        "footnotes": {
+            "fn-stale-reference": {
+                "footnoteId": "fn-stale-reference",
+                "content": [{ "paragraph": { "elements": [{
+                    "opendocCitation": {
+                        "citationId": "cite-no-reference",
+                        "renderedCache": "(stale reference)"
+                    }
+                }] } }]
+            }
+        },
+        "opendocCitations": {
+            "references": [],
+            "groups": [{
+                "id": "cite-no-reference",
+                "revision": 1,
+                "items": [{ "referenceId": "ref-missing", "suppressAuthor": false }],
+                "placement": "inline",
+                "renderedCache": "(stale reference)",
+                "deleted": false
+            }]
+        }
+    });
+
+    let report = import_google_docs_json("Google", input.to_string().as_bytes()).unwrap();
+    match &report.document.footnotes[0].body[0] {
+        Inline::Citation { rendered_cache, .. } => assert_eq!(rendered_cache, &None),
+        other => panic!("expected citation inline, got {other:?}"),
+    }
+    assert!(report
+        .warnings
+        .iter()
+        .any(|warning| warning.code == "citation-reference-missing"));
     assert!(report.document.validate().is_ok());
 }
 
@@ -711,5 +828,70 @@ fn footnote_citation_import_without_footnote_id_aborts() {
         err.to_string()
             .contains("footnote citation missing required string field footnoteId"),
         "{err}"
+    );
+}
+
+/// A brand-new document exports without a citation warning.
+///
+/// `CitationDatabase::default().style` used to be `apa-7th`, a name
+/// `opendoc_citations::resolve_style_name` has never resolved. While
+/// `apa-7th` was exempt from `citation_support_warnings` that was invisible;
+/// the moment the exemption was removed — correctly, because it meant the
+/// commonest database in the product was the one nobody was ever told about —
+/// **every** new document that cited anything started reporting
+/// `citation-style-not-bundled` on export, telling the user their citations
+/// had been formatted by the built-in renderer rather than by CSL.
+///
+/// The default is now `apa`, which is one of the eight bundled CSL styles.
+/// The `apa-7th` half of this test is the control: without it, the assertion
+/// would also hold for a `citation_support_warnings` that had gone back to
+/// exempting everything, or for an export that stopped calling it.
+#[test]
+fn a_new_documents_default_citation_style_is_one_the_bundle_renders() {
+    let cited = |style: Option<&str>| {
+        let mut document = opendoc_core::Document::new("Cited");
+        if let Some(style) = style {
+            document.citation_database.style = style.to_string();
+        }
+        document
+            .citation_database
+            .references
+            .push(opendoc_core::BibliographyReference {
+                id: StableId::parse("ref-doe-2020").unwrap(),
+                revision: 1,
+                source: opendoc_core::CitationSource {
+                    format: CitationSourceFormat::CitumNative,
+                    bytes: b"doe".to_vec(),
+                },
+                summary: opendoc_core::CitationSummary {
+                    title: "Example".to_string(),
+                    authors: vec!["Doe".to_string()],
+                    issued: Some("2020".to_string()),
+                    doi: None,
+                    url: None,
+                },
+                deleted: false,
+            });
+        document.validate().expect("a valid cited document");
+        let (_, warnings) =
+            export_google_docs_json_with_warnings(&document).expect("the export succeeds");
+        warnings
+            .into_iter()
+            .map(|warning| warning.code)
+            .collect::<Vec<_>>()
+    };
+
+    assert!(
+        !cited(None).contains(&"citation-style-not-bundled".to_string()),
+        "a document nobody chose a citation style for warns about the style it was given: {:?}",
+        cited(None)
+    );
+    // The control: the style the default used to be does warn, so the
+    // assertion above is about the default and not about the warning having
+    // gone quiet.
+    assert!(
+        cited(Some("apa-7th")).contains(&"citation-style-not-bundled".to_string()),
+        "the historical default no longer warns, so the assertion above proves nothing: {:?}",
+        cited(Some("apa-7th"))
     );
 }

@@ -166,7 +166,27 @@ fn version_labels_round_trip_as_manifest_sidecars() {
         created_at_ms: 7,
     };
     let path = repo.write_version_label(&label).unwrap();
-    assert_eq!(path, ObjectStoreLayout::version_label_key(&chain[0]));
+    // Derived from the manifest hash's own text, not by re-calling the
+    // function that produced the answer: comparing `write_version_label`'s
+    // path against `ObjectStoreLayout::version_label_key` — the very call it
+    // makes — cannot fail, and passed for any layout at all. PLAN88 §7.
+    let printed = chain[0].to_string();
+    let (algorithm, digest) = printed
+        .split_once(':')
+        .expect("a hash ref prints as algorithm:digest");
+    assert_eq!(algorithm, "sha256");
+    assert_eq!(
+        path,
+        format!("objects/sha256/{}/{}.label", &digest[..2], digest),
+        "the sidecar is not sharded beside the manifest object it names"
+    );
+    // …and it really is a file at that name, so the string and the bytes on
+    // disk cannot drift apart.
+    assert!(
+        root.join(&path).is_file(),
+        "nothing was written at {path} under {}",
+        root.display()
+    );
     assert_eq!(repo.read_version_label(&chain[0]).unwrap(), Some(label));
 
     // Naming a version never rewrites it: the manifest chain is untouched.

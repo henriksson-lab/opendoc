@@ -11,7 +11,7 @@
 // path. Controls that *are* discarded with the editor shell are bound by
 // `bindShellControls()` in `shell.ts` instead, where re-binding is safe
 // precisely because the previous nodes went away with their listeners.
-import { app } from "./state";
+import { app, state } from "./state";
 import { runAction } from "./actions";
 
 let staticBound = false;
@@ -30,6 +30,17 @@ export function bindStatic(): void {
     const menu = target.closest("details.menu-group");
     if (menu) menu.removeAttribute("open");
     void runAction(target.dataset.action ?? "", target.dataset);
+  });
+  app.addEventListener("submit", (event) => {
+    const form = (event.target as Element | null)?.closest<HTMLFormElement>("[data-comment-reply-form]");
+    if (!form) return;
+    event.preventDefault();
+    const body = form.querySelector<HTMLTextAreaElement>('textarea[name="body"]')?.value;
+    const threadId = form.dataset.threadId;
+    if (typeof body !== "string" || !threadId) return;
+    // Form bodies are deliberately read at submission time, never encoded in
+    // an HTML data attribute.  This keeps user text out of our HTML renderer.
+    void runAction("submit-comment-reply", { id: threadId, body } as DOMStringMap);
   });
   app.addEventListener(
     "toggle",
@@ -52,9 +63,40 @@ export function bindStatic(): void {
   });
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
+      const reply = (event.target as Element | null)?.closest<HTMLFormElement>("[data-comment-reply-form]");
+      if (reply?.dataset.threadId) {
+        event.preventDefault();
+        void runAction("cancel-comment-reply", { id: reply.dataset.threadId } as DOMStringMap);
+        return;
+      }
       app.querySelectorAll<HTMLDetailsElement>("details.menu-group[open]").forEach((other) => {
         other.open = false;
       });
+    }
+    // These deliberately live above the contenteditable key handler: review
+    // traversal must also work when focus is on the sidebar.  The chord does
+    // not produce text and is announced on the controls themselves.
+    if (state.mode === "docs" && (event.ctrlKey || event.metaKey) && event.altKey && !event.shiftKey) {
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        void runAction("comment-next");
+        return;
+      }
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        void runAction("comment-previous");
+        return;
+      }
+      if (event.key === "ArrowRight") {
+        event.preventDefault();
+        void runAction("suggestion-next");
+        return;
+      }
+      if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        void runAction("suggestion-previous");
+        return;
+      }
     }
     const active = document.activeElement as HTMLElement | null;
     if (active?.closest("[data-menu-bar]")) {

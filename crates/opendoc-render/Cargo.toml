@@ -9,4 +9,14 @@ base64 = "0.22"
 # builds for wasm32-unknown-unknown; no JavaScript runtime involved.
 math-core = { version = "0.8.2", default-features = false, features = ["std"] }
 opendoc-core = { path = "../opendoc-core" }
+opendoc-citations = { path = "../opendoc-citations" }
+# The standalone HTML export projects the document type scale as CSS custom
+# properties rather than restating any of its sizes — ADR 0014 §3 exists so a
+# size cannot be written down twice, and an exported stylesheet is a second
+# place it would otherwise be written.
+opendoc-layout = { path = "../opendoc-layout" }
 opendoc-spreadsheet = { path = "../opendoc-spreadsheet" }
+# Used only to re-parse and re-serialise `math-core`'s output against an
+# allowlist (`src/mathml.rs`). The same version `opendoc-import` reads DOCX and
+# ODF with, so this adds no new code to the WebAssembly graph.
+quick-xml = "0.41"

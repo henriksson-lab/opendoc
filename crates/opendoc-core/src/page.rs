@@ -15,16 +15,59 @@ use serde::{Deserialize, Serialize};
 pub enum HeaderFooterSlot {
     Header,
     Footer,
+    /// A document-wide first-page header override. `None` in the document
+    /// means inherit `Header`; an explicitly empty vector means the first
+    /// page intentionally has no header.
+    FirstPageHeader,
+    /// The footer counterpart of [`Self::FirstPageHeader`].
+    FirstPageFooter,
+    /// A document-wide even-page header override. `None` in the document
+    /// inherits `Header`; an explicitly empty vector intentionally has no
+    /// header on pages two, four, and so on.
+    EvenPageHeader,
+    /// The footer counterpart of [`Self::EvenPageHeader`].
+    EvenPageFooter,
 }
 
 impl HeaderFooterSlot {
-    pub const ALL: [HeaderFooterSlot; 2] = [HeaderFooterSlot::Header, HeaderFooterSlot::Footer];
+    pub const ALL: [HeaderFooterSlot; 6] = [
+        HeaderFooterSlot::Header,
+        HeaderFooterSlot::Footer,
+        HeaderFooterSlot::FirstPageHeader,
+        HeaderFooterSlot::FirstPageFooter,
+        HeaderFooterSlot::EvenPageHeader,
+        HeaderFooterSlot::EvenPageFooter,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
             HeaderFooterSlot::Header => "header",
             HeaderFooterSlot::Footer => "footer",
+            HeaderFooterSlot::FirstPageHeader => "first-page-header",
+            HeaderFooterSlot::FirstPageFooter => "first-page-footer",
+            HeaderFooterSlot::EvenPageHeader => "even-page-header",
+            HeaderFooterSlot::EvenPageFooter => "even-page-footer",
         }
+    }
+
+    /// The ordinary slot this variant overrides.
+    pub const fn base_slot(self) -> Self {
+        match self {
+            Self::Header | Self::FirstPageHeader | Self::EvenPageHeader => Self::Header,
+            Self::Footer | Self::FirstPageFooter | Self::EvenPageFooter => Self::Footer,
+        }
+    }
+
+    /// Whether this slot is an optional first/even-page override rather than
+    /// ordinary furniture, which is always present.
+    pub const fn is_override(self) -> bool {
+        matches!(
+            self,
+            Self::FirstPageHeader
+                | Self::FirstPageFooter
+                | Self::EvenPageHeader
+                | Self::EvenPageFooter
+        )
     }
 
     pub fn parse(value: &str) -> Result<Self, ModelError> {
@@ -191,6 +234,12 @@ pub struct PageSetup {
     pub margin_header: Length,
     /// Distance from the bottom edge of the sheet to the bottom of the footer.
     pub margin_footer: Length,
+    /// The displayed number of the first physical page. This is page
+    /// numbering rather than geometry, but it belongs to the same
+    /// document-wide setup: changing it changes every resolved page-number
+    /// field together and must converge as one page-setup write.
+    #[serde(default = "PageSetup::default_page_number_start")]
+    pub page_number_start: u32,
 }
 
 impl Default for PageSetup {
@@ -206,6 +255,7 @@ impl Default for PageSetup {
             margin_end: Length(Self::DEFAULT_MARGIN_TWIPS),
             margin_header: Length(Self::DEFAULT_FURNITURE_MARGIN_TWIPS),
             margin_footer: Length(Self::DEFAULT_FURNITURE_MARGIN_TWIPS),
+            page_number_start: Self::default_page_number_start(),
         }
     }
 }
@@ -215,6 +265,11 @@ impl PageSetup {
     pub const DEFAULT_MARGIN_TWIPS: i32 = 1440;
     /// Half an inch.
     pub const DEFAULT_FURNITURE_MARGIN_TWIPS: i32 = 720;
+    /// The conventional first displayed page number, shared by Google Docs
+    /// and the document model's historical implicit numbering.
+    pub const fn default_page_number_start() -> u32 {
+        1
+    }
 
     /// A page of the given size with the default margins.
     pub fn new(width: Length, height: Length) -> Result<Self, ModelError> {

@@ -1,6 +1,10 @@
 # ADR 0013: Table Structure, Cell Spans, And How Two Editors Share A Grid
 
 Status: accepted for v0. Covers PLAN77 E2 (parity OB-21).
+**Decision 1's "a cell carries no `column_id`" is amended by
+`docs/adr/0019-table-cells-name-their-column.md`:** it holds for a cell in the
+document, and did not hold for a cell in an `InsertTableRow` payload, which is
+generated against one replica's column list and applied against another's.
 
 ## Context
 
@@ -132,6 +136,12 @@ character disagree on the bytes and so on the document hash. So
 function of the identities they sit between** — `TableCell::filling` from the
 row and column, `TableColumn::filling` and `TableRow::filling` from the table
 block. No counter, no clock, no coordinator.
+
+`TableColumn::filling` originally also took the *index* of the hole it was
+filling, which is not an identity and collided with itself once a delete
+shifted the grid. ADR 0019 replaced it with `TableColumn::for_cell`, derived
+from the cell that has no column; `TableColumn::filling` survives only for the
+one column a table with no columns at all is given, and takes no index.
 
 This also fixed a live bug: the pre-existing placeholders that merge pushed
 when the last row or the last cell of a table was deleted used

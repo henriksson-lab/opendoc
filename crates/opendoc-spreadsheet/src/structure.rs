@@ -9,9 +9,10 @@ use super::address::{
     number_to_column, parse_cell_position, parse_cell_range, range_contains_range, ranges_overlap,
     shift_cell_range, shift_formula_references, split_cell_address,
 };
+use super::format::{self, Locale};
 use super::formula::{is_unquoted_sheet_prefix_char, parse_reference, CellCoord, RefExpr};
 use super::model::{
-    classify_cell_value, column_axis, normalize_protected_range_description, row_axis,
+    column_axis, normalize_protected_range_description, row_axis,
     validate_protected_range_description,
 };
 use super::value::{compare_values, FormulaValue};
@@ -664,22 +665,53 @@ fn sort_axis_labels(sheet: &mut Sheet) {
     sheet.column_axes = sheet.columns.iter().cloned().map(column_axis).collect();
 }
 
-pub fn set_sheet_cell(sheet: &mut Sheet, address: &str, value: String) {
+/// Writes one cell from text the user typed.
+///
+/// # What is stored, and what is derived
+///
+/// The text is *input*, not state. `50%`, `$5`, `1,000` and `2024-01-05`
+/// each name a number and a way of showing it, and the cell stores both
+/// separately: `user_value` holds the canonical number (`0.5`, `5`, `1000`,
+/// the date serial `45296`) and `format.number_format` holds the pattern the
+/// input implied (`0%`, `$#,##0`, `#,##0`, `YYYY-MM-DD`). Storing the raw
+/// text instead is what made `=B1+1` on a typed date `#VALUE!` and a column
+/// of typed percentages sum to zero — every consumer would have had to
+/// re-parse the same text, in the same locale, and agree.
+///
+/// The typed text is not lost: the operation journal records what the user
+/// typed, and replaying it re-parses to the same value. `display_value` is
+/// then derived from the stored number and the stored format, so the cell
+/// shows `50%` again.
+///
+/// An inferred format never overwrites a format the cell already has. A
+/// column deliberately formatted as currency stays currency when someone
+/// types `1,000` into it; only a cell with no format of its own takes the
+/// one its input implied.
+pub fn set_sheet_cell(sheet: &mut Sheet, address: &str, value: String, locale: &Locale) {
     sheet.ensure_address(address);
-    let kind = classify_cell_value(&value);
-    let value = if kind == "bool" {
-        value.to_ascii_lowercase()
+    let parsed = format::parse_input(&value, locale);
+    let cell = if let Some(index) = sheet.cells.iter().position(|cell| cell.address == address) {
+        &mut sheet.cells[index]
     } else {
-        value
-    };
-    if let Some(cell) = sheet.cells.iter_mut().find(|cell| cell.address == address) {
-        cell.user_kind = kind.to_string();
-        cell.user_value = value;
-    } else {
-        sheet.cells.push(Cell::new(address, kind, &value));
+        sheet
+            .cells
+            .push(Cell::new(address, parsed.kind, &parsed.value));
         sheet
             .cells
             .sort_by(|left, right| left.address.cmp(&right.address));
+        let index = sheet
+            .cells
+            .iter()
+            .position(|cell| cell.address == address)
+            .expect("newly inserted spreadsheet cell exists");
+        &mut sheet.cells[index]
+    };
+    cell.user_kind = parsed.kind.to_string();
+    cell.user_value = parsed.value;
+    if let Some(number_format) = parsed.number_format {
+        if cell.format.number_format.is_none() {
+            cell.format.number_format = Some(number_format);
+        }
     }
 }
 
@@ -754,6 +786,31 @@ pub fn copy_sheet_range(
     Ok(())
 }
 
+/// The anchor of the merge covering `address`, when `address` is covered by a
+/// merge but is not itself that merge's anchor.
+///
+/// A merged block keeps its content, its formatting and its `<td>` on the
+/// top-left anchor, and `opendoc-render` emits nothing at all for the cells
+/// the block covers. A value written into one of those is stored, signed and
+/// exported — and never drawn anywhere. Every write path therefore asks this
+/// first and refuses, naming the anchor the caller meant; and selection asks
+/// it so the focus ring never lands somewhere with no pixel to draw it in.
+pub fn merge_cover_anchor(sheet: &Sheet, address: &str) -> Option<String> {
+    let (column, row) = parse_cell_position(address).ok()?;
+    for merge in &sheet.merges {
+        let Ok(range) = parse_cell_range(&merge.range) else {
+            continue;
+        };
+        let covers = (range.start_column..range.start_column + range.width).contains(&column)
+            && (range.start_row..range.start_row + range.height).contains(&row);
+        if !covers || (column, row) == (range.start_column, range.start_row) {
+            continue;
+        }
+        return cell_address(range.start_column, range.start_row).ok();
+    }
+    None
+}
+
 pub fn merge_sheet_cells(sheet: &mut Sheet, range: &str) -> Result<(), SpreadsheetError> {
     let normalized = normalize_merge_range(range)?;
     let parsed = parse_cell_range(&normalized)?;
@@ -775,6 +832,32 @@ pub fn merge_sheet_cells(sheet: &mut Sheet, range: &str) -> Result<(), Spreadshe
                 parsed.start_row + row_offset,
             )?;
             sheet.ensure_address(&address);
+        }
+    }
+    // Only the anchor of a merged block is ever drawn again, so content left
+    // on the cells it covers would be invisible from here on — stored,
+    // signed and exported, but unreachable and uneditable. Sheets discards
+    // it for the same reason; keeping it is what makes a merge a data
+    // hazard rather than a formatting choice. Formatting, validation and the
+    // cell's conversation stay, because unmerging brings the cells back.
+    for row_offset in 0..parsed.height {
+        for column_offset in 0..parsed.width {
+            if (row_offset, column_offset) == (0, 0) {
+                continue;
+            }
+            let address = cell_address(
+                parsed.start_column + column_offset,
+                parsed.start_row + row_offset,
+            )?;
+            if let Some(cell) = sheet.cells.iter_mut().find(|cell| cell.address == address) {
+                cell.user_kind = "empty".to_string();
+                cell.user_value = String::new();
+                cell.computed_kind = "empty".to_string();
+                cell.computed_value = String::new();
+                cell.display_value = String::new();
+                cell.dependencies = Vec::new();
+                cell.spill_source = None;
+            }
         }
     }
     sheet.merges.push(SheetMerge {

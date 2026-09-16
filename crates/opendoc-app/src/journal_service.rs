@@ -7,7 +7,7 @@ pub(crate) struct OperationJournalService<'a> {
     actor_id: &'a str,
     operation_journal: &'a mut Vec<AppOperationRecord>,
     operation_envelopes: &'a mut Vec<AppOperationEnvelope>,
-    next_seq: &'a mut u64,
+    next_envelope_seq: &'a mut u64,
 }
 
 impl<'a> OperationJournalService<'a> {
@@ -15,13 +15,13 @@ impl<'a> OperationJournalService<'a> {
         actor_id: &'a str,
         operation_journal: &'a mut Vec<AppOperationRecord>,
         operation_envelopes: &'a mut Vec<AppOperationEnvelope>,
-        next_seq: &'a mut u64,
+        next_envelope_seq: &'a mut u64,
     ) -> Self {
         Self {
             actor_id,
             operation_journal,
             operation_envelopes,
-            next_seq,
+            next_envelope_seq,
         }
     }
 
@@ -54,8 +54,8 @@ impl<'a> OperationJournalService<'a> {
         spreadsheet: Option<AppSpreadsheetOperation>,
         blob: Option<AppBlobOperation>,
     ) {
-        let seq = *self.next_seq;
-        *self.next_seq += 1;
+        let seq = *self.next_envelope_seq;
+        *self.next_envelope_seq += 1;
         let record = AppOperationRecord {
             actor: self.actor_id.to_string(),
             seq,
@@ -107,7 +107,7 @@ impl OpenDocApp {
             &self.actor_id,
             &mut self.operation_journal,
             &mut self.operation_envelopes,
-            &mut self.next_seq,
+            &mut self.next_envelope_seq,
         )
     }
 }

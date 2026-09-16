@@ -59,11 +59,38 @@ export async function refreshFind(): Promise<void> {
   renderFind();
 }
 
+/** The match the counter is pointing at, or `null` when there is none. */
+function currentMatch(): AppFindMatch | null {
+  if (findResults.length === 0) return null;
+  return findResults[wrapIndex(findIndex, findResults.length)] ?? null;
+}
+
+/**
+ * Where a match lives, in the words the menus use for the same places.
+ *
+ * Only `body` is selectable in the editor surface — page furniture and
+ * footnote bodies are not in `document.blocks`, so their block ids are not in
+ * the editor DOM at all. Rust says which region a match is in; this is the
+ * label and the way in.
+ */
+const REGION_LABEL: Record<Exclude<AppFindMatch["region"], "body">, string> = {
+  header: "the header",
+  footer: "the footer",
+  "first-page-header": "the first-page header",
+  "first-page-footer": "the first-page footer",
+  "even-page-header": "the even-page header",
+  "even-page-footer": "the even-page footer",
+  footnote: "a footnote",
+};
+
 function findStatusText(): string {
   if (findError) return "Invalid pattern";
   if (!findQuery) return "";
   if (findResults.length === 0) return "No matches";
-  return `${wrapIndex(findIndex, findResults.length) + 1} of ${findResults.length}`;
+  const position = `${wrapIndex(findIndex, findResults.length) + 1} of ${findResults.length}`;
+  const match = currentMatch();
+  if (!match || match.region === "body") return position;
+  return `${position} — in ${REGION_LABEL[match.region]}`;
 }
 
 export function renderFind(): void {
@@ -76,6 +103,15 @@ export function renderFind(): void {
   if (!count) return;
   count.textContent = findStatusText();
   count.classList.toggle("invalid", findError !== null);
+  const goto = query<HTMLButtonElement>(".find-goto", bar);
+  if (goto) {
+    const match = currentMatch();
+    const outside = match !== null && match.region !== "body";
+    goto.hidden = !outside;
+    if (outside && match) {
+      goto.textContent = `Open ${REGION_LABEL[match.region as Exclude<AppFindMatch["region"], "body">]}`;
+    }
+  }
   if (findError) count.setAttribute("title", findError);
   else count.removeAttribute("title");
 }
@@ -98,6 +134,7 @@ function buildFindBar(bar: HTMLElement): void {
     <input type="text" data-replace-input placeholder="Replace with" aria-label="Replace with">
     <button type="button" data-action="replace-one">Replace</button>
     <button type="button" data-action="replace-all">Replace all</button>
+    <button type="button" class="find-goto" data-action="find-open-region" hidden>Open</button>
     <button type="button" data-action="find-close" aria-label="Close">✕</button>`;
   const input = query<HTMLInputElement>("[data-find-input]", bar);
   if (input) {
@@ -128,11 +165,36 @@ function buildFindBar(bar: HTMLElement): void {
 }
 
 function highlightMatch(): void {
-  if (findResults.length === 0 || !state.editor) return;
-  const match = findResults[wrapIndex(findIndex, findResults.length)];
+  const match = currentMatch();
+  if (!match || !state.editor) return;
+  // Only a body match can be selected. A page-furniture or footnote match
+  // addresses a block the editor surface does not contain, and handing those
+  // positions to `setSelection` did nothing whatsoever — the counter moved and
+  // the caret did not, with no way to tell that from a match that happened to
+  // be off screen. The counter now says where such a match is and the bar
+  // grows a button that opens the only editor those regions have.
+  if (match.region !== "body") return;
   // Rust hands back a pair of editor positions, so a match that spans two
   // inline runs highlights as one selection with no arithmetic here.
   state.editor.setSelection({ anchor: match.start, focus: match.end });
+}
+
+/**
+ * Opens the editor for the region the current match is in.
+ *
+ * Every header/footer variant has the page-furniture dialog; a footnote has
+ * the footnote editor, which takes the note's id — and the note's id is
+ * exactly what Rust put in the match's `block_id`, because a footnote body is
+ * addressed by the note.
+ */
+export async function openCurrentFindMatchRegion(): Promise<void> {
+  const match = currentMatch();
+  if (!match || match.region === "body") return;
+  if (match.region === "footnote") {
+    await runAction("edit-footnote", { id: match.start.block_id });
+    return;
+  }
+  await runAction(`page-furniture:${match.region}`);
 }
 
 // ---- The four actions the dispatcher routes here -----------------------------

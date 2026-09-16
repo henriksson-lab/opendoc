@@ -8,6 +8,15 @@ const requirements = [
     fedora: "gtk3-devel",
   },
   {
+    // What `wry` actually links against. The two below ship in the same
+    // package but are separate .pc files, and a partial install shows up
+    // here rather than three minutes into `cargo build`.
+    pkg: "webkit2gtk-4.1",
+    pc: "webkit2gtk-4.1.pc",
+    debian: "libwebkit2gtk-4.1-dev",
+    fedora: "webkit2gtk4.1-devel",
+  },
+  {
     pkg: "javascriptcoregtk-4.1",
     pc: "javascriptcoregtk-4.1.pc",
     debian: "libwebkit2gtk-4.1-dev",

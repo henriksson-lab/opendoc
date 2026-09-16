@@ -141,6 +141,35 @@ A command dispatched before hydration finishes (possible only if a caller skips
 the `await`) is not overwritten by it: hydration skips keys the volume already
 holds, so a live write beats the durable value it was about to replace.
 
+### 6. One tab owns the store, and the others say they do not
+
+Two tabs over one origin are two Rust runtimes over one IndexedDB database.
+Each hydrates its own volume **once** (§5) and never sees the other's writes
+again, so both go on flushing divergent views of the same keys: the last write
+wins, neither tab notices, and the loser keeps a stale volume it will keep
+flushing. `recent/documents` is one key for the whole origin, so the loss is
+not theoretical — one tab's recents list replaces the other's outright.
+
+A **Web Lock** named `opendoc-volume` decides it. `storage_ready` takes the
+lock before hydrating; the tab that holds it owns the database, and a tab that
+does not is memory-only and **reports that**, which is the same answer §5
+already gives a runtime with no IndexedDB at all rather than a fourth
+mechanism. The browser releases the lock when the tab goes away, a crash
+included — which is why this is a lock and not a heartbeat key written into the
+very store being contended for.
+
+A waiting tab keeps mirroring rather than discarding, because its queue is
+exactly what gets written if the owner closes and it is promoted; a second,
+blocking lock request is what performs that promotion, hydrating under the same
+rule as §5 (a durable value must not overwrite a live one, so the waiting tab's
+own work outranks what the departed tab left). An unbounded queue nobody may
+ever drain is itself a failure, so it is capped, and hitting the cap is
+reported rather than absorbed.
+
+A runtime with no Web Locks at all (jsdom, older browsers) carries on as
+before — still right for a single tab — and says that a second tab would
+overwrite it.
+
 ## Consequences
 
 - Browser users get durable documents and crash recovery, through the same
@@ -159,14 +188,14 @@ holds, so a live write beats the durable value it was about to replace.
 
 ## Known limitations
 
-- **Two tabs over one origin will fight.** Each holds its own volume and
-  mirrors it to the same database, so the last flush wins and neither tab
-  notices. ADR 0005 already recorded "one session at a time"; this makes it a
-  storage-level statement as well. A fix means a leader election (Web Locks) or
-  a `versionchange`/`BroadcastChannel` protocol, and belongs with F2.
+- **A second tab is memory-only, for as long as the first one lives.** This is
+  the cost of §6 and it is the honest one, but it is still a cost: two windows
+  on two different documents is a reasonable thing to want, and only one of
+  them is being saved. Lifting it means per-document ownership rather than
+  per-origin, which is a much larger change.
 - **A crash loses the unflushed tail** — at most the mutations of the command
-  that was in flight. `storage_status()` exposes the watermark for anything
-  that wants to surface it; nothing does yet.
+  that was in flight. `storage_status()` exposes the watermark; `main.ts`
+  surfaces the *durability* half of that report, not yet the watermark itself.
 - **Nothing prompts for persistent storage.** A browser may evict IndexedDB for
   an origin under pressure. `navigator.storage.persist()` is the mechanism, and
   it needs a user-facing decision about when to ask, so it is deliberately not

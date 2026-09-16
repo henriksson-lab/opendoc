@@ -22,10 +22,14 @@ pub(crate) fn default_table_block() -> Block {
         kind: BlockKind::table(vec![
             opendoc_core::TableRow {
                 id: StableId::new("row"),
+                height: None,
+                header: false,
                 cells: vec![cell("A1"), cell("B1")],
             },
             opendoc_core::TableRow {
                 id: StableId::new("row"),
+                height: None,
+                header: false,
                 cells: vec![cell("A2"), cell("B2")],
             },
         ]),
@@ -34,11 +38,46 @@ pub(crate) fn default_table_block() -> Block {
     }
 }
 
+// Block-tree nodes touched by block lookups on this thread.
+//
+// The cost this counts is the one that used to be quadratic: searching the
+// tree for a block by id visits every block it passes, and callers were doing
+// it inside loops over a *selection*, so the search ran once per selected
+// block. Tests read the counter around an edit and check that it grows
+// linearly with the document, which a per-selected-block rescan cannot do.
+// Thread-local because the test harness runs tests in parallel threads in one
+// process.
+#[cfg(test)]
+thread_local! {
+    static BLOCK_LOOKUP_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+#[inline]
+pub(crate) fn record_block_lookup_visits(count: usize) {
+    BLOCK_LOOKUP_VISITS.with(|visits| visits.set(visits.get() + count));
+}
+
+#[cfg(not(test))]
+#[inline]
+pub(crate) fn record_block_lookup_visits(_count: usize) {}
+
+/// Run `body`, returning its value and the number of block-tree nodes that
+/// block lookups visited while it ran.
+#[cfg(test)]
+pub(crate) fn measure_block_lookup_visits<T>(body: impl FnOnce() -> T) -> (T, usize) {
+    let before = BLOCK_LOOKUP_VISITS.with(|visits| visits.get());
+    let value = body();
+    let after = BLOCK_LOOKUP_VISITS.with(|visits| visits.get());
+    (value, after - before)
+}
+
 pub(crate) fn find_block_in_blocks<'a>(
     blocks: &'a [Block],
     block_id_to_find: &StableId,
 ) -> Option<&'a Block> {
     for block in blocks {
+        record_block_lookup_visits(1);
         if &block.id == block_id_to_find {
             return Some(block);
         }
@@ -197,7 +236,13 @@ pub(crate) fn block_tree_contains_id(blocks: &[Block], block_id_to_find: &Stable
 
 /// The sibling slice that directly contains `block_id`, plus its index in it.
 /// Blocks nested in table cells live in their cell's slice, not the document's.
-fn sibling_slice<'a>(blocks: &'a [Block], block_id: &StableId) -> Option<(&'a [Block], usize)> {
+/// The direct sibling container of a block, whether that is the document body
+/// or a table cell. Structural editing must use this rather than assuming a
+/// top-level block index.
+pub(crate) fn sibling_slice<'a>(
+    blocks: &'a [Block],
+    block_id: &StableId,
+) -> Option<(&'a [Block], usize)> {
     if let Some(index) = blocks.iter().position(|block| &block.id == block_id) {
         return Some((blocks, index));
     }

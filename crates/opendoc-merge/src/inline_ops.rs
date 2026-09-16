@@ -3,7 +3,7 @@
 use crate::blocks::{block_exists, find_block_mut};
 use crate::inline_edit::delete_inline;
 use crate::marks::editable_inline_ids;
-use opendoc_core::{Anchor, Block, BlockKind, Document, Inline, StableId};
+use opendoc_core::{Anchor, Block, BlockKind, Document, Inline, InsertPosition, StableId};
 
 pub(crate) fn insert_inlines_after_anchor(
     document: &mut Document,
@@ -31,6 +31,7 @@ pub(crate) fn insert_inlines_after_anchor(
             append_inlines(&mut block.content, content);
             AnchorInsertResult::Applied
         }
+        Anchor::Orphaned { .. } => AnchorInsertResult::Missing,
         Anchor::Document => {
             if insert_inlines_at_document_end(document, content) {
                 AnchorInsertResult::Applied
@@ -61,7 +62,7 @@ pub(crate) fn insert_inlines_after_inline_id(
     let mut after = Some(target_inline_id.clone());
     for inline in content {
         let inserted_id = inline_id(&inline).clone();
-        insert_inline(target_content, after, inline);
+        insert_inline(target_content, InsertPosition::after_or_last(after), inline);
         after = Some(inserted_id);
     }
     true
@@ -82,7 +83,7 @@ pub(crate) fn append_inlines(target: &mut Vec<Inline>, content: Vec<Inline>) {
     let mut after = target.last().map(|inline| inline_id(inline).clone());
     for inline in content {
         let inserted_id = inline_id(&inline).clone();
-        insert_inline(target, after, inline);
+        insert_inline(target, InsertPosition::after_or_last(after), inline);
         after = Some(inserted_id);
     }
 }
@@ -148,26 +149,23 @@ pub(crate) fn delete_inline_range(
     }
 }
 
+/// Adds an inline at `position`, answering whether the anchor had gone
+/// missing. Only an anchored insert can degrade; `First` and `Last` name no
+/// sibling that could have been deleted.
 pub(crate) fn insert_inline(
     content: &mut Vec<Inline>,
-    after: Option<StableId>,
+    position: InsertPosition,
     inline: Inline,
 ) -> bool {
     let new_inline_id = inline_id(&inline).clone();
     if content.iter().any(|item| inline_id(item) == &new_inline_id) {
         return false;
     }
-    let mut anchor_degraded = false;
-    let insert_at = match after {
-        Some(target) => match content.iter().position(|item| inline_id(item) == &target) {
-            Some(index) => index + 1,
-            None => {
-                anchor_degraded = true;
-                content.len()
-            }
-        },
-        None => content.len(),
-    };
+    let anchor_index = position
+        .anchor()
+        .map(|target| content.iter().position(|item| inline_id(item) == target));
+    let anchor_degraded = matches!(anchor_index, Some(None));
+    let insert_at = position.index(content.len(), anchor_index.flatten());
     content.insert(insert_at, inline);
     anchor_degraded
 }
@@ -184,7 +182,7 @@ pub(crate) fn move_inline_to_block(
     document: &mut Document,
     inline_id_to_move: &StableId,
     target_block_id: &StableId,
-    after: Option<StableId>,
+    position: InsertPosition,
 ) -> InlineMoveResult {
     if !block_exists(&document.blocks, target_block_id) {
         return InlineMoveResult::MissingBlock;
@@ -195,7 +193,7 @@ pub(crate) fn move_inline_to_block(
     let Some(target) = find_block_mut(&mut document.blocks, target_block_id) else {
         return InlineMoveResult::MissingBlock;
     };
-    if insert_inline(&mut target.content, after, inline) {
+    if insert_inline(&mut target.content, position, inline) {
         InlineMoveResult::AnchorDegraded
     } else {
         InlineMoveResult::Applied
@@ -231,6 +229,10 @@ pub(crate) fn inline_id(inline: &Inline) -> &StableId {
         | Inline::Citation { id, .. }
         | Inline::FootnoteRef { id, .. }
         | Inline::Mention { id, .. }
+        | Inline::GooglePersonChip { id, .. }
+        | Inline::GoogleRichLinkChip { id, .. }
+        | Inline::Dropdown { id, .. }
+        | Inline::DateChip { id, .. }
         | Inline::Equation { id, .. }
         | Inline::PageNumber { id, .. } => id,
     }

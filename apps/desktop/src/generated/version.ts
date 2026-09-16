@@ -28,6 +28,17 @@ export type AppVersionPreview = {
   manifest: string;
   read_only: boolean;
   document: AppDocument;
+  /** One line per top-level block, already reduced to a kind label and the
+   * text that block says — which of content / equation source / alt text
+   * stands in for a block is Rust's rule, not the panel's. */
+  blocks: AppVersionPreviewBlock[];
+};
+
+export type AppVersionPreviewBlock = {
+  /** "paragraph", "heading 2", "table (3 rows)", … */
+  kind: string;
+  /** What the block says, capped to a preview-sized excerpt. */
+  text: string;
 };
 
 export type AppVersionDiffEntry = {

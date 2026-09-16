@@ -15,9 +15,24 @@ pub struct CitationDatabase {
 }
 
 impl Default for CitationDatabase {
+    /// `apa`, not `apa-7th`.
+    ///
+    /// `apa-7th` was never a CSL style: it was a name OpenDoc's own
+    /// lightweight renderer understood, and `opendoc_citations::resolve_style_name`
+    /// has never resolved it. While it was exempt from
+    /// `citation_support_warnings` that was invisible; once the exemption was
+    /// removed — correctly, because the exemption meant the commonest
+    /// database in the product was the one nobody was ever told about — every
+    /// new document tripped `citation-style-not-bundled` on export, saying
+    /// its citations had been formatted by the built-in renderer instead.
+    ///
+    /// They had been, and they no longer are: `apa` is one of the eight
+    /// bundled CSL styles, so the default document now renders through the
+    /// CSL engine and reports nothing. The warning was right; the default was
+    /// wrong.
     fn default() -> Self {
         Self {
-            style: "apa-7th".to_string(),
+            style: "apa".to_string(),
             locale: "en-US".to_string(),
             references: Vec::new(),
             citations: Vec::new(),

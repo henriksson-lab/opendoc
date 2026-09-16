@@ -1,3 +1,4 @@
+use crate::keys::blob_signature_path;
 use crate::local_store::process_tag;
 use crate::pack::{decode_pack_index, encode_pack_index};
 use crate::*;
@@ -613,4 +614,82 @@ fn local_store_rejects_pack_index_that_targets_different_pack() {
             if message.contains("duplicate pack index entry hash")
     ));
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn the_object_store_layout_is_the_literal_set_of_paths_the_format_promises() {
+    // Every path below is written out by hand from the layout the repository
+    // format documents, against a hash whose digest is spelled in the source.
+    // Nothing here calls the function it is checking a second time, so a
+    // change to the sharding, the suffix or the directory — any of which
+    // orphans every sidecar already written — fails here rather than being
+    // restated as the expected value. PLAN88 §7.
+    let digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let object = HashRef::parse(&format!("sha256:{digest}")).unwrap();
+
+    assert_eq!(
+        ObjectStoreLayout::version_label_key(&object),
+        "objects/sha256/01/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.label"
+    );
+    assert_eq!(
+        blob_signature_path(&object),
+        "objects/sha256/01/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.sig"
+    );
+    assert_eq!(
+        ObjectStoreLayout::tombstone_key(&object),
+        "archive/tombstones/sha256/01/\
+         0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.tombstone"
+    );
+    assert_eq!(
+        ObjectStoreLayout::uuid_lookup_key("document-uuid").unwrap(),
+        "indexes/by-uuid/do/document-uuid.idx"
+    );
+
+    assert_eq!(
+        ObjectStoreLayout::version_coverage_key(&object),
+        "objects/sha256/01/\
+         0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.coverage"
+    );
+    // The signer is part of the key, so two signers do not overwrite each
+    // other. The digest below is `sha256("ssh-ed25519 AAAA")`, computed
+    // outside this crate.
+    assert_eq!(
+        ObjectStoreLayout::version_signature_key(&object, "ssh-ed25519 AAAA").unwrap(),
+        "signatures/versions/sha256/01/\
+         0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/\
+         9de8a23119db6492ef40542eb343c0d884c627f46fbd999bf4d9c5f884f905cd.vsig"
+    );
+    assert_ne!(
+        ObjectStoreLayout::version_signature_key(&object, "ssh-ed25519 AAAA").unwrap(),
+        ObjectStoreLayout::version_signature_key(&object, "ssh-ed25519 BBBB").unwrap()
+    );
+    assert!(ObjectStoreLayout::version_signature_key(&object, "  ").is_err());
+
+    // The three sidecars share a shard directory with the object they name and
+    // are told apart only by their suffix, so two of them must never collide.
+    let label = ObjectStoreLayout::version_label_key(&object);
+    let signature = blob_signature_path(&object);
+    let coverage = ObjectStoreLayout::version_coverage_key(&object);
+    assert_ne!(label, signature);
+    assert_ne!(label, coverage);
+    assert_ne!(signature, coverage);
+    assert_eq!(
+        label.trim_end_matches(".label"),
+        signature.trim_end_matches(".sig"),
+        "the label and signature sidecars stopped sharing a shard"
+    );
+    assert_eq!(
+        label.trim_end_matches(".label"),
+        coverage.trim_end_matches(".coverage"),
+        "the coverage sidecar stopped sharing a shard with the manifest it names"
+    );
+
+    // A different digest goes to a different shard: the prefix is the first
+    // two characters of *this* digest, not a constant.
+    let other = HashRef::parse(&format!("sha256:fe{}", &digest[2..])).unwrap();
+    assert!(
+        ObjectStoreLayout::version_label_key(&other).starts_with("objects/sha256/fe/"),
+        "{}",
+        ObjectStoreLayout::version_label_key(&other)
+    );
 }

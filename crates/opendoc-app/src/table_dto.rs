@@ -7,6 +7,18 @@ use super::*;
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AppTable {
     pub columns: Vec<AppTableColumn>,
+    /// The border inherited by unstated cell edges. It is absent when the
+    /// document deliberately says nothing about a table-wide rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub border: Option<AppCellBorder>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alignment: Option<String>,
+    /// Explicit row heights, in twips, parallel with `AppBlock::row_ids`.
+    /// Absent entries are content-driven.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub row_heights_twips: Vec<Option<i32>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub row_headers: Vec<bool>,
     pub cells: Vec<Vec<AppTableCell>>,
 }
 
@@ -14,7 +26,7 @@ pub struct AppTable {
 pub struct AppTableColumn {
     pub id: String,
     /// Absent means auto: the view shares out what the sized columns leave.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub width_twips: Option<i32>,
 }
 
@@ -26,7 +38,7 @@ pub struct AppTableCell {
     /// from the spans in Rust, so the view never has to work the geometry
     /// out for itself.
     pub covered: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "crate::is_default")]
     pub properties: AppTableCellProperties,
 }
 
@@ -45,26 +57,29 @@ impl Default for AppTableCell {
 /// null/absent field means the cell inherits that property.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AppTableCellProperties {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub border_top: Option<AppCellBorder>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub border_bottom: Option<AppCellBorder>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub border_start: Option<AppCellBorder>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub border_end: Option<AppCellBorder>,
     /// `"top"`, `"middle"` or `"bottom"`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vertical_alignment: Option<String>,
-    #[serde(default)]
+    /// Explicit semantic row-header state; absent means no authored role.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_header: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub padding_top_twips: Option<i32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub padding_bottom_twips: Option<i32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub padding_start_twips: Option<i32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub padding_end_twips: Option<i32>,
 }
 
@@ -77,7 +92,7 @@ pub struct AppCellBorder {
 }
 
 impl AppCellBorder {
-    fn from_core(border: opendoc_core::CellBorder) -> Self {
+    pub(crate) fn from_core(border: opendoc_core::CellBorder) -> Self {
         Self {
             style: border.style().as_str().to_string(),
             twips: border.width().twips(),
@@ -85,7 +100,7 @@ impl AppCellBorder {
         }
     }
 
-    fn to_core(&self) -> Result<opendoc_core::CellBorder, AppApiError> {
+    pub(crate) fn to_core(&self) -> Result<opendoc_core::CellBorder, AppApiError> {
         let style = opendoc_core::BorderStyle::parse(self.style.trim())
             .map_err(|err| AppApiError::Format(err.to_string()))?;
         let width = opendoc_core::Length::from_twips(self.twips)
@@ -108,6 +123,7 @@ impl AppTableCellProperties {
             vertical_alignment: properties
                 .vertical_alignment
                 .map(|alignment| alignment.as_str().to_string()),
+            row_header: properties.row_header,
             padding_top_twips: properties.padding_top.map(|length| length.twips()),
             padding_bottom_twips: properties.padding_bottom.map(|length| length.twips()),
             padding_start_twips: properties.padding_start.map(|length| length.twips()),
@@ -151,6 +167,7 @@ impl AppTableCellProperties {
                         .map_err(|err| AppApiError::Format(err.to_string()))
                 })
                 .transpose()?,
+            row_header: self.row_header,
             padding_top: length(self.padding_top_twips)?,
             padding_bottom: length(self.padding_bottom_twips)?,
             padding_start: length(self.padding_start_twips)?,

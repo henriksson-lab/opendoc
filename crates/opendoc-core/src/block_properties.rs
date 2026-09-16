@@ -1,6 +1,7 @@
 //! The typed block property vocabulary and its validated property map.
 
 use crate::measure::{Alignment, Length, LineSpacing, TextDirection};
+use crate::table::{CellBorder, Color};
 use crate::warning::ModelError;
 use serde::{Deserialize, Serialize};
 
@@ -18,10 +19,17 @@ pub enum BlockPropertyKey {
     SpaceBefore,
     SpaceAfter,
     Direction,
+    /// Prevent a page break between this block and its following sibling.
+    KeepWithNext,
+    /// Flat paragraph background colour (no pattern or theme indirection).
+    Background,
+    /// A uniform frame around the paragraph's border box. Per-edge and
+    /// between-paragraph rules deliberately stay outside this bounded model.
+    Border,
 }
 
 impl BlockPropertyKey {
-    pub const ALL: [BlockPropertyKey; 8] = [
+    pub const ALL: [BlockPropertyKey; 11] = [
         BlockPropertyKey::Alignment,
         BlockPropertyKey::IndentStart,
         BlockPropertyKey::IndentEnd,
@@ -30,6 +38,9 @@ impl BlockPropertyKey {
         BlockPropertyKey::SpaceBefore,
         BlockPropertyKey::SpaceAfter,
         BlockPropertyKey::Direction,
+        BlockPropertyKey::KeepWithNext,
+        BlockPropertyKey::Background,
+        BlockPropertyKey::Border,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -42,6 +53,9 @@ impl BlockPropertyKey {
             BlockPropertyKey::SpaceBefore => "space-before",
             BlockPropertyKey::SpaceAfter => "space-after",
             BlockPropertyKey::Direction => "direction",
+            BlockPropertyKey::KeepWithNext => "keep-with-next",
+            BlockPropertyKey::Background => "background",
+            BlockPropertyKey::Border => "border",
         }
     }
 
@@ -75,6 +89,17 @@ pub enum BlockProperty {
     /// Space below the block.
     SpaceAfter(Length),
     Direction(TextDirection),
+    /// Keep this block and its next sibling on one page when they fit there.
+    /// `false` is deliberately representable: it overrides a style/imported
+    /// default, while clearing the key returns to inheriting.
+    KeepWithNext(bool),
+    /// Flat paragraph background. Patterned source shading is deliberately
+    /// not collapsed into a colour because that loses a material fact.
+    Background(Color),
+    /// One border applied uniformly to all four paragraph edges. This is not
+    /// a table-cell border: it merely reuses the validated line value so the
+    /// two domains cannot disagree about colours, widths or line styles.
+    Border(CellBorder),
 }
 
 impl BlockProperty {
@@ -88,6 +113,9 @@ impl BlockProperty {
             BlockProperty::SpaceBefore(_) => BlockPropertyKey::SpaceBefore,
             BlockProperty::SpaceAfter(_) => BlockPropertyKey::SpaceAfter,
             BlockProperty::Direction(_) => BlockPropertyKey::Direction,
+            BlockProperty::KeepWithNext(_) => BlockPropertyKey::KeepWithNext,
+            BlockProperty::Background(_) => BlockPropertyKey::Background,
+            BlockProperty::Border(_) => BlockPropertyKey::Border,
         }
     }
 
@@ -95,7 +123,11 @@ impl BlockProperty {
     /// but a deserialized payload has not been through them.
     pub fn validate(&self) -> Result<(), ModelError> {
         match self {
-            BlockProperty::Alignment(_) | BlockProperty::Direction(_) => Ok(()),
+            BlockProperty::Alignment(_)
+            | BlockProperty::Direction(_)
+            | BlockProperty::KeepWithNext(_) => Ok(()),
+            BlockProperty::Background(_) => Ok(()),
+            BlockProperty::Border(border) => border.validate(),
             BlockProperty::IndentStart(length) => length.validate("indent start"),
             BlockProperty::IndentEnd(length) => length.validate("indent end"),
             BlockProperty::IndentFirstLine(length) => length.validate("first-line indent"),
@@ -145,6 +177,12 @@ pub struct BlockProperties {
     pub space_after: Option<Length>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direction: Option<TextDirection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_with_next: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<Color>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub border: Option<CellBorder>,
 }
 
 impl BlockProperties {
@@ -164,6 +202,9 @@ impl BlockProperties {
             BlockPropertyKey::SpaceBefore => self.space_before.map(BlockProperty::SpaceBefore),
             BlockPropertyKey::SpaceAfter => self.space_after.map(BlockProperty::SpaceAfter),
             BlockPropertyKey::Direction => self.direction.map(BlockProperty::Direction),
+            BlockPropertyKey::KeepWithNext => self.keep_with_next.map(BlockProperty::KeepWithNext),
+            BlockPropertyKey::Background => self.background.map(BlockProperty::Background),
+            BlockPropertyKey::Border => self.border.map(BlockProperty::Border),
         }
     }
 
@@ -179,6 +220,9 @@ impl BlockProperties {
             BlockProperty::SpaceBefore(value) => self.space_before = Some(value),
             BlockProperty::SpaceAfter(value) => self.space_after = Some(value),
             BlockProperty::Direction(value) => self.direction = Some(value),
+            BlockProperty::KeepWithNext(value) => self.keep_with_next = Some(value),
+            BlockProperty::Background(value) => self.background = Some(value),
+            BlockProperty::Border(value) => self.border = Some(value),
         }
         previous
     }
@@ -195,6 +239,9 @@ impl BlockProperties {
             BlockPropertyKey::SpaceBefore => self.space_before = None,
             BlockPropertyKey::SpaceAfter => self.space_after = None,
             BlockPropertyKey::Direction => self.direction = None,
+            BlockPropertyKey::KeepWithNext => self.keep_with_next = None,
+            BlockPropertyKey::Background => self.background = None,
+            BlockPropertyKey::Border => self.border = None,
         }
         previous
     }

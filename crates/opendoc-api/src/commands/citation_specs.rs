@@ -70,6 +70,14 @@ pub(crate) const SPECS: &[CommandSpec] = &[
 
 pub(crate) const BIBLIOGRAPHY: &[CommandSpec] = &[
     command!(
+        "import_bibtex",
+        AppDocument,
+        [arg!("source", String)],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
         "update_bibliography_reference",
         AppDocument,
         [

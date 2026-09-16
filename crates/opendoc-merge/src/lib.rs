@@ -17,6 +17,8 @@ mod citations;
 mod footnotes;
 mod inline_edit;
 mod inline_ops;
+pub mod instrument;
+mod inverse;
 mod marks;
 mod merge;
 mod operation;
@@ -27,8 +29,15 @@ mod validate;
 
 pub use causal::{ActorId, CausalContext, OperationId, VectorClock};
 pub use inline_edit::byte_index_for_char_offset;
-pub use merge::{merge_operations, MergeResult};
+pub use inverse::{
+    discarded_by_a_later_whole_run_write, invert_operation, invert_text_operations, text_run_of,
+    Inversion,
+};
+pub use merge::{
+    batch_inverse_capture_order, merge_operations, merge_operations_into, MergeResult,
+};
 pub use operation::{BlockTextStyle, Operation, OperationKind};
+pub use suggestions::{preview_suggestion_resolution, SuggestionPreviewResolution};
 
 #[cfg(test)]
 mod test_support;
@@ -46,6 +55,10 @@ mod comment_tests;
 #[cfg(test)]
 mod inline_edit_tests;
 #[cfg(test)]
+mod insert_position_fuzz_tests;
+#[cfg(test)]
+mod inverse_tests;
+#[cfg(test)]
 mod mark_range_tests;
 #[cfg(test)]
 mod operation_tests;
@@ -55,6 +68,8 @@ mod replay_fuzz_tests;
 mod structured_inline_tests;
 #[cfg(test)]
 mod suggestion_tests;
+#[cfg(test)]
+mod table_fuzz_tests;
 #[cfg(test)]
 mod table_grid_tests;
 #[cfg(test)]

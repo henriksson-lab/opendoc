@@ -8,7 +8,7 @@ export type AppSpreadsheetWorkbook = {
   named_ranges: AppNamedRange[];
   dependency_graph: AppCellDependency[];
   sheets: AppSheet[];
-  evaluation_context?: AppSpreadsheetEvaluationContext | null;
+  evaluation_context?: AppSpreadsheetEvaluationContext;
   evaluation_warnings: AppWarning[];
 };
 
@@ -52,7 +52,6 @@ export type AppCellDependency = {
   address: string;
   dependencies: string[];
   dependents: string[];
-  invalidation_order: string[];
 };
 
 export type AppSheet = {
@@ -68,12 +67,19 @@ export type AppSheet = {
   rows: string[];
   columns: string[];
   cells: AppCell[];
+  images: AppSheetImage[];
   row_heights: Record<string, number>;
   column_widths: Record<string, number>;
   hidden_rows: string[];
   hidden_columns: string[];
   hidden: boolean;
-  tab_color?: string | null;
+  tab_color?: string;
+  print_settings: AppSheetPrintSettings;
+};
+
+export type AppSheetPrintSettings = {
+  print_area?: string;
+  orientation: "portrait" | "landscape";
 };
 
 export type AppSheetAxis = {
@@ -84,6 +90,19 @@ export type AppSheetAxis = {
 export type AppSheetMerge = {
   id: string;
   range: string;
+};
+
+export type AppSheetImage = {
+  id: string;
+  blob_hash: string;
+  start_column: string;
+  start_row: string;
+  start_offset_x_px: number;
+  start_offset_y_px: number;
+  end_column: string;
+  end_row: string;
+  end_offset_x_px: number;
+  end_offset_y_px: number;
 };
 
 export type AppSheetFilter = {
@@ -122,7 +141,7 @@ export type AppCell = {
   display_value: string;
   dependencies: string[];
   comments: AppCellComment[];
-  spill_source?: string | null;
+  spill_source?: string;
 };
 
 export type AppCellValidation = {
@@ -151,12 +170,14 @@ export type AppCellFormat = {
   text_color: string | null;
   background_color: string | null;
   horizontal_align: string | null;
+  wrap_strategy: string | null;
+  vertical_align: string | null;
   number_format: string | null;
 };
 
 export type AppDeletedRowPayload = {
   row_axis: AppSheetAxis;
-  row_height?: number | null;
+  row_height?: number;
   cells: AppCell[];
   merges: AppSheetMerge[];
   filters: AppSheetFilter[];
@@ -166,7 +187,7 @@ export type AppDeletedRowPayload = {
 
 export type AppDeletedColumnPayload = {
   column_axis: AppSheetAxis;
-  column_width?: number | null;
+  column_width?: number;
   cells: AppCell[];
   merges: AppSheetMerge[];
   filters: AppSheetFilter[];

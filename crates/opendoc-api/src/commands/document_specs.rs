@@ -28,6 +28,26 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         Some("write")
     ),
     command!(
+        "set_bookmark",
+        AppDocument,
+        [
+            arg!("bookmarkId", NullableString),
+            arg!("name", String),
+            arg!("blockId", String)
+        ],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
+        "delete_bookmark",
+        AppDocument,
+        [arg!("bookmarkId", String)],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
         "add_paragraph",
         AppDocument,
         [arg!("text", String)],
@@ -75,6 +95,18 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         "delete_block",
         AppDocument,
         [arg!("blockId", String)],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
+        "move_block",
+        AppDocument,
+        [
+            arg!("blockId", String),
+            arg!("anchorBlockId", String),
+            arg!("placement", String)
+        ],
         true,
         false,
         Some("write")
@@ -159,8 +191,27 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         false,
         Some("write")
     ),
+    // The rich route consumes an allowlisted HTML fragment and builds model
+    // blocks. It is intentionally not the legacy text projection: opening
+    // the plain dialog can therefore never flatten imported furniture.
+    command!(
+        "set_page_furniture_html",
+        AppDocument,
+        [arg!("slot", String), arg!("html", String)],
+        true,
+        false,
+        Some("write")
+    ),
     command!(
         "clear_page_furniture",
+        AppDocument,
+        [arg!("slot", String)],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
+        "clear_page_furniture_override",
         AppDocument,
         [arg!("slot", String)],
         true,

@@ -80,6 +80,7 @@ impl CausalContext {
     /// seen, which is the standard Lamport rule and gives the strict
     /// monotonicity `causal_order` and the text CRDT rely on.
     pub fn observing<'a>(applied: impl IntoIterator<Item = &'a Operation>) -> Self {
+        crate::instrument::count_causal_context_built();
         let mut context = Self::default();
         for operation in applied {
             context.observed.observe(&operation.id);

@@ -21,22 +21,36 @@ pub(super) const DROPPED_DRAWING: &str = "docx-dropped-drawing";
 pub(super) const DROPPED_TEXT_BOX: &str = "docx-dropped-text-box";
 pub(super) const DROPPED_NESTED_IMAGE: &str = "docx-dropped-nested-image";
 pub(super) const DROPPED_NESTED_REVISION: &str = "docx-dropped-nested-revision";
-pub(super) const DROPPED_CELL_SPAN: &str = "docx-dropped-cell-span";
+pub(super) const DROPPED_CELL_PROPERTY: &str = "docx-dropped-cell-property";
+pub(super) const APPROXIMATED_CELL_BORDER: &str = "docx-approximated-cell-border";
+pub(super) const DROPPED_TABLE_BORDER: &str = "docx-dropped-table-border";
+pub(super) const DROPPED_TABLE_STYLE_BANDING: &str = "docx-dropped-table-style-banding";
+pub(super) const CLAMPED_COLUMN_WIDTH: &str = "docx-clamped-table-column-width";
+pub(super) const TABLE_MERGE_REPAIRED: &str = "docx-table-merge-repaired";
 pub(super) const DROPPED_ALT_CHUNK: &str = "docx-dropped-alt-chunk";
 pub(super) const NESTED_TABLE: &str = "docx-nested-table";
+pub(super) const TABLE_NESTING_LIMIT: &str = "docx-table-nesting-limit";
 pub(super) const SPLIT_INLINE_IMAGE: &str = "docx-split-inline-image";
 pub(super) const SPLIT_PAGE_BREAK: &str = "docx-split-page-break";
-pub(super) const TITLE_STYLE_AS_HEADING: &str = "docx-title-style-as-heading";
 pub(super) const UNKNOWN_LIST_DEFINITION: &str = "docx-unknown-list-definition";
 pub(super) const MISSING_FOOTNOTE: &str = "docx-missing-footnote";
 pub(super) const EMPTY_FOOTNOTE: &str = "docx-empty-footnote";
-pub(super) const ENDNOTES_AS_FOOTNOTES: &str = "docx-endnotes-as-footnotes";
 pub(super) const EMPTY_COMMENT: &str = "docx-empty-comment";
 pub(super) const COMMENT_ANCHOR_DEGRADED: &str = "docx-comment-anchor-degraded";
 pub(super) const MISSING_IMAGE_BLOB: &str = "missing-docx-image-blob";
+pub(super) const DROPPED_IMAGE_OPACITY: &str = "docx-dropped-image-opacity";
+pub(super) const DROPPED_IMAGE_CROP: &str = "docx-dropped-image-crop";
+pub(super) const DROPPED_IMAGE_BORDER: &str = "docx-dropped-image-border";
+pub(super) const DROPPED_POSITIONED_IMAGE: &str = "docx-dropped-positioned-image";
+pub(super) const DROPPED_BOOKMARK_RANGE: &str = "docx-bookmark-range-unrepresentable";
+pub(super) const DROPPED_BOOKMARK_NAME: &str = "docx-bookmark-name-unrepresentable";
+pub(super) const DROPPED_BOOKMARK_DUPLICATE: &str = "docx-bookmark-duplicate-name";
 
 pub(super) fn dropped_message(code: &str) -> &'static str {
     match code {
+        TABLE_NESTING_LIMIT => {
+            "DOCX tables nested past the depth OpenDoc represents were flattened; their cell contents were kept as blocks"
+        }
         DROPPED_ALIGNMENT => {
             "DOCX paragraph alignment values (w:jc) that OpenDoc cannot represent were dropped"
         }
@@ -83,10 +97,27 @@ pub(super) fn dropped_message(code: &str) -> &'static str {
         DROPPED_NESTED_REVISION => {
             "DOCX tracked changes inside footnotes or comments were flattened into plain text"
         }
-        DROPPED_CELL_SPAN => "DOCX merged table cells (gridSpan/vMerge) were imported unmerged",
+        DROPPED_CELL_PROPERTY => {
+            "DOCX table cell properties (w:tcPr) that OpenDoc cannot represent were dropped"
+        }
+        APPROXIMATED_CELL_BORDER => {
+            "DOCX table cell borders were approximated: an artistic border style became a plain line, or a thickness was rounded to the nearest twip"
+        }
+        DROPPED_TABLE_BORDER => {
+            "DOCX table borders (w:tblBorders) with no per-cell equivalent (the diagonals w:tl2br and w:tr2bl) were dropped"
+        }
+        DROPPED_TABLE_STYLE_BANDING => {
+            "DOCX table styles' conditional formatting (w:tblStylePr: banded rows and columns, first and last row, first and last column) was not applied; only the style's plain table and cell formatting was read"
+        }
+        CLAMPED_COLUMN_WIDTH => {
+            "DOCX table column widths (w:gridCol) outside what OpenDoc can represent were clamped into range"
+        }
+        TABLE_MERGE_REPAIRED => {
+            "DOCX vertically merged table cells (w:vMerge) whose continuation had no restart above it were imported as ordinary cells, keeping their content"
+        }
         DROPPED_ALT_CHUNK => "DOCX embedded alternate content chunks (w:altChunk) were dropped",
         NESTED_TABLE => {
-            "DOCX nested tables were imported as tables inside table cells; Google Docs export cannot represent them"
+            "DOCX nested tables were imported as tables inside table cells"
         }
         SPLIT_INLINE_IMAGE => {
             "DOCX inline images mixed with text were imported as standalone image blocks, splitting the paragraph"
@@ -94,18 +125,35 @@ pub(super) fn dropped_message(code: &str) -> &'static str {
         SPLIT_PAGE_BREAK => {
             "DOCX page breaks inside paragraphs were imported as standalone page break blocks, splitting the paragraph"
         }
-        TITLE_STYLE_AS_HEADING => {
-            "DOCX Title and Subtitle styled paragraphs were imported as level 1 and level 2 headings"
-        }
         UNKNOWN_LIST_DEFINITION => {
             "DOCX list paragraphs referenced numbering definitions that could not be resolved; imported as bullet items"
         }
         MISSING_FOOTNOTE => "DOCX footnote or endnote references without a definition were dropped",
+        DROPPED_IMAGE_OPACITY => {
+            "DOCX image opacity values outside DrawingML's 0..=100000 range, or without an amount, were dropped"
+        }
+        DROPPED_IMAGE_CROP => {
+            "DOCX image crop values that were malformed or left no visible source pixels were dropped"
+        }
+        DROPPED_IMAGE_BORDER => {
+            "DOCX image borders outside OpenDoc's solid/dashed/dotted sRGB subset were dropped"
+        }
         EMPTY_FOOTNOTE => "DOCX footnotes or endnotes with an empty body were dropped",
-        ENDNOTES_AS_FOOTNOTES => "DOCX endnotes were imported as footnotes",
         EMPTY_COMMENT => "DOCX comments with an empty body were dropped",
         COMMENT_ANCHOR_DEGRADED => {
             "DOCX comment ranges that did not cover inline text were anchored to the nearest block or the document"
+        }
+        DROPPED_POSITIONED_IMAGE => {
+            "DOCX positioned-image anchor geometry or layer is not representable and was imported as an in-flow image"
+        }
+        DROPPED_BOOKMARK_RANGE => {
+            "DOCX bookmark ranges or positions that could not map exactly to one imported text block were not imported"
+        }
+        DROPPED_BOOKMARK_NAME => {
+            "DOCX bookmark names outside OpenDoc's portable bookmark-name syntax were not imported"
+        }
+        DROPPED_BOOKMARK_DUPLICATE => {
+            "DOCX bookmarks whose names collide after import were not imported"
         }
         _ => "DOCX content was dropped",
     }

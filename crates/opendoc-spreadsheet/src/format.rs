@@ -130,6 +130,28 @@ impl CellFormat {
                 }
                 self.horizontal_align = value;
             }
+            "wrap_strategy" => {
+                let value = optional_format_value(value);
+                if let Some(value) = &value {
+                    if value != "wrap" {
+                        return Err(SpreadsheetError::Format(format!(
+                            "unsupported text wrap strategy {value}"
+                        )));
+                    }
+                }
+                self.wrap_strategy = value;
+            }
+            "vertical_align" => {
+                let value = optional_format_value(value);
+                if let Some(value) = &value {
+                    if !matches!(value.as_str(), "top" | "middle" | "bottom") {
+                        return Err(SpreadsheetError::Format(format!(
+                            "unsupported vertical alignment {value}"
+                        )));
+                    }
+                }
+                self.vertical_align = value;
+            }
             "number_format" => self.number_format = optional_format_value(value),
             _ => {
                 return Err(SpreadsheetError::Format(format!(
@@ -151,6 +173,20 @@ impl CellFormat {
             if !matches!(align.as_str(), "left" | "center" | "right") {
                 return Err(SpreadsheetError::Format(format!(
                     "unsupported horizontal alignment {align}"
+                )));
+            }
+        }
+        if let Some(strategy) = &self.wrap_strategy {
+            if strategy != "wrap" {
+                return Err(SpreadsheetError::Format(format!(
+                    "unsupported text wrap strategy {strategy}"
+                )));
+            }
+        }
+        if let Some(align) = &self.vertical_align {
+            if !matches!(align.as_str(), "top" | "middle" | "bottom") {
+                return Err(SpreadsheetError::Format(format!(
+                    "unsupported vertical alignment {align}"
                 )));
             }
         }
@@ -578,8 +614,27 @@ pub fn format_general(value: f64) -> String {
     }
     let digits = 10i32 - magnitude.log10().floor().max(0.0) as i32;
     let digits = digits.clamp(0, 10) as usize;
-    let rounded = format!("{value:.digits$}");
+    let rounded = format_decimals(value, digits);
     trim_trailing_zeros(&rounded)
+}
+
+/// Prints `value` with `decimals` fractional digits, rounding a half away
+/// from zero.
+///
+/// Rust's `{:.n}` rounds half to *even*, so `format!("{:.0}", 2.5)` is
+/// `"2"` and `format!("{:.0}", 3.5)` is `"4"`. Spreadsheets round a half
+/// away from zero without exception: `TEXT(2.5,"0")` is `"3"` and
+/// `DOLLAR(1234.5, 0)` is `"$1,235"`. Only an exact tie is nudged — every
+/// other value is handed to `{:.n}`, which rounds it correctly from the
+/// full binary value rather than from a lossy multiply.
+fn format_decimals(value: f64, decimals: usize) -> String {
+    let factor = 10f64.powi(decimals as i32);
+    let scaled = value * factor;
+    if scaled.is_finite() && factor.is_finite() && scaled.fract().abs() == 0.5 {
+        let rounded = scaled.round() / factor;
+        return format!("{rounded:.decimals$}");
+    }
+    format!("{value:.decimals$}")
 }
 
 fn trim_trailing_zeros(text: &str) -> String {
@@ -609,7 +664,7 @@ fn group_digits(digits: &str, locale: &Locale) -> String {
 
 /// Fixed-decimal formatting with optional grouping (`FIXED`, `DOLLAR`).
 pub fn format_fixed(value: f64, decimals: usize, commas: bool, locale: &Locale) -> String {
-    let rounded = format!("{:.decimals$}", value.abs());
+    let rounded = format_decimals(value.abs(), decimals);
     let (int_part, frac_part) = rounded.split_once('.').unwrap_or((&rounded, ""));
     let int_part = if commas {
         group_digits(int_part, locale)
@@ -780,7 +835,7 @@ fn format_number_section(value: f64, section: &NumberSection, locale: &Locale) -
             value.abs().log10().floor() as i32
         };
         let mantissa = value / 10f64.powi(exponent);
-        let mantissa = format!("{:.prec$}", mantissa, prec = section.frac_max);
+        let mantissa = format_decimals(mantissa, section.frac_max);
         let mantissa = if section.frac_min < section.frac_max {
             trim_to_min_decimals(&mantissa, section.frac_min)
         } else {
@@ -796,7 +851,7 @@ fn format_number_section(value: f64, section: &NumberSection, locale: &Locale) -
         ));
         return format!("{}{body}{}", section.prefix, section.suffix);
     }
-    let rounded = format!("{:.prec$}", value.abs(), prec = section.frac_max);
+    let rounded = format_decimals(value.abs(), section.frac_max);
     let (int_part, frac_part) = rounded.split_once('.').unwrap_or((&rounded, ""));
     let mut int_part = int_part.trim_start_matches('0').to_string();
     if int_part.len() < section.int_digits {

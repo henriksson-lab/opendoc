@@ -1,8 +1,4 @@
-import type {
-  OpenDocPermissionGrant,
-  OpenDocPresencePeer,
-  OpenDocRuntimeMode,
-} from "./generated/runtime";
+import type { OpenDocRuntimeMode } from "./generated/runtime";
 
 export type {
   AppArchiveTombstone,
@@ -32,6 +28,7 @@ export type {
   AppBibliographyReference,
   AppBlock,
   AppBlockProperties,
+  AppBodyFragment,
   AppCitationDatabase,
   AppCitationGroup,
   AppComment,
@@ -58,7 +55,8 @@ export type { AppExport, AppExportEncoding } from "./generated/export";
 export type { AppBlockPlacement, AppDocumentLayout } from "./generated/layout";
 export type {
   OpenDocAuthorizationDecision,
-  OpenDocPermissionGrant,
+  OpenDocAuthorizationSource,
+  OpenDocPermissionAuthority,
   OpenDocPresencePeer,
   OpenDocRelayOperation,
   OpenDocRuntimeLookupEntry,
@@ -66,8 +64,11 @@ export type {
   OpenDocRuntimeMode,
   OpenDocRuntimeProfile,
   OpenDocRuntimeSession,
+  OpenDocServiceRole,
+  OpenDocServiceSession,
   OpenDocShareInvite,
   OpenDocStorageBackend,
+  OpenDocSyncBatchOutcome,
   OpenDocSyncRelayResult,
 } from "./generated/runtime";
 export type {
@@ -100,14 +101,17 @@ export type {
   AppVersionView,
 } from "./generated/version";
 
+/// What the host tells the frontend about itself before anything is dispatched.
+///
+/// Capabilities only. There is deliberately no `permissions` and no `presence`
+/// here: permissions in a service runtime are the service's answers, which
+/// reach the app over its own transport, and presence is server state. A page
+/// that could declare either would be declaring its own access.
 export type OpenDocRuntimeConfig = {
   mode?: OpenDocRuntimeMode;
   label?: string;
-  permissionsEnabled?: boolean;
   signingEnabled?: boolean;
   subject?: string | null;
-  presence?: OpenDocPresencePeer[];
-  permissions?: OpenDocPermissionGrant[];
   defaultRepositoryRoot?: string;
   defaultFlatNamespace?: string;
   storageBackends?: string[];

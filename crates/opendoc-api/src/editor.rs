@@ -93,6 +93,39 @@ pub struct AppFindMatch {
     /// The matched text itself, so a caller can show it without re-reading
     /// the document (and so a regex match is inspectable).
     pub text: String,
+    /// Which part of the document the match is in. See [`AppFindRegion`].
+    pub region: AppFindRegion,
+}
+
+/// Where a match is, because `start` and `end` cannot say.
+///
+/// A search covers the header, the footer and the footnote bodies as well as
+/// the body — and those three are *not* in `document.blocks`, so their block
+/// ids are not in the editor's DOM either. A frontend that handed a header
+/// match's positions to `setSelection` did nothing at all, silently: the
+/// counter said "3 of 7" and pressing Next moved the number and not the
+/// caret. Naming the region is what lets a caller take the match somewhere
+/// the user can actually reach it — the header dialog, the footer dialog, the
+/// footnote editor — instead of pretending it selected something.
+///
+/// The footnote's own id is `start.block_id`, which is what
+/// `update_footnote_body` takes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AppFindRegion {
+    /// `document.blocks` — the only region the editor surface can select in.
+    Body,
+    Header,
+    Footer,
+    /// An explicit first-page header override, outside `document.blocks`.
+    FirstPageHeader,
+    /// An explicit first-page footer override, outside `document.blocks`.
+    FirstPageFooter,
+    /// An explicit even-page header override, outside `document.blocks`.
+    EvenPageHeader,
+    /// An explicit even-page footer override, outside `document.blocks`.
+    EvenPageFooter,
+    Footnote,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]

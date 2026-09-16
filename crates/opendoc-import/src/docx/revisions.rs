@@ -2,7 +2,7 @@
 
 use crate::docx::props::RunProps;
 use crate::xml::XmlElement;
-use opendoc_core::{BlockKind, BlockProperties, Inline, StableId};
+use opendoc_core::{BlockKind, BlockProperties, ImageLayout, Inline, StableId};
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct CommentRange {
@@ -81,6 +81,7 @@ pub(super) enum Segment {
     Image {
         rel_id: String,
         alt: Option<String>,
+        layout: ImageLayout,
     },
 }
 

@@ -38,7 +38,36 @@ impl std::fmt::Display for XmlError {
     }
 }
 
+/// Deepest element nesting this reader will build a tree for.
+///
+/// The parse loop is iterative, but the tree it builds is not: every walk over
+/// it — `collect_text`, `collect_descendants`, `strip_unfurnishable`,
+/// `docx::convert::walk_blocks` — recurses, and so does the derived `Drop` on
+/// [`XmlElement`]. A 1.6 KB `.docx` holding 40,000 nested elements used to
+/// abort the process with `fatal runtime error: stack overflow`, which is a
+/// `SIGABRT` no caller can catch and which takes the whole Tauri host with it.
+///
+/// Capping the *depth of the tree* fixes every one of those walks at once,
+/// which is why the limit lives here rather than in each of them. 256 is far
+/// past anything real: a WordprocessingML body nests three levels per nested
+/// table plus a dozen or so for a drawing, so this allows tables nested some
+/// seventy deep.
+pub(crate) const MAX_XML_DEPTH: usize = 256;
+
+/// Largest XML part this reader will accept.
+///
+/// The zip reader screens declared sizes before it inflates anything
+/// ([`crate::docx::package`]); this is the same ceiling for input that did not
+/// come through a zip at all.
+pub(crate) const MAX_XML_BYTES: usize = 64 * 1024 * 1024;
+
 pub(crate) fn parse_xml_bytes(bytes: &[u8]) -> Result<XmlElement, XmlError> {
+    if bytes.len() > MAX_XML_BYTES {
+        return Err(XmlError(format!(
+            "XML part is {} bytes, over the {MAX_XML_BYTES}-byte limit",
+            bytes.len()
+        )));
+    }
     let text = String::from_utf8_lossy(bytes);
     parse_xml(&text)
 }
@@ -53,7 +82,14 @@ pub(crate) fn parse_xml(text: &str) -> Result<XmlElement, XmlError> {
             .read_event()
             .map_err(|err| XmlError(format!("malformed XML: {err}")))?;
         match event {
-            Event::Start(start) => stack.push(element_from_start(&start)?),
+            Event::Start(start) => {
+                if stack.len() >= MAX_XML_DEPTH {
+                    return Err(XmlError(format!(
+                        "XML nests deeper than {MAX_XML_DEPTH} elements"
+                    )));
+                }
+                stack.push(element_from_start(&start)?)
+            }
             Event::Empty(start) => {
                 let element = element_from_start(&start)?;
                 attach(&mut stack, &mut root, element)?;

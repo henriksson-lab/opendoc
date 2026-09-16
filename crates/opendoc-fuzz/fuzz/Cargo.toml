@@ -1,0 +1,39 @@
+[package]
+name = "opendoc-fuzz-targets"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+# Excluded from the workspace (root `Cargo.toml`): `cargo fuzz` needs a nightly
+# toolchain and the gate runs stable, so nothing here is built by
+# `cargo test --workspace`. The targets themselves live in `opendoc-fuzz`, and
+# `opendoc-fuzz`'s own harness drives the same functions on stable — these files
+# only wire them to libFuzzer.
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+opendoc-fuzz = { path = ".." }
+
+[[bin]]
+name = "docx"
+path = "fuzz_targets/docx.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "xlsx"
+path = "fuzz_targets/xlsx.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "google_json"
+path = "fuzz_targets/google_json.rs"
+test = false
+doc = false
+bench = false

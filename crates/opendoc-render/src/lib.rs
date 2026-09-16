@@ -10,6 +10,8 @@ mod equation;
 mod footnotes;
 mod html;
 mod lists;
+mod mathml;
+mod standalone;
 mod text;
 mod workbook;
 
@@ -21,7 +23,13 @@ mod css_tests;
 #[cfg(test)]
 mod document_tests;
 #[cfg(test)]
+mod endnote_tests;
+#[cfg(test)]
 mod equation_tests;
+#[cfg(test)]
+mod fragment_tests;
+#[cfg(test)]
+mod mathml_tests;
 #[cfg(test)]
 mod page_tests;
 #[cfg(test)]
@@ -29,12 +37,13 @@ mod table_tests;
 #[cfg(test)]
 mod workbook_tests;
 
-pub use footnotes::{render_footnotes, render_footnotes_html};
+pub use footnotes::{render_endnotes, render_footnotes, render_footnotes_html};
+pub use standalone::{render_plain_text, render_standalone_html};
 pub use workbook::render_workbook_html;
 
 pub use equation::{
     WARNING_EQUATION_RENDER_FAILED, WARNING_EQUATION_UNDEFINED_REFERENCE,
-    WARNING_EQUATION_UNKNOWN_COMMAND,
+    WARNING_EQUATION_UNKNOWN_COMMAND, WARNING_EQUATION_UNSAFE_MARKUP,
 };
 
 use crate::context::RenderContext;
@@ -73,6 +82,19 @@ pub struct RenderImage<'a> {
     pub bytes: &'a [u8],
 }
 
+impl<'a> RenderImage<'a> {
+    /// A copy of this reference, for a caller that has to hand the same image
+    /// list to two renderers. Every field is already a borrow, so this copies
+    /// three pointers and nothing else.
+    pub fn borrowed(&self) -> RenderImage<'a> {
+        RenderImage {
+            hash: self.hash,
+            media_type: self.media_type,
+            bytes: self.bytes,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum RenderError {
     NotFound(String),
@@ -107,6 +129,71 @@ pub fn render_document<'a>(
     context.render_blocks(&document.blocks, &mut html);
     let warnings = context.into_warnings();
     Rendering { html, warnings }
+}
+
+/// One top-level element of the rendered body.
+///
+/// `html` is exactly the markup of that element — a `<p>`, a `<table>`, or a
+/// whole list run — so a consumer can parse and apply one fragment on its
+/// own. Concatenating every fragment's `html`, in order, reproduces the
+/// whole body byte for byte; that is the property that makes updating one
+/// block's DOM instead of the document's safe, and
+/// `fragments_compose_to_the_whole_body` in `fragment_tests.rs` is what
+/// pins it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BodyFragment {
+    /// The first block this fragment renders — unique across the fragments
+    /// of one body, since block ids are unique, so it is usable as the key
+    /// a consumer matches its own state on.
+    pub block_id: String,
+    /// How many blocks this fragment covers. One for everything except a
+    /// list run, which is a single element holding one block per item.
+    pub blocks: usize,
+    pub html: String,
+}
+
+/// The document body as one string *and* as the ordered fragments that
+/// compose it, with the warnings the projection produced.
+///
+/// Both forms come out of one walk, so they cannot disagree: the fragments
+/// are slices of the string that was rendered.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct BodyRendering {
+    pub html: String,
+    pub fragments: Vec<BodyFragment>,
+    pub warnings: Vec<ModelWarning>,
+}
+
+/// Render the document body as HTML *and* as its top-level fragments.
+///
+/// The whole-body [`render_document`] stays the cheaper path and keeps its
+/// callers (HTML export, the PDF writer, the tests); this one is for a
+/// consumer that wants to apply the body a piece at a time — a DOM that
+/// should only touch the block that changed, for instance. It is the same
+/// projection: the string it returns is the string `render_document` returns
+/// for the same document.
+pub fn render_document_body<'a>(
+    document: &'a Document,
+    images: impl IntoIterator<Item = RenderImage<'a>>,
+) -> BodyRendering {
+    let context = RenderContext::new(document, images);
+    let mut html = String::new();
+    let mut spans = Vec::new();
+    context.render_blocks_recording(&document.blocks, &mut html, Some(&mut spans));
+    let fragments = spans
+        .into_iter()
+        .map(|span| BodyFragment {
+            block_id: span.block_id,
+            blocks: span.blocks,
+            html: html[span.start..span.end].to_string(),
+        })
+        .collect();
+    let warnings = context.into_warnings();
+    BodyRendering {
+        html,
+        fragments,
+        warnings,
+    }
 }
 
 /// Render the document body as HTML, discarding projection warnings.

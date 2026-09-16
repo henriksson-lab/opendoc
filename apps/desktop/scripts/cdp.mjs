@@ -47,6 +47,42 @@ function chromeForTestingCandidates() {
 // ancient /usr/bin/google-chrome alongside a current chromium, and testing
 // against the old one silently produces wrong answers rather than errors.
 const MINIMUM_MAJOR = 109;
+// A CDP command that gets no response is a harness failure, not a reason to
+// leave Chrome and the static server running until an outer CI timeout.  The
+// limit is deliberately generous for the large WASM cold-load and can be
+// raised by a constrained runner without weakening any assertion.
+const COMMAND_TIMEOUT_MS = Number(process.env.E2E_CDP_COMMAND_TIMEOUT_MS ?? 30_000);
+const CHILD_EXIT_TIMEOUT_MS = Number(process.env.E2E_CHROME_EXIT_TIMEOUT_MS ?? 3_000);
+const PROFILE_REMOVE_TIMEOUT_MS = Number(process.env.E2E_PROFILE_REMOVE_TIMEOUT_MS ?? 10_000);
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Chrome's browser process can exit just before a utility process finishes a
+ * final profile write.  `rmSync(..., { force: true })` is not a promise that
+ * the directory is already quiescent: on Linux it can still report ENOTEMPTY.
+ * Wait for a successful removal, which is the useful evidence that every
+ * profile writer has stopped, rather than turning a harmless shutdown race
+ * into either a leaked profile or a false-green cleanup.
+ */
+async function removeProfileAfterChromeQuits(profile) {
+  const deadline = Date.now() + PROFILE_REMOVE_TIMEOUT_MS;
+  let lastError;
+  while (true) {
+    try {
+      rmSync(profile, { recursive: true, force: true, maxRetries: 0 });
+      return;
+    } catch (error) {
+      lastError = error;
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `could not remove Chrome profile ${profile} after ${PROFILE_REMOVE_TIMEOUT_MS}ms: ${String(lastError?.message ?? lastError)}`,
+        );
+      }
+      await sleep(50);
+    }
+  }
+}
 
 function describeBinary(binary) {
   const probe = spawnSync(binary, ["--version"], { encoding: "utf8", timeout: 20000 });
@@ -147,6 +183,16 @@ export async function launchChrome({ port = 9333 } = {}) {
 
   let nextId = 0;
   const pending = new Map();
+  let closing = false;
+
+  function rejectPending(error) {
+    for (const [id, entry] of pending) {
+      pending.delete(id);
+      clearTimeout(entry.timer);
+      entry.reject(error);
+    }
+  }
+
   const sessions = new Map();
   socket.addEventListener("message", (event) => {
     const message = JSON.parse(event.data);
@@ -157,40 +203,73 @@ export async function launchChrome({ port = 9333 } = {}) {
     // no error. A process that actually crashed would never run beforeunload
     // at all, so accepting is also the truthful answer for a crash test.
     if (message.method === "Page.javascriptDialogOpening") {
-      const id = (nextId += 1);
-      socket.send(
-        JSON.stringify({
-          id,
-          method: "Page.handleJavaScriptDialog",
-          params: { accept: true },
-          sessionId: message.sessionId,
-        }),
-      );
-      pending.set(id, { resolve() {}, reject() {} });
+      // Do not leave a native dialog holding the page while a navigation or
+      // an evaluation waits. Use the normal bounded request path rather than
+      // installing an unbounded dummy entry in `pending`.
+      void send(
+        "Page.handleJavaScriptDialog",
+        { accept: true },
+        message.sessionId,
+      ).catch(() => {
+        // The target may already be closing. Its close handler rejects the
+        // page command that was waiting, which is the useful test failure.
+      });
       return;
     }
     const entry = pending.get(message.id);
     if (!entry) return;
     pending.delete(message.id);
+    clearTimeout(entry.timer);
     if (message.error) entry.reject(new Error(message.error.message));
     else entry.resolve(message.result);
+  });
+  socket.addEventListener("close", () => {
+    rejectPending(new Error(closing ? "CDP socket closed during teardown" : "CDP socket closed unexpectedly"));
+  });
+  socket.addEventListener("error", () => {
+    rejectPending(new Error("CDP socket failed"));
+  });
+  child.once("error", (error) => rejectPending(new Error(`Chrome process failed: ${error.message}`)));
+  child.once("exit", (code, signal) => {
+    if (!closing) rejectPending(new Error(`Chrome exited unexpectedly (code ${code ?? "null"}, signal ${signal ?? "none"})`));
   });
 
   function send(method, params = {}, sessionId) {
     const id = (nextId += 1);
     const payload = { id, method, params };
     if (sessionId) payload.sessionId = sessionId;
-    socket.send(JSON.stringify(payload));
-    return new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
+    if (socket.readyState !== 1) {
+      return Promise.reject(new Error(`cannot send CDP ${method}: socket is not open`));
+    }
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (!pending.delete(id)) return;
+        reject(new Error(`CDP ${method} (id ${id}) timed out after ${COMMAND_TIMEOUT_MS}ms`));
+      }, COMMAND_TIMEOUT_MS);
+      pending.set(id, { resolve, reject, timer });
+      try {
+        socket.send(JSON.stringify(payload));
+      } catch (error) {
+        pending.delete(id);
+        clearTimeout(timer);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
   }
 
-  const { targetId } = await send("Target.createTarget", { url: "about:blank" });
-  const { sessionId } = await send("Target.attachToTarget", { targetId, flatten: true });
-  sessions.set(targetId, sessionId);
-  await send("Page.enable", {}, sessionId);
-  await send("Runtime.enable", {}, sessionId);
+  async function attachPage() {
+    const { targetId } = await send("Target.createTarget", { url: "about:blank" });
+    const { sessionId } = await send("Target.attachToTarget", { targetId, flatten: true });
+    sessions.set(targetId, sessionId);
+    await send("Page.enable", {}, sessionId);
+    await send("Runtime.enable", {}, sessionId);
+    return { targetId, sessionId };
+  }
 
-  return {
+  const { sessionId } = await attachPage();
+
+  function page(sessionId, close) {
+    return {
     async goto(url) {
       await send("Page.navigate", { url }, sessionId);
       // Page.navigate resolves as soon as the navigation starts. The app
@@ -212,11 +291,24 @@ export async function launchChrome({ port = 9333 } = {}) {
     /** Evaluates `fn` in the page. `fn` must be self-contained (no closure). */
     async evaluate(fn, ...args) {
       const expression = `(${fn.toString()})(${args.map((a) => JSON.stringify(a)).join(",")})`;
-      const result = await send(
-        "Runtime.evaluate",
-        { expression, awaitPromise: true, returnByValue: true },
-        sessionId,
-      );
+      let result;
+      try {
+        result = await send(
+          "Runtime.evaluate",
+          { expression, awaitPromise: true, returnByValue: true },
+          sessionId,
+        );
+      } catch (error) {
+        // A bare `Runtime.evaluate (id N)` cannot identify which assertion
+        // stalled once a suite has made hundreds of page calls. Keep the
+        // source small (and free of runtime values such as credentials), but
+        // name the evaluation so a timeout points to its real owner.
+        const label = fn
+          .toString()
+          .replace(/\s+/g, " ")
+          .slice(0, 180);
+        throw new Error(`${String(error?.message ?? error)} while evaluating ${label}`);
+      }
       if (result.exceptionDetails) {
         const detail = result.exceptionDetails;
         throw new Error(
@@ -248,6 +340,7 @@ export async function launchChrome({ port = 9333 } = {}) {
       const map = {
         Enter: { windowsVirtualKeyCode: 13, text: "\r" },
         Backspace: { windowsVirtualKeyCode: 8 },
+        Delete: { windowsVirtualKeyCode: 46 },
         Tab: { windowsVirtualKeyCode: 9 },
         ArrowLeft: { windowsVirtualKeyCode: 37 },
         ArrowRight: { windowsVirtualKeyCode: 39 },
@@ -293,17 +386,44 @@ export async function launchChrome({ port = 9333 } = {}) {
       writeFileSync(path, Buffer.from(data, "base64"));
       return path;
     },
-    async close() {
-      try {
-        socket.close();
-      } catch {
-        /* already closed */
-      }
-      child.kill("SIGTERM");
-      await new Promise((resolve) => setTimeout(resolve, 200));
-      rmSync(profile, { recursive: true, force: true });
+    /**
+     * A second tab in *this* browser — same profile, so same origin storage
+     * and the same Web Lock namespace.
+     *
+     * `launchChrome` twice gives two profiles, which is right for two
+     * collaborators and wrong for anything testing storage shared between
+     * tabs: separate profiles share no IndexedDB and contend for no lock.
+     */
+    async newPage() {
+      const { targetId, sessionId: tabSession } = await attachPage();
+      return page(tabSession, async () => {
+        await send("Target.closeTarget", { targetId });
+        sessions.delete(targetId);
+      });
     },
-  };
+    close,
+    };
+  }
+
+  return page(sessionId, async () => {
+    closing = true;
+    rejectPending(new Error("CDP session closed during teardown"));
+    try {
+      socket.close();
+    } catch {
+      /* already closed */
+    }
+    if (child.exitCode === null && !child.killed) {
+      const exited = new Promise((resolve) => child.once("exit", resolve));
+      child.kill("SIGTERM");
+      await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, CHILD_EXIT_TIMEOUT_MS))]);
+      if (child.exitCode === null) {
+        child.kill("SIGKILL");
+        await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, CHILD_EXIT_TIMEOUT_MS))]);
+      }
+    }
+    await removeProfileAfterChromeQuits(profile);
+  });
 }
 
 const CONTENT_TYPES = {
@@ -375,6 +495,11 @@ export async function startStaticServer({ port, root }) {
   return {
     url: `http://127.0.0.1:${port}/`,
     async close() {
+      // `server.close()` waits for keep-alive sockets. Chrome's test shutdown
+      // deliberately does not wait forever for its child process, so leaving
+      // those sockets open here made a completed E2E run hang in teardown.
+      // They belong solely to this throwaway static artifact server.
+      server.closeAllConnections?.();
       await new Promise((done) => server.close(done));
     },
   };

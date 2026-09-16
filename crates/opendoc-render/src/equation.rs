@@ -18,6 +18,7 @@ use opendoc_core::{Equation, EquationSourceFormat, ModelWarning};
 use std::sync::OnceLock;
 
 use crate::escape_html;
+use crate::mathml::sanitize_mathml;
 
 /// Warning code emitted when an equation source could not be parsed at all and
 /// the renderer fell back to showing the raw source.
@@ -28,6 +29,12 @@ pub const WARNING_EQUATION_UNKNOWN_COMMAND: &str = "equation-unknown-command";
 /// Warning code emitted when an equation references a label that is not
 /// defined in the same equation.
 pub const WARNING_EQUATION_UNDEFINED_REFERENCE: &str = "equation-undefined-reference";
+/// Warning code emitted when the converter produced markup this renderer will
+/// not inline — an element, attribute or CSS declaration outside
+/// [`crate::mathml`]'s allowlist. `math_core` 0.8.2 does not escape the
+/// argument of `\operatorname`, so this is what a source that tried to inject
+/// markup through an equation degrades to.
+pub const WARNING_EQUATION_UNSAFE_MARKUP: &str = "equation-unsafe-markup";
 
 /// Whether an equation occupies its own line or flows with surrounding text.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -121,11 +128,25 @@ fn render_latex(equation: &Equation, display: EquationDisplay) -> RenderedEquati
                     "references a label that is not defined in the equation",
                 ));
             }
-            RenderedEquation {
-                html: result.mathml,
-                state_class: "equation-rendered",
-                error: None,
-                warnings,
+            // `math_core` is not a trusted producer: its output is re-parsed
+            // and re-serialised from an allowlist before anything is
+            // concatenated into the document body. See `crate::mathml`.
+            match sanitize_mathml(&result.mathml) {
+                Ok(html) => RenderedEquation {
+                    html,
+                    state_class: "equation-rendered",
+                    error: None,
+                    warnings,
+                },
+                Err(rejected) => {
+                    let detail = normalize_detail(&rejected.0);
+                    RenderedEquation {
+                        html: escape_html(&equation.source),
+                        state_class: "equation-error",
+                        warnings: vec![warning(WARNING_EQUATION_UNSAFE_MARKUP, equation, &detail)],
+                        error: Some(detail),
+                    }
+                }
             }
         }
         Err(error) => {

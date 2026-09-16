@@ -6,9 +6,42 @@ edition = "2021"
 [build-dependencies]
 tauri-build = { version = "2.4.1", features = [] }
 
+[features]
+# Opt-in WebKit inspector for the native shell. Off by default so a release
+# binary ships without developer extras; `cargo build --release --features
+# devtools` (plus `WEBKIT_INSPECTOR_SERVER=127.0.0.1:<port>`) makes the
+# webview inspectable, which is the only way to introspect the Tauri DOM.
+devtools = ["tauri/devtools"]
+
 [dependencies]
 opendoc-app = { path = "../../../crates/opendoc-app", features = ["opendal-store"] }
+# The collaboration transport. The browser build cannot have this crate — it is
+# a network daemon built on tokio and tungstenite, and ADR 0015 keeps it out of
+# the WebAssembly graph — but the native shell can, and using the client that
+# ships next to the server is better than writing a second one. See
+# `src/collab.rs` and docs/adr/0017.
+opendoc-service = { path = "../../../crates/opendoc-service" }
+tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
+# No `system-proxy`, because this shell has no use for one — but do not read
+# that as the SSRF defence it looks like. hyper-util's proxy builder reads
+# `HTTP_PROXY`/`http_proxy` unconditionally, and `system-proxy` only adds the
+# macOS and Windows system-settings readers on top; a client built without
+# `ClientBuilder::no_proxy` would still be proxied here, hostname and all,
+# with the screened addresses in `src/fetch.rs` never consulted. `no_proxy()`
+# at the call site is the whole of the defence, and
+# `fetch::tests::a_proxy_in_the_environment_does_not_get_the_request` is what
+# holds it there.
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "charset"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri-plugin-dialog = "2"
 tauri = { version = "2.11.5", default-features = false, features = ["wry", "compression", "common-controls-v6", "dynamic-acl", "x11"] }
+
+# Test-only. The collaboration tests start a real service over a real socket
+# and compare canonical bytes, which needs a multi-threaded runtime, the
+# service's own store type and the canonical encoder.
+[dev-dependencies]
+opendoc-core = { path = "../../../crates/opendoc-core" }
+opendoc-format = { path = "../../../crates/opendoc-format" }
+opendoc-store = { path = "../../../crates/opendoc-store" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }

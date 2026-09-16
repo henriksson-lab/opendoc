@@ -1,4 +1,4 @@
-//! Block-level comparison between two document snapshots.
+//! Comparison between two document snapshots.
 //!
 //! `opendoc-merge` is an apply/merge path only — its whole public surface is
 //! `merge_operations` and `byte_index_for_char_offset`, and it has no
@@ -11,8 +11,11 @@
 //! → blocks), so the walk below has exactly one recursive case.
 
 use crate::version::AppVersionDiffEntry;
-use opendoc_core::{Block, BlockKind, Document, Equation, Inline, Mark};
-use std::collections::BTreeMap;
+use opendoc_core::{
+    Block, BlockKind, Document, Equation, HeaderFooterSlot, Inline, InsertPosition, Mark, StableId,
+};
+use opendoc_merge::OperationKind;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// A block found in one snapshot, with where it sits and what it says.
 struct IndexedBlock<'a> {
@@ -28,10 +31,10 @@ struct IndexedBlock<'a> {
 pub(crate) fn diff_documents(before: &Document, after: &Document) -> Vec<AppVersionDiffEntry> {
     let mut old_index = BTreeMap::new();
     let mut order = 0usize;
-    index_blocks(&before.blocks, "", &mut old_index, &mut order);
+    index_document_blocks(before, &mut old_index, &mut order);
     let mut new_index = BTreeMap::new();
     let mut order = 0usize;
-    index_blocks(&after.blocks, "", &mut new_index, &mut order);
+    index_document_blocks(after, &mut new_index, &mut order);
 
     let mut entries: Vec<(usize, AppVersionDiffEntry)> = Vec::new();
 
@@ -95,6 +98,9 @@ pub(crate) fn diff_documents(before: &Document, after: &Document) -> Vec<AppVers
         ));
     }
 
+    index_footnotes(before, after, &mut entries);
+    index_document_surfaces(before, after, &mut entries);
+
     // Primary key is position in the new document. A removed block has no
     // position there, so it is anchored at its old index and reported *after*
     // whatever now occupies that slot.
@@ -106,6 +112,203 @@ pub(crate) fn diff_documents(before: &Document, after: &Document) -> Vec<AppVers
             .then_with(|| left.1.block_id.cmp(&right.1.block_id))
     });
     entries.into_iter().map(|(_, entry)| entry).collect()
+}
+
+/// Index every block tree that is part of the saved document, not merely the
+/// body.  Furniture has normal stable block IDs and can be changed through the
+/// same operations as body content; leaving it out of a version comparison
+/// made a header edit indistinguishable from no edit.  Footnotes are handled
+/// separately below because their body is inline-only rather than a block
+/// tree.
+fn index_document_blocks<'a>(
+    document: &'a Document,
+    out: &mut BTreeMap<String, IndexedBlock<'a>>,
+    order: &mut usize,
+) {
+    index_blocks(&document.blocks, "", out, order);
+    index_blocks(&document.header, "header", out, order);
+    index_blocks(&document.footer, "footer", out, order);
+    if let Some(blocks) = &document.first_page_header {
+        index_blocks(blocks, "first-page header", out, order);
+    }
+    if let Some(blocks) = &document.first_page_footer {
+        index_blocks(blocks, "first-page footer", out, order);
+    }
+    if let Some(blocks) = &document.even_page_header {
+        index_blocks(blocks, "even-page header", out, order);
+    }
+    if let Some(blocks) = &document.even_page_footer {
+        index_blocks(blocks, "even-page footer", out, order);
+    }
+}
+
+/// Append a diff entry for each changed footnote.  A footnote is not a block,
+/// but its stable id is durable and its inline body is exactly what a reader
+/// sees in a note.  Prefixing the id makes its different namespace explicit to
+/// the client without minting a pretend block id.
+fn index_footnotes(
+    before: &Document,
+    after: &Document,
+    entries: &mut Vec<(usize, AppVersionDiffEntry)>,
+) {
+    let old = before
+        .footnotes
+        .iter()
+        .map(|note| (note.id.to_string(), note))
+        .collect::<BTreeMap<_, _>>();
+    let new = after
+        .footnotes
+        .iter()
+        .map(|note| (note.id.to_string(), note))
+        .collect::<BTreeMap<_, _>>();
+    let mut order = before.blocks.len().max(after.blocks.len()) + 10_000;
+    for id in old.keys().chain(new.keys()).collect::<BTreeSet<_>>() {
+        let (change, before_text, after_text) = match (old.get(id), new.get(id)) {
+            (None, Some(note)) => ("added", String::new(), inline_texts(&note.body)),
+            (Some(note), None) => ("removed", inline_texts(&note.body), String::new()),
+            (Some(old_note), Some(new_note)) if old_note != new_note => (
+                "changed",
+                inline_texts(&old_note.body),
+                inline_texts(&new_note.body),
+            ),
+            _ => continue,
+        };
+        entries.push((
+            order,
+            AppVersionDiffEntry {
+                change: change.to_string(),
+                block_id: format!("footnote:{id}"),
+                kind: "footnote".to_string(),
+                path: format!("footnote {id}"),
+                before_text,
+                after_text,
+            },
+        ));
+        order += 1;
+    }
+}
+
+/// Surface changes that do not have individual block identities.  These are
+/// intentionally concise, but are not silently dropped: a reviewer can see
+/// that review state, citations, or document settings changed and open either
+/// version for the full read-only projection.  The summaries avoid presenting
+/// a lossy reconstruction as a per-operation audit trail.
+fn index_document_surfaces(
+    before: &Document,
+    after: &Document,
+    entries: &mut Vec<(usize, AppVersionDiffEntry)>,
+) {
+    let base_order = 20_000usize;
+    if metadata_differs(before, after) {
+        entries.push(surface_entry(
+            base_order,
+            "document:metadata",
+            "document metadata",
+            "document › metadata",
+            metadata_summary(before),
+            metadata_summary(after),
+        ));
+    }
+    if before.comments != after.comments
+        || before.comment_history != after.comment_history
+        || before.comment_activity != after.comment_activity
+        || before.suggestions != after.suggestions
+    {
+        entries.push(surface_entry(
+            base_order + 1,
+            "document:review",
+            "review metadata",
+            "document › review",
+            review_summary(before),
+            review_summary(after),
+        ));
+    }
+    if before.citation_database != after.citation_database {
+        entries.push(surface_entry(
+            base_order + 2,
+            "document:citations",
+            "citations",
+            "document › citations",
+            citation_summary(before),
+            citation_summary(after),
+        ));
+    }
+}
+
+fn surface_entry(
+    order: usize,
+    id: &str,
+    kind: &str,
+    path: &str,
+    before_text: String,
+    after_text: String,
+) -> (usize, AppVersionDiffEntry) {
+    (
+        order,
+        AppVersionDiffEntry {
+            change: "changed".to_string(),
+            block_id: id.to_string(),
+            kind: kind.to_string(),
+            path: path.to_string(),
+            before_text,
+            after_text,
+        },
+    )
+}
+
+fn metadata_differs(before: &Document, after: &Document) -> bool {
+    before.title != after.title
+        || before.locale != after.locale
+        || before.doi != after.doi
+        || before.page_setup != after.page_setup
+        || before.list_properties != after.list_properties
+        || before.bookmarks != after.bookmarks
+        || before.endnote_ids != after.endnote_ids
+}
+
+fn metadata_summary(document: &Document) -> String {
+    format!(
+        "title: {}; locale: {}; DOI: {}; page setup: {}; list settings: {}; bookmarks: {}; endnotes: {}",
+        document.title,
+        document.locale,
+        document.doi.as_deref().unwrap_or("none"),
+        if document.page_setup == Default::default() { "default" } else { "custom" },
+        document.list_properties.len(),
+        document.bookmarks.len(),
+        document.endnote_ids.len(),
+    )
+}
+
+fn review_summary(document: &Document) -> String {
+    let deleted_threads = document
+        .comments
+        .iter()
+        .filter(|thread| thread.deleted)
+        .count();
+    let resolved_threads = document
+        .comments
+        .iter()
+        .filter(|thread| matches!(thread.state, opendoc_core::CommentThreadState::Resolved))
+        .count();
+    format!(
+        "threads: {} ({} resolved, {} deleted); comment history: {}; comment activity: {}; suggestions: {}",
+        document.comments.len(),
+        resolved_threads,
+        deleted_threads,
+        document.comment_history.len(),
+        document.comment_activity.len(),
+        document.suggestions.len(),
+    )
+}
+
+fn citation_summary(document: &Document) -> String {
+    format!(
+        "style: {}; locale: {}; references: {}; citation groups: {}",
+        document.citation_database.style,
+        document.citation_database.locale,
+        document.citation_database.references.len(),
+        document.citation_database.citations.len(),
+    )
 }
 
 fn index_blocks<'a>(
@@ -157,6 +360,8 @@ enum InlineShape<'a> {
     Citation(&'a str, Option<&'a str>),
     FootnoteRef(&'a str),
     Mention(&'a str),
+    Dropdown(&'a str, &'a str),
+    DateChip(&'a str),
     Equation(&'a Equation),
     PageNumberField(opendoc_core::PageNumberField),
 }
@@ -177,7 +382,22 @@ fn inline_shape(inline: &Inline) -> InlineShape<'_> {
             ..
         } => InlineShape::Citation(citation_id.as_str(), rendered_cache.as_deref()),
         Inline::FootnoteRef { footnote_id, .. } => InlineShape::FootnoteRef(footnote_id.as_str()),
-        Inline::Mention { label, .. } => InlineShape::Mention(label),
+        Inline::Mention { label, .. }
+        | Inline::GooglePersonChip { label, .. }
+        | Inline::GoogleRichLinkChip { label, .. } => InlineShape::Mention(label),
+        Inline::Dropdown {
+            options,
+            selected_option_id,
+            ..
+        } => InlineShape::Dropdown(
+            selected_option_id,
+            options
+                .iter()
+                .find(|option| option.id == *selected_option_id)
+                .map(|option| option.label.as_str())
+                .unwrap_or_default(),
+        ),
+        Inline::DateChip { date, .. } => InlineShape::DateChip(date),
         Inline::Equation { equation, .. } => InlineShape::Equation(equation),
         Inline::PageNumber { field, .. } => InlineShape::PageNumberField(*field),
     }
@@ -218,9 +438,11 @@ fn table_shape(rows: &[opendoc_core::TableRow]) -> Vec<(String, Vec<(String, usi
         .collect()
 }
 
-fn block_kind_label(kind: &BlockKind) -> String {
+pub(crate) fn block_kind_label(kind: &BlockKind) -> String {
     match kind {
         BlockKind::Paragraph => "paragraph".to_string(),
+        BlockKind::Title => "title".to_string(),
+        BlockKind::Subtitle => "subtitle".to_string(),
         BlockKind::Heading { level } => format!("heading {level}"),
         BlockKind::ListItem { kind, level, .. } => {
             let marker = match kind {
@@ -234,12 +456,20 @@ fn block_kind_label(kind: &BlockKind) -> String {
         BlockKind::EquationBlock { .. } => "equation".to_string(),
         BlockKind::Image { .. } => "image".to_string(),
         BlockKind::PageBreak => "page break".to_string(),
+        BlockKind::HorizontalRule => "horizontal rule".to_string(),
+        BlockKind::TableOfContents { .. } => "table of contents".to_string(),
+        BlockKind::Bibliography => "bibliography".to_string(),
     }
 }
 
 /// Human-readable text for one block, excluding nested table content — nested
 /// blocks appear as their own diff entries.
-fn block_text(block: &Block) -> String {
+///
+/// This is the one place that decides what a block "says": the equation source
+/// stands in for an equation, the alt text for a picture, and a citation
+/// renders as its cached text or its id. Every preview and every diff entry
+/// reads it from here, so no view has to pick between those fields itself.
+pub(crate) fn block_text(block: &Block) -> String {
     let mut text = block
         .content
         .iter()
@@ -263,16 +493,272 @@ fn inline_text(inline: &Inline) -> String {
         } => text.clone(),
         Inline::Citation { citation_id, .. } => format!("[{citation_id}]"),
         Inline::FootnoteRef { footnote_id, .. } => format!("[{footnote_id}]"),
-        Inline::Mention { label, .. } => label.clone(),
+        Inline::Mention { label, .. }
+        | Inline::GooglePersonChip { label, .. }
+        | Inline::GoogleRichLinkChip { label, .. } => label.clone(),
+        Inline::Dropdown {
+            options,
+            selected_option_id,
+            ..
+        } => options
+            .iter()
+            .find(|option| option.id == *selected_option_id)
+            .map(|option| option.label.clone())
+            .unwrap_or_default(),
+        Inline::DateChip { date, .. } => date.clone(),
         Inline::Equation { equation, .. } => equation.source.clone(),
         Inline::PageNumber { field, .. } => format!("[{}]", field.as_str()),
     }
 }
 
+fn inline_texts(inlines: &[Inline]) -> String {
+    inlines
+        .iter()
+        .map(inline_text)
+        .collect::<Vec<_>>()
+        .join("")
+        .chars()
+        .take(200)
+        .collect()
+}
+
+/// The typed operations that turn `current` into `restored`, or `None` when
+/// the operation vocabulary cannot say it.
+///
+/// **Why a restore needs operations at all.** A repository's head is a
+/// snapshot *and* an operation segment chain, and the two are supposed to
+/// describe the same document: `merge_repository_candidates_inner` merges a
+/// divergent candidate by replaying each side's operation delta onto the
+/// snapshot at their common ancestor. `restore_version` used to replace the
+/// document wholesale and journal one untyped `restore-version` marker, so the
+/// delta across a restore was empty — and a candidate that branched before the
+/// restore merged as though the restore had never happened, resurrecting
+/// exactly the content the user had restored away.
+///
+/// **Why `None` is a real answer.** The vocabulary is an *editing* vocabulary,
+/// and some differences between two arbitrary versions are not edits it can
+/// express: a comment thread or a suggestion that exists now and not in the
+/// restored version cannot be removed (`DeleteCommentThread` marks a thread
+/// deleted, it does not unmake it), and a footnote or citation whose revision
+/// has moved past the restored one cannot be moved back. The caller treats
+/// `None` — and any plan that does not reproduce `restored` exactly — as "this
+/// restore is not in the log", records it as such, and
+/// `merge_repository_candidates_inner` refuses to merge a candidate across it
+/// rather than silently resurrecting content.
+///
+/// Every plan this returns is still *verified* by the caller before it is
+/// committed: the operations are applied and the result compared with
+/// `restored`. That is what makes partial coverage safe rather than merely
+/// optimistic — a case this function gets wrong degrades to the marker, it
+/// does not commit a wrong document.
+pub(crate) fn restore_operations(
+    current: &Document,
+    restored: &Document,
+) -> Option<Vec<OperationKind>> {
+    let mut operations = Vec::new();
+
+    if current.title != restored.title {
+        operations.push(OperationKind::SetDocumentTitle {
+            title: restored.title.clone(),
+        });
+    }
+    if current.locale != restored.locale {
+        operations.push(OperationKind::SetDocumentLocale {
+            locale: restored.locale.clone(),
+        });
+    }
+    if current.doi != restored.doi {
+        operations.push(OperationKind::SetDocumentDoi {
+            doi: restored.doi.clone(),
+        });
+    }
+    if current.page_setup != restored.page_setup {
+        operations.push(OperationKind::SetPageSetup {
+            page_setup: restored.page_setup,
+        });
+    }
+    // Whole-slot, which is how page furniture is edited anyway: header blocks
+    // are not reachable by the block-addressed operations (ADR 0009).
+    for slot in HeaderFooterSlot::ALL {
+        if current.furniture(slot) != restored.furniture(slot)
+            || current.has_furniture_override(slot) != restored.has_furniture_override(slot)
+        {
+            operations.push(OperationKind::SetPageFurniture {
+                slot,
+                blocks: restored.furniture(slot).to_vec(),
+            });
+        }
+    }
+
+    operations.extend(restore_block_operations(&current.blocks, &restored.blocks));
+    operations.extend(restore_footnote_operations(current, restored)?);
+    operations.extend(restore_annotation_operations(current, restored)?);
+
+    // Citations are the one collection with no partial support: every entry is
+    // soft-deleted rather than removed, so "present now, absent in the
+    // restored version" has no operation, and `UpsertCitationGroup` drops the
+    // rendered cache on the way through, which would leave the log replaying
+    // to a document that differs from the snapshot in a field the reader can
+    // see.
+    if current.citation_database != restored.citation_database {
+        return None;
+    }
+
+    Some(operations)
+}
+
+/// Delete/insert operations that turn one top-level block list into another.
+///
+/// Blocks that are already equal **and already in the right relative order**
+/// are left alone — matched greedily, which yields a common subsequence — so a
+/// restore that changes one paragraph journals one delete and one insert
+/// rather than rewriting the whole body into the segment. Everything else is
+/// deleted and re-inserted under its own id, which is exactly what a
+/// wholesale replacement is.
+///
+/// The deletes all precede the inserts, so a block that is re-inserted under
+/// an id it already had is gone by the time the insert runs (the merge refuses
+/// a duplicate id). Each insert anchors on the restored block before it, which
+/// is either one of the kept blocks or one this batch already inserted.
+fn restore_block_operations(current: &[Block], restored: &[Block]) -> Vec<OperationKind> {
+    let mut kept: BTreeSet<StableId> = BTreeSet::new();
+    let mut cursor = 0usize;
+    for block in restored {
+        if let Some(offset) = current[cursor..]
+            .iter()
+            .position(|candidate| candidate.id == block.id && candidate == block)
+        {
+            cursor += offset + 1;
+            kept.insert(block.id.clone());
+        }
+    }
+
+    let mut operations = Vec::new();
+    for block in current {
+        if !kept.contains(&block.id) {
+            operations.push(OperationKind::DeleteBlock {
+                block_id: block.id.clone(),
+            });
+        }
+    }
+    let mut previous: Option<StableId> = None;
+    for block in restored {
+        if !kept.contains(&block.id) {
+            operations.push(OperationKind::InsertBlock {
+                position: match &previous {
+                    Some(anchor) => InsertPosition::After(anchor.clone()),
+                    None => InsertPosition::First,
+                },
+                block: block.clone(),
+            });
+        }
+        previous = Some(block.id.clone());
+    }
+    operations
+}
+
+/// Footnotes are revision-gated upserts, so a restore can only move one
+/// *forward*. A footnote the restored version does not have at all, or one
+/// whose restored revision is behind the current one, has no operation.
+fn restore_footnote_operations(
+    current: &Document,
+    restored: &Document,
+) -> Option<Vec<OperationKind>> {
+    if current.footnotes == restored.footnotes {
+        return Some(Vec::new());
+    }
+    for footnote in &current.footnotes {
+        if !restored
+            .footnotes
+            .iter()
+            .any(|target| target.id == footnote.id)
+        {
+            return None;
+        }
+    }
+    let mut operations = Vec::new();
+    for footnote in &restored.footnotes {
+        match current
+            .footnotes
+            .iter()
+            .find(|existing| existing.id == footnote.id)
+        {
+            Some(existing) if existing == footnote => {}
+            Some(existing) if existing.revision > footnote.revision => return None,
+            _ => operations.push(OperationKind::UpsertFootnote {
+                footnote: footnote.clone(),
+            }),
+        }
+    }
+    Some(operations)
+}
+
+/// Comment threads and suggestions can be *added* back, and a thread's deleted
+/// flag can be moved either way. Anything else — a thread or suggestion that
+/// exists now and not in the restored version, or one whose body differs — has
+/// no operation that produces it.
+fn restore_annotation_operations(
+    current: &Document,
+    restored: &Document,
+) -> Option<Vec<OperationKind>> {
+    let mut operations = Vec::new();
+    for thread in &current.comments {
+        if !restored
+            .comments
+            .iter()
+            .any(|target| target.id == thread.id)
+        {
+            return None;
+        }
+    }
+    for thread in &restored.comments {
+        match current.comments.iter().find(|item| item.id == thread.id) {
+            None => operations.push(OperationKind::AddCommentThread {
+                thread: thread.clone(),
+            }),
+            Some(existing) if existing == thread => {}
+            Some(existing) => {
+                let mut probe = existing.clone();
+                probe.deleted = thread.deleted;
+                if &probe != thread {
+                    return None;
+                }
+                operations.push(if thread.deleted {
+                    OperationKind::DeleteCommentThread {
+                        thread_id: thread.id.clone(),
+                    }
+                } else {
+                    OperationKind::RestoreCommentThread {
+                        thread_id: thread.id.clone(),
+                    }
+                });
+            }
+        }
+    }
+
+    for suggestion in &current.suggestions {
+        if !restored
+            .suggestions
+            .iter()
+            .any(|target| target == suggestion)
+        {
+            return None;
+        }
+    }
+    for suggestion in &restored.suggestions {
+        if !current.suggestions.iter().any(|item| item == suggestion) {
+            operations.push(OperationKind::AddSuggestion {
+                suggestion: suggestion.clone(),
+            });
+        }
+    }
+    Some(operations)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opendoc_core::{Block, BlockKind, Document, StableId, TableCell, TableRow};
+    use opendoc_core::{Block, BlockKind, Document, Footnote, StableId, TableCell, TableRow};
 
     fn paragraph(id: &str, text: &str) -> Block {
         let mut block = Block::paragraph(text);
@@ -355,6 +841,8 @@ mod tests {
         let table = |cell_text: &str| {
             table_block(vec![TableRow {
                 id: StableId::parse("row-1").expect("test row id is valid"),
+                height: None,
+                header: false,
                 cells: vec![TableCell {
                     id: StableId::parse("cell-1").expect("test cell id is valid"),
                     span: Default::default(),
@@ -377,6 +865,8 @@ mod tests {
     fn a_structural_table_change_is_reported_on_the_table() {
         let one_row = table_block(vec![TableRow {
             id: StableId::parse("row-1").expect("test row id is valid"),
+            height: None,
+            header: false,
             cells: vec![TableCell {
                 id: StableId::parse("cell-1").expect("test cell id is valid"),
                 span: Default::default(),
@@ -388,6 +878,8 @@ mod tests {
         if let BlockKind::Table { rows, .. } = &mut two_rows.kind {
             rows.push(TableRow {
                 id: StableId::parse("row-2").expect("test row id is valid"),
+                height: None,
+                header: false,
                 cells: vec![TableCell {
                     id: StableId::parse("cell-2").expect("test cell id is valid"),
                     span: Default::default(),
@@ -405,5 +897,57 @@ mod tests {
             summary,
             vec![("changed", "block-table"), ("added", "block-inner-2")]
         );
+    }
+
+    #[test]
+    fn includes_furniture_and_footnote_bodies_not_just_document_blocks() {
+        let mut before = document(vec![paragraph("block-body", "body")]);
+        before.header = vec![paragraph("block-header", "before header")];
+        before.footnotes = vec![Footnote {
+            id: StableId::parse("note-1").expect("test id"),
+            revision: 1,
+            body: vec![opendoc_core::Inline::text("before note")],
+            deleted: false,
+        }];
+        let mut after = before.clone();
+        after.header[0] = paragraph("block-header", "after header");
+        after.footnotes[0].body = vec![opendoc_core::Inline::text("after note")];
+        after.footnotes[0].revision = 2;
+
+        let entries = diff_documents(&before, &after);
+        assert!(entries.iter().any(|entry| {
+            entry.block_id == "block-header"
+                && entry.path == "header › 1"
+                && entry.before_text == "before header"
+                && entry.after_text == "after header"
+        }));
+        assert!(entries.iter().any(|entry| {
+            entry.block_id == "footnote:note-1"
+                && entry.kind == "footnote"
+                && entry.before_text == "before note"
+                && entry.after_text == "after note"
+        }));
+    }
+
+    #[test]
+    fn includes_concise_entries_for_non_block_durable_surfaces() {
+        let before = document(vec![paragraph("block-1", "one")]);
+        let mut after = before.clone();
+        after.title = "Renamed".to_string();
+        after.citation_database.style = "chicago-author-date".to_string();
+
+        let entries = diff_documents(&before, &after);
+        assert!(entries.iter().any(|entry| {
+            entry.block_id == "document:metadata"
+                && entry.kind == "document metadata"
+                && entry.before_text.contains("title: Doc")
+                && entry.after_text.contains("title: Renamed")
+        }));
+        assert!(entries.iter().any(|entry| {
+            entry.block_id == "document:citations"
+                && entry.kind == "citations"
+                && entry.before_text.contains("style: apa")
+                && entry.after_text.contains("style: chicago-author-date")
+        }));
     }
 }

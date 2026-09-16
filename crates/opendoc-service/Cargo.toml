@@ -1,0 +1,52 @@
+[package]
+name = "opendoc-service"
+version = "0.1.0"
+edition = "2021"
+description = "Authenticated collaboration service: transport, identity, server-enforced permissions, durable operation intake, commit serialization and presence fanout"
+
+[dependencies]
+# The service composes the typed operation layer and the storage layer, and
+# nothing else from the workspace. It deliberately does NOT depend on
+# `opendoc-app`: it dispatches no commands, so the app facade (and with it
+# layout, render, import, spreadsheet and citations) is not in its graph.
+# See docs/adr/0015.
+opendoc-core = { path = "../opendoc-core" }
+opendoc-format = { path = "../opendoc-format" }
+opendoc-merge = { path = "../opendoc-merge" }
+opendoc-store = { path = "../opendoc-store" }
+
+# Transport. HTTP/1.1 framing and RFC 6455 WebSocket framing are parsers on
+# the untrusted side of the network boundary; hand-rolling them inside the
+# crate whose only job is that boundary is not a saving. axum brings hyper for
+# the former and tungstenite for the latter.
+axum = { version = "0.8", features = ["ws", "http1", "tokio", "json", "query"], default-features = false }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "macros", "time", "signal"] }
+tokio-tungstenite = "0.29"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+
+# The crate ships the only client of its own protocol, so the wire has exactly
+# one reader and one writer. hyper is already in the tree behind axum; using its
+# client directly adds an API, not a dependency tree.
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+
+base64 = "0.22"
+getrandom = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11.0"
+
+# Test-only. `opendoc-app` is deliberately *not* a dependency (see above and
+# ADR 0015): a network daemon must not reach layout, render, import, pdf or
+# spreadsheet through the app facade. But the loop this crate exists to close
+# ends in an `OpenDocApp`, and a convergence claim that never runs the real
+# client is not a claim. A dev-dependency is in the test graph only — nothing
+# it pulls in is linked into the service binary, and `opendoc-app` does not
+# depend on this crate, so there is no cycle.
+[dev-dependencies]
+opendoc-app = { path = "../opendoc-app" }
+
+[[bin]]
+name = "opendoc-service"
+path = "src/bin/opendoc_service.rs"

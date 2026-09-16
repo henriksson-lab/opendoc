@@ -271,3 +271,104 @@ impl DocumentUuid {
         }
     }
 }
+
+/// Where a new sibling goes in an ordered list of siblings addressed by
+/// [`StableId`].
+///
+/// The older spelling for this is `after: Option<StableId>`, where `None`
+/// means *append*. That convention is load-bearing wherever it is still used
+/// — it is what makes a replayed insert whose anchor has since been deleted
+/// degrade to an append instead of vanishing — but it has one position it
+/// cannot name: *before the first sibling*, because `None` is already spoken
+/// for. Adding a second optional beside it would let a caller say two
+/// contradictory things at once, so the position is one value instead.
+///
+/// [`InsertPosition::First`] is the position `After` cannot express; it never
+/// degrades, because it names no anchor that could go missing.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum InsertPosition {
+    /// Before every existing sibling.
+    First,
+    /// Directly before the sibling with this id. If that sibling is gone by
+    /// the time the operation is applied, the insert degrades to
+    /// [`InsertPosition::Last`] and the applier says so.
+    ///
+    /// This is distinct from [`InsertPosition::First`]: `First` identifies a
+    /// top-level of an otherwise unnamed sibling container, while `Before`
+    /// retains the identity needed to restore the first block of a table cell.
+    Before(StableId),
+    /// Directly after the sibling with this id. If that sibling is gone by
+    /// the time the operation is applied, the insert degrades to
+    /// [`InsertPosition::Last`] and the applier says so.
+    After(StableId),
+    /// After every existing sibling.
+    Last,
+}
+
+impl InsertPosition {
+    /// The index the new sibling takes in a list of `len` siblings, given
+    /// where the anchor currently sits. `None` for the anchor means it was not
+    /// found, which is what the caller reports as a degraded anchor.
+    pub fn index(&self, len: usize, anchor_index: Option<usize>) -> usize {
+        match self {
+            InsertPosition::First => 0,
+            InsertPosition::Before(_) => anchor_index.unwrap_or(len),
+            InsertPosition::After(_) => match anchor_index {
+                Some(index) => index + 1,
+                None => len,
+            },
+            InsertPosition::Last => len,
+        }
+    }
+
+    /// The sibling this position is anchored to, when it is anchored at all.
+    pub fn anchor(&self) -> Option<&StableId> {
+        match self {
+            InsertPosition::Before(id) | InsertPosition::After(id) => Some(id),
+            InsertPosition::First | InsertPosition::Last => None,
+        }
+    }
+
+    /// The position the older `after: Option<StableId>` spelling means: an
+    /// anchored insert when there is an anchor, an append when there is not.
+    ///
+    /// This is the bridge from that spelling, and the only place the
+    /// convention is written down. It is deliberately not a way to say
+    /// [`InsertPosition::First`]: `None` keeps meaning *append*, exactly as it
+    /// always did, so a caller that had no anchor cannot silently acquire a
+    /// different meaning by being ported.
+    pub fn after_or_last(after: Option<StableId>) -> Self {
+        match after {
+            Some(id) => InsertPosition::After(id),
+            None => InsertPosition::Last,
+        }
+    }
+
+    /// The spelling the command surface uses for [`InsertPosition::First`].
+    ///
+    /// The surface passes sibling ids verbatim, so the keyword has to be a
+    /// string no sibling can be called. Ids are minted as `kind-nonce-counter`
+    /// by [`StableId::new`], so a bare `"first"` never collides with one.
+    pub const FIRST_KEYWORD: &'static str = "first";
+
+    /// Reads the position off the command surface: the [`FIRST_KEYWORD`], the
+    /// id of the sibling to follow, or nothing at all for an append.
+    ///
+    /// [`FIRST_KEYWORD`]: InsertPosition::FIRST_KEYWORD
+    pub fn parse(anchor: Option<&str>) -> Result<Self, ModelError> {
+        match anchor.map(str::trim) {
+            None | Some("") => Ok(InsertPosition::Last),
+            Some(value) if value == Self::FIRST_KEYWORD => Ok(InsertPosition::First),
+            Some(value) => StableId::parse(value).map(InsertPosition::After),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), ModelError> {
+        match self {
+            InsertPosition::Before(id) | InsertPosition::After(id) => {
+                validate_stable_id("insert anchor", id)
+            }
+            InsertPosition::First | InsertPosition::Last => Ok(()),
+        }
+    }
+}

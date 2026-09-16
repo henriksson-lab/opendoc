@@ -19,8 +19,6 @@ use super::model::{graph_dependency_target, graph_dependent_label};
 use super::value::{FormulaArray, FormulaError, FormulaValue};
 use crate::{Cell, CellDependency, NamedRange, Sheet, SpreadsheetWarning, SpreadsheetWorkbook};
 
-/// Maximum number of transitive dependents projected per graph entry.
-const INVALIDATION_ORDER_LIMIT: usize = 2_000;
 /// Maximum on-demand evaluation nesting (dynamic references such as
 /// `INDIRECT`); the static graph handles arbitrarily long chains.
 const MAX_DYNAMIC_DEPTH: usize = 128;
@@ -501,12 +499,34 @@ enum RecalcMode {
     Clean,
 }
 
-fn detect_mode(workbook: &SpreadsheetWorkbook, env: &WorkbookEnv<'_>) -> RecalcMode {
+/// What `detect_mode` concluded: which cells to recompute, and whether the
+/// dependency graph the last evaluation left behind is still accurate.
+struct ModeDecision {
+    mode: RecalcMode,
+    /// True when the workbook structure or some cell's *source* changed
+    /// since the previous evaluation. The dependency graph is derived from
+    /// formula source alone, so when this is false the existing graph is
+    /// still exact and rebuilding it is pure waste. A volatile formula
+    /// (`NOW`, `RAND`) makes cells dirty without changing any source, so
+    /// this is deliberately not "the recalc was not clean".
+    sources_changed: bool,
+}
+
+impl ModeDecision {
+    fn full() -> Self {
+        Self {
+            mode: RecalcMode::Full,
+            sources_changed: true,
+        }
+    }
+}
+
+fn detect_mode(workbook: &SpreadsheetWorkbook, env: &WorkbookEnv<'_>) -> ModeDecision {
     let Some(previous) = workbook.recalc.snapshot.as_ref() else {
-        return RecalcMode::Full;
+        return ModeDecision::full();
     };
     if previous.structure != structure_fingerprint(workbook) {
-        return RecalcMode::Full;
+        return ModeDecision::full();
     }
     let current = build_snapshot(workbook);
     let mut changed: HashSet<(String, String)> = HashSet::new();
@@ -565,8 +585,12 @@ fn detect_mode(workbook: &SpreadsheetWorkbook, env: &WorkbookEnv<'_>) -> RecalcM
             }
         }
     }
+    let sources_changed = !changed.is_empty();
     if dirty.is_empty() {
-        return RecalcMode::Clean;
+        return ModeDecision {
+            mode: RecalcMode::Clean,
+            sources_changed,
+        };
     }
     // Transitive dependents from the previous dependency graph.
     let mut dependents: HashMap<CellKey, Vec<CellKey>> = HashMap::new();
@@ -592,7 +616,10 @@ fn detect_mode(workbook: &SpreadsheetWorkbook, env: &WorkbookEnv<'_>) -> RecalcM
             }
         }
     }
-    RecalcMode::Incremental(dirty)
+    ModeDecision {
+        mode: RecalcMode::Incremental(dirty),
+        sources_changed,
+    }
 }
 
 fn run_pass(
@@ -770,8 +797,18 @@ fn run_pass(
     }
 }
 
-/// Evaluates the workbook in place, returning evaluation warnings.
-pub fn evaluate_workbook(workbook: &mut SpreadsheetWorkbook) -> Vec<SpreadsheetWarning> {
+/// What one evaluation concluded. The warnings it produced are left on
+/// `workbook.evaluation_warnings`, which is the workbook's own record of
+/// them; this says only what evaluation could not settle on its own.
+pub struct EvaluationOutcome {
+    /// True when the dependency graph on the workbook no longer describes
+    /// the formula source and must be rebuilt. False means nothing that the
+    /// graph is derived from has changed, so the existing graph is exact.
+    pub dependency_graph_stale: bool,
+}
+
+/// Evaluates the workbook in place.
+pub fn evaluate_workbook(workbook: &mut SpreadsheetWorkbook) -> EvaluationOutcome {
     let (now_ms, seed) = match &workbook.evaluation_context {
         Some(context) => (context.now_ms, context.seed),
         None => {
@@ -803,7 +840,10 @@ pub fn evaluate_workbook(workbook: &mut SpreadsheetWorkbook) -> Vec<SpreadsheetW
         }
     }
 
-    let mode = detect_mode(workbook, &env);
+    let ModeDecision {
+        mode,
+        sources_changed,
+    } = detect_mode(workbook, &env);
     let mut pending: HashSet<CellKey> = match &mode {
         RecalcMode::Full => all_formulas.clone(),
         RecalcMode::Incremental(dirty) => dirty
@@ -821,7 +861,9 @@ pub fn evaluate_workbook(workbook: &mut SpreadsheetWorkbook) -> Vec<SpreadsheetW
         refresh_display_values(workbook);
         workbook.evaluation_warnings = previous_warnings;
         workbook.recalc.snapshot = Some(Arc::new(build_snapshot(workbook)));
-        return workbook.evaluation_warnings.clone();
+        return EvaluationOutcome {
+            dependency_graph_stale: sources_changed,
+        };
     }
 
     let mut spill_seed: HashMap<CellKey, FormulaValue> = HashMap::new();
@@ -989,9 +1031,11 @@ pub fn evaluate_workbook(workbook: &mut SpreadsheetWorkbook) -> Vec<SpreadsheetW
         }
     }
     refresh_display_values(workbook);
-    workbook.evaluation_warnings = warnings.clone();
+    workbook.evaluation_warnings = warnings;
     workbook.recalc.snapshot = Some(Arc::new(build_snapshot(workbook)));
-    warnings
+    EvaluationOutcome {
+        dependency_graph_stale: sources_changed,
+    }
 }
 
 /// Recomputes projections for non-formula cells and display text for all
@@ -1065,48 +1109,12 @@ pub fn build_dependency_graph(
                 .unwrap_or_default()
                 .into_iter()
                 .collect::<Vec<_>>();
-            let invalidation_order =
-                collect_invalidation_order(sheets, &sheet_id, &address, &dependents);
             CellDependency {
                 sheet_id,
                 address,
                 dependencies: direct_dependencies,
                 dependents: direct_dependents,
-                invalidation_order,
             }
         })
         .collect()
-}
-
-fn collect_invalidation_order(
-    sheets: &[Sheet],
-    sheet_id: &str,
-    address: &str,
-    dependents: &BTreeMap<(String, String), BTreeSet<String>>,
-) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut seen = BTreeSet::new();
-    let mut frontier = dependents
-        .get(&(sheet_id.to_string(), address.to_string()))
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .collect::<Vec<_>>();
-    while !frontier.is_empty() && out.len() < INVALIDATION_ORDER_LIMIT {
-        let mut next = BTreeSet::new();
-        for dependent in frontier {
-            if seen.insert(dependent.clone()) {
-                out.push(dependent.clone());
-                if out.len() >= INVALIDATION_ORDER_LIMIT {
-                    break;
-                }
-                let child_key = graph_dependency_target(sheets, sheet_id, &dependent);
-                if let Some(children) = dependents.get(&child_key) {
-                    next.extend(children.iter().cloned());
-                }
-            }
-        }
-        frontier = next.into_iter().collect();
-    }
-    out
 }

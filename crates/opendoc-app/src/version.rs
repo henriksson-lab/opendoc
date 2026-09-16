@@ -47,9 +47,26 @@ pub struct AppVersionPreview {
     pub manifest: String,
     pub read_only: bool,
     pub document: AppDocument,
+    /// One line per top-level block, already reduced to a kind label and the
+    /// text that block says. The panel lists these instead of walking
+    /// `document.blocks` and choosing between `content`, an equation source
+    /// and an alt text for itself — which of those stands in for a block is a
+    /// projection rule, and it lives in `version_diff::block_text` next to the
+    /// diff that uses the same rule.
+    pub blocks: Vec<AppVersionPreviewBlock>,
 }
 
-/// One block-level change between two versions.
+/// One line of [`AppVersionPreview::blocks`].
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AppVersionPreviewBlock {
+    /// `paragraph`, `heading 2`, `table (3 rows)`, …
+    pub kind: String,
+    /// What the block says, capped to a preview-sized excerpt. Empty for a
+    /// block that says nothing, such as a page break.
+    pub text: String,
+}
+
+/// One durable-document change between two versions.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AppVersionDiffEntry {
     /// `added`, `removed` or `changed`.

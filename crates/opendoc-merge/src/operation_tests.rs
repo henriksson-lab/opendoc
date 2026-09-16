@@ -4,9 +4,11 @@ use crate::causal::{ActorId, OperationId};
 use crate::inline_ops::inline_id;
 use crate::merge::merge_operations;
 use crate::operation::{Operation, OperationKind};
+use crate::test_support::assert_mark_kinds;
 use opendoc_core::{
-    Block, BlockKind, BlockProperties, Document, Inline, Mark, MarkExpand, MarkKind, StableId,
-    TextRange,
+    Block, BlockKind, BlockProperties, Bookmark, Document, Footnote, ImageLayout, Inline,
+    InsertPosition, Mark, MarkExpand, MarkKind, PositionedImage, PositionedImageAnchor,
+    PositionedImageLayer, StableId, TextRange,
 };
 
 #[test]
@@ -27,7 +29,7 @@ fn concurrent_operations_converge_independent_of_stream_order() {
         },
         kind: OperationKind::InsertInline {
             block_id: block_id.clone(),
-            after: Some(text_id.clone()),
+            position: InsertPosition::After(text_id.clone()),
             inline: Inline::text(" world"),
         },
         context: None,
@@ -53,7 +55,148 @@ fn concurrent_operations_converge_independent_of_stream_order() {
         merged_ab.document.visible_text(),
         merged_ba.document.visible_text()
     );
-    assert!(merged_ab.document.validate().is_ok());
+    // The oracle. Agreement between two groupings of the same operation set is
+    // true by construction — the merge de-duplicates into one `BTreeMap`
+    // before any semantics run — so this test passed for a `merge_operations`
+    // that dropped every operation and returned the base. Name the answer
+    // instead: both operations landed, and they landed on the right inline.
+    // PLAN88 §7.
+    assert_eq!(merged_ab.document.visible_text(), "hello world\n");
+    assert_eq!(merged_ab.warnings, Vec::new());
+    let block = &merged_ab.document.blocks[0];
+    assert_eq!(block.content.len(), 2, "{:?}", block.content);
+    assert_mark_kinds(&block.content[0], &[MarkKind::Bold]);
+    assert_mark_kinds(&block.content[1], &[]);
+}
+
+#[test]
+fn tombstoning_an_endnote_also_removes_its_invalid_placement() {
+    let mut base = Document::new("Notes");
+    let note_id = StableId::parse("note-one").unwrap();
+    base.footnotes.push(Footnote {
+        id: note_id.clone(),
+        revision: 1,
+        body: vec![Inline::text("A note")],
+        deleted: false,
+    });
+    base.endnote_ids.insert(note_id.clone());
+    base.validate().expect("valid live endnote");
+
+    let tombstone = Operation {
+        id: OperationId {
+            actor: ActorId("reviewer".to_string()),
+            seq: 1,
+        },
+        kind: OperationKind::UpsertFootnote {
+            footnote: Footnote {
+                id: note_id.clone(),
+                revision: 2,
+                body: vec![Inline::text("A note")],
+                deleted: true,
+            },
+        },
+        context: None,
+    };
+
+    let merged = merge_operations(&base, &[vec![tombstone]]).expect("merge tombstone");
+    assert!(!merged.document.endnote_ids.contains(&note_id));
+    merged
+        .document
+        .validate()
+        .expect("tombstone cannot leave an invalid endnote placement");
+}
+
+#[test]
+fn concurrent_same_name_bookmarks_choose_the_later_operation_and_keep_a_tombstone() {
+    let mut base = Document::new("Bookmarks");
+    let target = Block::paragraph("target");
+    let target_id = target.id.clone();
+    base.blocks.push(target);
+    let bookmark = |actor: &str, id: &str| Operation {
+        id: OperationId {
+            actor: ActorId(actor.to_string()),
+            seq: 1,
+        },
+        kind: OperationKind::UpsertBookmark {
+            bookmark: Bookmark {
+                id: StableId::parse(id).unwrap(),
+                name: "introduction".to_string(),
+                block_id: target_id.clone(),
+                revision: 1,
+                deleted: false,
+            },
+        },
+        context: None,
+    };
+    let alpha = bookmark("alpha", "bookmark-alpha");
+    let zeta = bookmark("zeta", "bookmark-zeta");
+    let ab = merge_operations(&base, &[vec![alpha.clone()], vec![zeta.clone()]]).unwrap();
+    let ba = merge_operations(&base, &[vec![zeta], vec![alpha]]).unwrap();
+    assert_eq!(ab.document.bookmarks, ba.document.bookmarks);
+    let live = ab
+        .document
+        .bookmarks
+        .iter()
+        .filter(|item| !item.deleted)
+        .collect::<Vec<_>>();
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].id, StableId::parse("bookmark-zeta").unwrap());
+    ab.document.validate().unwrap();
+}
+
+#[test]
+fn concurrent_positioned_image_moves_choose_one_whole_anchor_geometry_and_layer() {
+    let mut base = Document::new("Doc");
+    let anchor = Block::paragraph("anchor");
+    let anchor_id = anchor.id.clone();
+    let image_id = StableId::parse("positioned-image").unwrap();
+    base.blocks.push(anchor);
+    base.blocks.push(Block {
+        id: image_id.clone(),
+        kind: BlockKind::Image {
+            blob_hash: format!("sha256:{}", "a".repeat(64)),
+            alt_text: "diagram".to_string(),
+            layout: ImageLayout::default(),
+        },
+        content: Vec::new(),
+        properties: BlockProperties::default(),
+    });
+    let moved = |actor: &str, x, y, layer| Operation {
+        id: OperationId {
+            actor: ActorId(actor.to_string()),
+            seq: 1,
+        },
+        kind: OperationKind::UpdateImageLayout {
+            block_id: image_id.clone(),
+            layout: ImageLayout {
+                positioned: Some(PositionedImage {
+                    anchor: PositionedImageAnchor::Block(anchor_id.clone()),
+                    horizontal_offset: opendoc_core::Length::from_twips(x).unwrap(),
+                    vertical_offset: opendoc_core::Length::from_twips(y).unwrap(),
+                    layer,
+                }),
+                ..ImageLayout::default()
+            },
+        },
+        context: None,
+    };
+    let a = moved("alice", -240, 480, PositionedImageLayer::BehindText);
+    let b = moved("zoe", 960, -720, PositionedImageLayer::InFrontOfText);
+    let result = merge_operations(&base, &[vec![a], vec![b]]).unwrap();
+    let layout = match &result.document.blocks[1].kind {
+        BlockKind::Image { layout, .. } => layout,
+        _ => unreachable!(),
+    };
+    assert_eq!(
+        layout.positioned,
+        Some(PositionedImage {
+            anchor: PositionedImageAnchor::Block(anchor_id),
+            horizontal_offset: opendoc_core::Length::from_twips(960).unwrap(),
+            vertical_offset: opendoc_core::Length::from_twips(-720).unwrap(),
+            layer: PositionedImageLayer::InFrontOfText,
+        }),
+        "the winner is one author-selected position, never a field-wise hybrid"
+    );
 }
 
 #[test]
@@ -113,7 +256,6 @@ fn document_title_updates_converge_and_reject_empty_titles() {
         .warnings
         .iter()
         .any(|warning| warning.code == "invalid-document-title"));
-    assert!(merged_ab.document.validate().is_ok());
 }
 
 #[test]
@@ -165,7 +307,6 @@ fn document_doi_updates_converge_allow_clear_and_reject_empty_values() {
         .warnings
         .iter()
         .any(|warning| warning.code == "invalid-document-doi"));
-    assert!(merged_ab.document.validate().is_ok());
 }
 
 #[test]
@@ -218,7 +359,6 @@ fn document_locale_updates_converge_and_reject_empty_values() {
         .warnings
         .iter()
         .any(|warning| warning.code == "invalid-document-locale"));
-    assert!(merged_ab.document.validate().is_ok());
 }
 
 #[test]
@@ -235,7 +375,7 @@ fn duplicate_insert_ids_degrade_to_warnings() {
             seq: 1,
         },
         kind: OperationKind::InsertBlock {
-            after: None,
+            position: InsertPosition::Last,
             block: Block {
                 id: existing_block_id,
                 kind: BlockKind::Paragraph,
@@ -252,7 +392,7 @@ fn duplicate_insert_ids_degrade_to_warnings() {
         },
         kind: OperationKind::InsertInline {
             block_id: base.blocks[0].id.clone(),
-            after: None,
+            position: InsertPosition::Last,
             inline: Inline::Text {
                 id: existing_inline_id,
                 text: "duplicate inline".to_string(),
@@ -273,7 +413,6 @@ fn duplicate_insert_ids_degrade_to_warnings() {
             .collect::<Vec<_>>(),
         vec!["duplicate-block", "duplicate-inline"]
     );
-    assert!(result.document.validate().is_ok());
 }
 
 #[test]
@@ -302,7 +441,7 @@ fn inline_insert_into_deleted_block_appends_to_surviving_block() {
         },
         kind: OperationKind::InsertInline {
             block_id: deleted_block_id,
-            after: None,
+            position: InsertPosition::Last,
             inline: Inline::text(" preserved"),
         },
         context: None,
@@ -321,7 +460,6 @@ fn inline_insert_into_deleted_block_appends_to_surviving_block() {
         .warnings
         .iter()
         .any(|warning| warning.code == "inline-anchor-degraded"));
-    delete_first.document.validate().unwrap();
 }
 
 #[test]
@@ -350,7 +488,7 @@ fn inline_insert_after_deleted_inline_anchor_appends_with_warning() {
         },
         kind: OperationKind::InsertInline {
             block_id,
-            after: Some(deleted_inline_id),
+            position: InsertPosition::After(deleted_inline_id),
             inline: Inline::text(" inserted"),
         },
         context: None,
@@ -369,7 +507,6 @@ fn inline_insert_after_deleted_inline_anchor_appends_with_warning() {
         .warnings
         .iter()
         .any(|warning| warning.code == "inline-anchor-degraded"));
-    actor_streams.document.validate().unwrap();
 }
 
 #[test]
@@ -397,7 +534,7 @@ fn block_insert_after_deleted_anchor_appends_with_warning() {
             seq: 1,
         },
         kind: OperationKind::InsertBlock {
-            after: Some(deleted_block_id),
+            position: InsertPosition::After(deleted_block_id),
             block: Block::paragraph("inserted"),
         },
         context: None,
@@ -416,7 +553,6 @@ fn block_insert_after_deleted_anchor_appends_with_warning() {
         .warnings
         .iter()
         .any(|warning| warning.code == "block-anchor-degraded"));
-    delete_first.document.validate().unwrap();
 }
 
 #[test]
@@ -433,7 +569,7 @@ fn duplicate_operation_ids_select_deterministic_payload_with_warning() {
         id: duplicate_id.clone(),
         kind: OperationKind::InsertInline {
             block_id: block_id.clone(),
-            after: None,
+            position: InsertPosition::Last,
             inline: Inline::Text {
                 id: StableId::parse("text-alpha").unwrap(),
                 text: "alpha ".to_string(),
@@ -446,7 +582,7 @@ fn duplicate_operation_ids_select_deterministic_payload_with_warning() {
         id: duplicate_id,
         kind: OperationKind::InsertInline {
             block_id,
-            after: None,
+            position: InsertPosition::Last,
             inline: Inline::Text {
                 id: StableId::parse("text-zeta").unwrap(),
                 text: "zeta ".to_string(),
@@ -467,7 +603,6 @@ fn duplicate_operation_ids_select_deterministic_payload_with_warning() {
     assert_eq!(alpha_first.warnings, zeta_first.warnings);
     assert_eq!(alpha_first.document.visible_text(), "basealpha \n");
     assert_eq!(alpha_first.warnings[0].code, "duplicate-operation-id");
-    alpha_first.document.validate().unwrap();
 }
 
 #[test]
@@ -484,7 +619,7 @@ fn malformed_operation_ids_are_ignored_with_deterministic_warnings() {
             },
             kind: OperationKind::InsertInline {
                 block_id: block_id.clone(),
-                after: None,
+                position: InsertPosition::Last,
                 inline: Inline::text("empty actor"),
             },
             context: None,
@@ -496,7 +631,7 @@ fn malformed_operation_ids_are_ignored_with_deterministic_warnings() {
             },
             kind: OperationKind::InsertInline {
                 block_id: block_id.clone(),
-                after: None,
+                position: InsertPosition::Last,
                 inline: Inline::text("padded actor"),
             },
             context: None,
@@ -508,7 +643,7 @@ fn malformed_operation_ids_are_ignored_with_deterministic_warnings() {
             },
             kind: OperationKind::InsertInline {
                 block_id,
-                after: None,
+                position: InsertPosition::Last,
                 inline: Inline::text("zero seq"),
             },
             context: None,
@@ -555,7 +690,6 @@ fn malformed_operation_ids_are_ignored_with_deterministic_warnings() {
         .warnings
         .iter()
         .any(|warning| warning.message == "operation with zero sequence was ignored"));
-    result.document.validate().unwrap();
 }
 
 #[test]
@@ -638,7 +772,6 @@ fn invalid_mark_operation_degrades_to_warning() {
     };
     assert!(marks.is_empty());
     assert_eq!(result.warnings[0].code, "invalid-mark-value");
-    result.document.validate().unwrap();
 }
 
 #[test]
@@ -681,7 +814,6 @@ fn invalid_mark_removal_operation_degrades_to_warning() {
     };
     assert!(marks.iter().any(|mark| mark.kind == MarkKind::Bold));
     assert_eq!(result.warnings[0].code, "invalid-mark-value");
-    result.document.validate().unwrap();
 }
 
 #[test]
@@ -730,7 +862,6 @@ fn valued_mark_removal_without_value_removes_all_matching_marks() {
     assert!(!marks.iter().any(|mark| mark.kind == MarkKind::Color));
     assert!(marks.iter().any(|mark| mark.kind == MarkKind::Bold));
     assert!(result.warnings.is_empty());
-    result.document.validate().unwrap();
 }
 
 #[test]
@@ -778,5 +909,57 @@ fn invalid_mark_range_operation_degrades_to_warning() {
             _ => true,
         }));
     assert_eq!(result.warnings[0].code, "invalid-mark-value");
-    result.document.validate().unwrap();
+}
+
+/// `merge_operations` ends with `document.validate()?`, so it can only ever
+/// return a valid document.
+///
+/// This is worth one test because it makes roughly 113 assertions elsewhere in
+/// this crate provably dead: every
+/// `result.document.validate().unwrap()` — and its `assert!(…is_ok())` twin —
+/// on a value obtained from `merge_operations(…).unwrap()` re-checks something
+/// the call already checked and already unwrapped. They read as verification
+/// and are not. PLAN88 §7.
+///
+/// Pinning it here is what lets them be deleted rather than trusted: if the
+/// final `validate()?` were ever removed, this fails, and *nothing else would
+/// have*.
+#[test]
+fn merge_operations_refuses_to_return_a_document_that_does_not_validate() {
+    // A base whose two blocks share an id — the model forbids it, and no
+    // operation here repairs it, so the merge's own validation is the only
+    // thing that can notice.
+    let mut base = Document::new("Doc");
+    let mut first = Block::paragraph("one");
+    let mut second = Block::paragraph("two");
+    second.id = first.id.clone();
+    match (&mut first.content[0], &mut second.content[0]) {
+        (Inline::Text { id, .. }, Inline::Text { id: other, .. }) => *other = id.clone(),
+        _ => unreachable!(),
+    }
+    base.blocks.push(first);
+    base.blocks.push(second);
+    assert!(
+        base.validate().is_err(),
+        "the fixture is meant to be an invalid document"
+    );
+
+    let error = merge_operations(
+        &base,
+        &[vec![Operation {
+            id: OperationId {
+                actor: ActorId("a".to_string()),
+                seq: 1,
+            },
+            kind: OperationKind::SetDocumentTitle {
+                title: "Retitled".to_string(),
+            },
+            context: None,
+        }]],
+    )
+    .expect_err("the merge returned a document that does not validate");
+    assert!(
+        format!("{error}").contains("duplicate"),
+        "unexpected error: {error}"
+    );
 }

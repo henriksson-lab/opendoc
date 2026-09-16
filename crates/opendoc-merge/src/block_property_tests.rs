@@ -1,12 +1,15 @@
 //! Block property tests.
 
+use crate::causal::OperationId;
 use crate::merge::merge_operations;
 use crate::operation::{Operation, OperationKind};
 use crate::test_support::{document_with_two_paragraphs, property_op};
 use opendoc_core::{
-    Alignment, Block, BlockKind, BlockProperties, BlockProperty, BlockPropertyKey, CellSpan,
-    Document, Inline, Length, LineSpacing, ListKind, StableId, TableCell, TableRow, TextDirection,
+    Alignment, Block, BlockKind, BlockProperties, BlockProperty, BlockPropertyKey, BorderStyle,
+    CellBorder, CellSpan, Color, Document, Inline, Length, LineSpacing, ListKind, StableId,
+    TableCell, TableRow, TextDirection,
 };
+use std::collections::BTreeMap;
 
 #[test]
 fn block_properties_are_set_and_cleared_through_the_operation_path() {
@@ -43,7 +46,6 @@ fn block_properties_are_set_and_cleared_through_the_operation_path() {
     assert_eq!(set.document.blocks[0].properties.indent_start, Some(indent));
     // Untouched blocks stay inheriting.
     assert!(set.document.blocks[1].properties.is_empty());
-    set.document.validate().unwrap();
 
     let cleared = merge_operations(
         &set.document,
@@ -66,6 +68,208 @@ fn block_properties_are_set_and_cleared_through_the_operation_path() {
 }
 
 #[test]
+fn ordered_list_starts_are_validated_canonical_and_convergent_per_run_level() {
+    let mut base = Document::new("Lists");
+    let list_id = StableId::parse("list-run").unwrap();
+    base.blocks.push(Block {
+        id: StableId::parse("ordered-item").unwrap(),
+        kind: BlockKind::ListItem {
+            list_id: list_id.clone(),
+            level: 0,
+            kind: ListKind::Ordered,
+        },
+        content: vec![Inline::text("one")],
+        properties: BlockProperties::default(),
+    });
+    base.validate().unwrap();
+
+    let set = property_op(
+        "a",
+        1,
+        OperationKind::SetListStart {
+            list_id: list_id.clone(),
+            level: 0,
+            start: 7,
+        },
+    );
+    let reset = property_op(
+        "a",
+        2,
+        OperationKind::SetListStart {
+            list_id: list_id.clone(),
+            level: 0,
+            start: 1,
+        },
+    );
+    let merged = merge_operations(&base, &[vec![set.clone(), reset]]).unwrap();
+    assert!(merged.warnings.is_empty());
+    assert!(
+        merged.document.list_properties.is_empty(),
+        "one is canonical absence"
+    );
+
+    let a = property_op(
+        "a",
+        3,
+        OperationKind::SetListStart {
+            list_id: list_id.clone(),
+            level: 0,
+            start: 4,
+        },
+    );
+    let b = property_op(
+        "b",
+        1,
+        OperationKind::SetListStart {
+            list_id: list_id.clone(),
+            level: 0,
+            start: 9,
+        },
+    );
+    let ab = merge_operations(&base, &[vec![a.clone()], vec![b.clone()]]).unwrap();
+    let ba = merge_operations(&base, &[vec![b], vec![a]]).unwrap();
+    assert_eq!(ab.document, ba.document);
+    assert_eq!(ab.document.list_properties[&list_id].start_for(0), 9);
+}
+
+#[test]
+fn ordered_list_formats_are_canonical_and_convergent_per_run_level() {
+    let mut base = Document::new("Lists");
+    let list_id = StableId::parse("format-run").unwrap();
+    base.blocks.push(Block {
+        id: StableId::parse("format-item").unwrap(),
+        kind: BlockKind::ListItem {
+            list_id: list_id.clone(),
+            level: 0,
+            kind: ListKind::Ordered,
+        },
+        content: vec![Inline::text("one")],
+        properties: BlockProperties::default(),
+    });
+    let inherited = property_op(
+        "a",
+        1,
+        OperationKind::SetListFormat {
+            list_id: list_id.clone(),
+            level: 0,
+            format: opendoc_core::OrderedListFormat::Decimal,
+        },
+    );
+    let canonical = merge_operations(&base, &[vec![inherited]]).unwrap();
+    assert!(canonical.document.list_properties.is_empty());
+
+    let a = property_op(
+        "a",
+        2,
+        OperationKind::SetListFormat {
+            list_id: list_id.clone(),
+            level: 0,
+            format: opendoc_core::OrderedListFormat::UpperAlpha,
+        },
+    );
+    let b = property_op(
+        "b",
+        1,
+        OperationKind::SetListFormat {
+            list_id: list_id.clone(),
+            level: 0,
+            format: opendoc_core::OrderedListFormat::UpperRoman,
+        },
+    );
+    let ab = merge_operations(&base, &[vec![a.clone()], vec![b.clone()]]).unwrap();
+    let ba = merge_operations(&base, &[vec![b], vec![a]]).unwrap();
+    assert_eq!(ab.document, ba.document);
+    assert_eq!(
+        ab.document.list_properties[&list_id].format_for(0),
+        opendoc_core::OrderedListFormat::UpperRoman
+    );
+}
+
+#[test]
+fn custom_bullet_markers_converge_as_one_run_level_setting() {
+    let mut base = Document::new("Lists");
+    let list_id = StableId::parse("bullet-run").unwrap();
+    base.blocks.push(Block {
+        id: StableId::parse("bullet-item").unwrap(),
+        kind: BlockKind::ListItem {
+            list_id: list_id.clone(),
+            level: 0,
+            kind: ListKind::Bullet,
+        },
+        content: vec![Inline::text("one")],
+        properties: BlockProperties::default(),
+    });
+    let a = property_op(
+        "a",
+        1,
+        OperationKind::SetListBulletMarker {
+            list_id: list_id.clone(),
+            level: 0,
+            marker: opendoc_core::BulletListMarker::parse("→").unwrap(),
+        },
+    );
+    let b = property_op(
+        "b",
+        2,
+        OperationKind::SetListBulletMarker {
+            list_id: list_id.clone(),
+            level: 0,
+            marker: opendoc_core::BulletListMarker::parse("◆").unwrap(),
+        },
+    );
+    let ab = merge_operations(&base, &[vec![a.clone()], vec![b.clone()]]).unwrap();
+    let ba = merge_operations(&base, &[vec![b], vec![a]]).unwrap();
+    assert_eq!(ab.document, ba.document);
+    assert_eq!(
+        ab.document.list_properties[&list_id]
+            .bullet_marker_for(0)
+            .glyph(),
+        "◆"
+    );
+}
+
+#[test]
+fn malformed_custom_bullet_marker_operation_is_warned_and_cannot_poison_the_document() {
+    let mut base = Document::new("Lists");
+    let list_id = StableId::parse("bullet-run").unwrap();
+    base.blocks.push(Block {
+        id: StableId::parse("bullet-item").unwrap(),
+        kind: BlockKind::ListItem {
+            list_id: list_id.clone(),
+            level: 0,
+            kind: ListKind::Bullet,
+        },
+        content: vec![Inline::text("one")],
+        properties: BlockProperties::default(),
+    });
+
+    // Deserialisation deliberately keeps an untrusted literal as `Custom` so
+    // the merge boundary, rather than a transport parser, can reject it
+    // consistently. A CSS-significant quote must never become model state.
+    let result = merge_operations(
+        &base,
+        &[vec![property_op(
+            "a",
+            1,
+            OperationKind::SetListBulletMarker {
+                list_id: list_id.clone(),
+                level: 0,
+                marker: opendoc_core::BulletListMarker::Custom("\"".to_string()),
+            },
+        )]],
+    )
+    .unwrap();
+
+    assert!(result.document.list_properties.is_empty());
+    assert_eq!(result.warnings.len(), 1);
+    assert_eq!(result.warnings[0].code, "invalid-list-bullet-marker");
+    result
+        .document
+        .validate()
+        .expect("invalid operation leaves a valid document");
+}
+
+#[test]
 fn block_properties_apply_to_blocks_nested_in_table_cells() {
     let mut base = Document::new("Doc");
     let nested = Block::paragraph("cell text");
@@ -74,6 +278,8 @@ fn block_properties_apply_to_blocks_nested_in_table_cells() {
         id: StableId::parse("table-1").unwrap(),
         kind: BlockKind::table(vec![TableRow {
             id: StableId::parse("row-1").unwrap(),
+            height: None,
+            header: false,
             cells: vec![TableCell {
                 id: StableId::parse("cell-1").unwrap(),
                 span: CellSpan::SINGLE,
@@ -145,7 +351,6 @@ fn concurrent_edits_to_the_same_property_converge_last_writer_wins() {
         forward.document.blocks[0].properties.alignment,
         Some(Alignment::Justify)
     );
-    forward.document.validate().unwrap();
 }
 
 #[test]
@@ -301,7 +506,6 @@ fn property_edits_to_a_concurrently_deleted_block_degrade_to_warnings() {
             .count(),
         2
     );
-    forward.document.validate().unwrap();
 }
 
 #[test]
@@ -334,7 +538,6 @@ fn out_of_range_property_values_degrade_to_warnings_instead_of_corrupting_the_do
         result.document.blocks[0].properties.alignment,
         Some(Alignment::Center)
     );
-    result.document.validate().unwrap();
 }
 
 #[test]
@@ -381,7 +584,6 @@ fn list_kind_updates_carry_checklist_state_through_merge() {
         checked.document.blocks[0].list_kind(),
         Some(ListKind::Checklist { checked: true })
     );
-    checked.document.validate().unwrap();
 
     // Two actors racing on the checkbox still converge.
     let a = vec![property_op(
@@ -460,13 +662,72 @@ fn deterministic_pseudo_fuzz_of_property_edits_converges() {
                 BlockPropertyKey::Direction => BlockProperty::Direction(
                     TextDirection::ALL[(rng as usize >> 32) % TextDirection::ALL.len()],
                 ),
+                BlockPropertyKey::KeepWithNext => BlockProperty::KeepWithNext(rng & 1 == 1),
+                BlockPropertyKey::Background => BlockProperty::Background(Color::from_rgb(
+                    (rng >> 32) as u8,
+                    (rng >> 40) as u8,
+                    (rng >> 48) as u8,
+                )),
+                BlockPropertyKey::Border => BlockProperty::Border(
+                    CellBorder::new(
+                        BorderStyle::Solid,
+                        Length::from_twips(20).unwrap(),
+                        Color::from_rgb((rng >> 32) as u8, (rng >> 40) as u8, (rng >> 48) as u8),
+                    )
+                    .unwrap(),
+                ),
             };
             OperationKind::SetBlockProperty { block_id, property }
         };
         streams[actor_index].push(property_op(&format!("actor-{actor_index}"), seq, kind));
     }
 
+    // The oracle, computed without the merge.
+    //
+    // Every operation here is context-free, so happened-before is exactly each
+    // actor's own chain and `causal_order` degenerates to `(actor, seq)`. Last
+    // writer wins per (block, key), which a `BTreeMap` keyed on the operation
+    // id replays directly. Without this the test asserted only that four
+    // groupings of one operation set agree, which they do by construction:
+    // a `set_block_property` that wrote the value under the *wrong* key — or
+    // under a constant key — passed it, because every grouping wrote it wrong
+    // in the same way. PLAN88 §7.
+    let mut replayed: BTreeMap<OperationId, &OperationKind> = BTreeMap::new();
+    for operation in streams.iter().flatten() {
+        replayed.insert(operation.id.clone(), &operation.kind);
+    }
+    let mut expected: BTreeMap<(StableId, BlockPropertyKey), BlockProperty> = BTreeMap::new();
+    for kind in replayed.values() {
+        match kind {
+            OperationKind::SetBlockProperty { block_id, property } => {
+                expected.insert((block_id.clone(), property.key()), *property);
+            }
+            OperationKind::ClearBlockProperty { block_id, key } => {
+                expected.remove(&(block_id.clone(), *key));
+            }
+            other => panic!("the generator only writes properties, got {other:?}"),
+        }
+    }
+
     let reference = merge_operations(&base, &streams).unwrap();
+    for block in &reference.document.blocks {
+        for key in BlockPropertyKey::ALL {
+            assert_eq!(
+                block.properties.get(key),
+                expected.get(&(block.id.clone(), key)).cloned(),
+                "block {} property {key:?} is not what the last writer wrote",
+                block.id
+            );
+        }
+    }
+    // …and the oracle has to have something to say: a document where every
+    // property ended up cleared would make the loop above vacuous.
+    assert!(
+        expected.len() > BlockPropertyKey::ALL.len(),
+        "only {} property values survived the script",
+        expected.len()
+    );
+
     let single = streams.iter().flatten().cloned().collect::<Vec<_>>();
     let reversed = streams
         .iter()
@@ -500,5 +761,4 @@ fn deterministic_pseudo_fuzz_of_property_edits_converges() {
         .blocks
         .iter()
         .any(|block| !block.properties.is_empty()));
-    reference.document.validate().unwrap();
 }

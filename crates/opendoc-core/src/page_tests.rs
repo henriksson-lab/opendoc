@@ -123,6 +123,60 @@ fn header_and_footer_share_the_document_id_space() {
 }
 
 #[test]
+fn first_page_furniture_distinguishes_inheritance_from_explicit_suppression() {
+    let mut doc = Document::new("Page");
+    doc.blocks.push(Block::paragraph("body"));
+    let mut ordinary = Block::paragraph("ordinary header");
+    ordinary.id = StableId::parse("ordinary-header").unwrap();
+    doc.header.push(ordinary);
+
+    assert_eq!(
+        doc.furniture_for_page(HeaderFooterSlot::Header, 0),
+        doc.furniture(HeaderFooterSlot::Header),
+        "a missing override inherits the ordinary header"
+    );
+    assert!(!doc.has_furniture_override(HeaderFooterSlot::FirstPageHeader));
+
+    *doc.furniture_mut(HeaderFooterSlot::FirstPageHeader) = Vec::new();
+    assert!(doc.has_furniture_override(HeaderFooterSlot::FirstPageHeader));
+    assert!(doc
+        .furniture_for_page(HeaderFooterSlot::Header, 0)
+        .is_empty());
+    assert_eq!(
+        doc.furniture_for_page(HeaderFooterSlot::Header, 1),
+        doc.furniture(HeaderFooterSlot::Header)
+    );
+    doc.validate().unwrap();
+}
+
+#[test]
+fn even_page_furniture_inherits_and_does_not_override_page_one() {
+    let mut doc = Document::new("Page");
+    doc.blocks.push(Block::paragraph("body"));
+    let mut ordinary = Block::paragraph("ordinary header");
+    ordinary.id = StableId::parse("ordinary-even-header").unwrap();
+    doc.header.push(ordinary);
+    let mut even = Block::paragraph("even header");
+    even.id = StableId::parse("even-header").unwrap();
+    *doc.furniture_mut(HeaderFooterSlot::EvenPageHeader) = vec![even];
+
+    assert_eq!(
+        doc.furniture_for_page(HeaderFooterSlot::Header, 0),
+        doc.furniture(HeaderFooterSlot::Header),
+        "page one is odd, so an even override cannot affect it"
+    );
+    assert_eq!(
+        doc.furniture_for_page(HeaderFooterSlot::Header, 1),
+        doc.furniture(HeaderFooterSlot::EvenPageHeader)
+    );
+    assert_eq!(
+        doc.furniture_for_page(HeaderFooterSlot::Header, 2),
+        doc.furniture(HeaderFooterSlot::Header)
+    );
+    doc.validate().unwrap();
+}
+
+#[test]
 fn page_furniture_rejects_content_that_needs_a_body_flow() {
     let mut doc = Document::new("Page");
     doc.blocks.push(Block::paragraph("body"));

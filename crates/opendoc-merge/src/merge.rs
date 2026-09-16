@@ -1,7 +1,7 @@
 //! The merge entry point: ordering operations and folding them into a document.
 
 use crate::anchors::{repair_comment_anchors, repair_suggestion_anchors};
-use crate::apply::{apply, apply_mark_range};
+use crate::apply::{apply, apply_mark_range, OperationProvenance};
 use crate::causal::{causal_order, ActorId, OperationId};
 use crate::citations::{
     refresh_citation_projection_caches, repair_citation_placements, repair_citation_references,
@@ -9,9 +9,8 @@ use crate::citations::{
 };
 use crate::footnotes::{repair_missing_footnote_references, repair_unreferenced_footnotes};
 use crate::inline_edit::edit_inline_text;
-use crate::inline_ops::inline_id;
 use crate::operation::{Operation, OperationKind};
-use crate::text_sequence::{resolve_run, RunEdit, RunEditKind};
+use crate::text_sequence::{collect_text_run_edits, is_offset_addressed, resolve_run, RunEdit};
 use crate::validate::marks_valid_for_merge;
 use opendoc_core::{Document, ModelError, ModelWarning, StableId};
 use std::collections::{BTreeMap, BTreeSet};
@@ -22,10 +21,82 @@ pub struct MergeResult {
     pub warnings: Vec<ModelWarning>,
 }
 
+/// The order in which a local batch's inverse-capture fold must model the
+/// merge's effects.
+///
+/// This is deliberately an order of the caller's indexes, rather than an
+/// order of operation ids: the caller has already assigned its local causal
+/// contexts in gesture order.  The merge applies ordinary operations first,
+/// then suggestion resolutions, comment restores, mark ranges, and finally
+/// offset-addressed character edits. A fold that applies any of those deferred
+/// kinds immediately can capture an inverse from a state the batch merge never
+/// has.
+///
+/// Keep this beside the merge's deferred passes.  `opendoc-app` needs this
+/// answer while capturing inverses, and a second spelling there would drift
+/// as readily as the whole-run-reset rule did.
+pub fn batch_inverse_capture_order<'a>(
+    batch: impl IntoIterator<Item = &'a OperationKind>,
+) -> Vec<usize> {
+    let mut ordinary = Vec::new();
+    let mut suggestion_resolutions = Vec::new();
+    let mut comment_restores = Vec::new();
+    let mut mark_ranges = Vec::new();
+    let mut text_run_edits = Vec::new();
+    for (index, kind) in batch.into_iter().enumerate() {
+        match kind {
+            OperationKind::AcceptSuggestion { .. } | OperationKind::RejectSuggestion { .. } => {
+                suggestion_resolutions.push(index)
+            }
+            OperationKind::RestoreCommentThread { .. } | OperationKind::RestoreComment { .. } => {
+                comment_restores.push(index)
+            }
+            OperationKind::AddMarkRange { .. } => mark_ranges.push(index),
+            kind if is_offset_addressed(kind) => text_run_edits.push(index),
+            _ => ordinary.push(index),
+        }
+    }
+    ordinary.extend(suggestion_resolutions);
+    ordinary.extend(comment_restores);
+    ordinary.extend(mark_ranges);
+    ordinary.extend(text_run_edits);
+    ordinary
+}
+
 pub fn merge_operations(
     base: &Document,
     streams: &[Vec<Operation>],
 ) -> Result<MergeResult, ModelError> {
+    crate::instrument::count_document_copy();
+    let mut document = base.clone();
+    let warnings = merge_operations_into(&mut document, streams)?;
+    Ok(MergeResult { document, warnings })
+}
+
+/// [`merge_operations`] without the copy: the same fold, written straight into
+/// `document`.
+///
+/// `merge_operations` **is** this function applied to a clone, which is the
+/// whole difference between them, so neither can drift from the other's
+/// semantics. It exists because folding a batch one operation at a time —
+/// which is what capturing an inverse per operation needs, since an inverse
+/// has to be taken against the state its own operation applied to (ADR 0017) —
+/// otherwise copies the entire document, and frees the copy it replaced, once
+/// per operation. That is quadratic in the document and in the batch at once,
+/// and for marking text across a long document it was the dominant cost of
+/// the gesture.
+///
+/// **On `Err` the document is left holding the merged state that failed to
+/// validate**, not the state it started in. That is the one behavioural
+/// difference from `merge_operations`, which discards its copy, and it is why
+/// this is not a drop-in replacement at a call site that has to leave the
+/// caller's document untouched when an edit is refused. A caller that needs
+/// that all-or-nothing guarantee merges into a copy — which is
+/// `merge_operations`.
+pub fn merge_operations_into(
+    document: &mut Document,
+    streams: &[Vec<Operation>],
+) -> Result<Vec<ModelWarning>, ModelError> {
     let mut deduplicated: BTreeMap<OperationId, Operation> = BTreeMap::new();
     let mut duplicate_operation_ids = BTreeSet::new();
     let mut invalid_operation_id_warnings = BTreeSet::new();
@@ -59,7 +130,6 @@ pub fn merge_operations(
         .map(|index| &operations[index])
         .collect();
 
-    let mut document = base.clone();
     for message in invalid_operation_id_warnings {
         warnings.push(ModelWarning {
             code: "invalid-operation-id".to_string(),
@@ -105,7 +175,7 @@ pub fn merge_operations(
                     .entry((thread_id.clone(), comment_id.clone()))
                     .or_default()
                     .insert(op_id.actor.clone());
-                if base
+                if document
                     .comments
                     .iter()
                     .find(|thread| thread.id == *thread_id && !thread.deleted)
@@ -135,65 +205,16 @@ pub fn merge_operations(
     // pass has settled, so an offset is interpreted in the context it was
     // written in rather than against a document later operations have already
     // shifted. ADR 0007.
-    let mut text_run_edits: BTreeMap<StableId, Vec<RunEdit>> = BTreeMap::new();
-    // The rank of the last operation that wrote a run's text wholesale.
-    // Character operations ordered before it lost to it, exactly as they did
-    // when the pass was sequential.
-    let mut text_run_resets: BTreeMap<StableId, usize> = BTreeMap::new();
-    for (rank, operation) in ordered.into_iter().enumerate() {
-        let op_id = &operation.id;
-        match &operation.kind {
-            OperationKind::InsertText {
-                inline_id,
-                offset,
-                text,
-            } => {
-                if !text.is_empty() {
-                    text_run_edits
-                        .entry(inline_id.clone())
-                        .or_default()
-                        .push(RunEdit {
-                            rank,
-                            id: op_id.clone(),
-                            context: operation.context.clone(),
-                            kind: RunEditKind::Insert {
-                                offset: *offset,
-                                text: text.clone(),
-                            },
-                        });
-                }
-                continue;
-            }
-            OperationKind::DeleteText {
-                inline_id,
-                start,
-                end,
-            } => {
-                if end > start {
-                    text_run_edits
-                        .entry(inline_id.clone())
-                        .or_default()
-                        .push(RunEdit {
-                            rank,
-                            id: op_id.clone(),
-                            context: operation.context.clone(),
-                            kind: RunEditKind::Delete {
-                                start: *start,
-                                end: *end,
-                            },
-                        });
-                }
-                continue;
-            }
-            OperationKind::UpdateInlineText { inline_id, .. } => {
-                text_run_resets.insert(inline_id.clone(), rank);
-            }
-            OperationKind::InsertInline { inline, .. } => {
-                text_run_resets.insert(inline_id(inline).clone(), rank);
-            }
-            _ => {}
+    //
+    // One pass collects them and the whole-run writes that reset a run's base;
+    // the inverse computation reuses it, so the merge and an undo cannot
+    // disagree about which operations are offset-addressed.
+    let (text_run_edits, text_run_resets) = collect_text_run_edits(&ordered);
+    for operation in ordered.iter() {
+        if is_offset_addressed(&operation.kind) {
+            continue;
         }
-        let op_id = op_id.clone();
+        let op_id = operation.id.clone();
         let kind = operation.kind.clone();
         match kind {
             OperationKind::UpdateSuggestionInsertContent { suggestion_id, .. }
@@ -259,16 +280,30 @@ pub fn merge_operations(
             }
             OperationKind::AddMarkRange { range, mark } => mark_ranges.push((range, mark)),
             OperationKind::RestoreCommentThread { .. } | OperationKind::RestoreComment { .. } => {
-                comment_restores.push(kind);
+                comment_restores.push((
+                    kind,
+                    OperationProvenance {
+                        operation_actor: op_id.actor.0.clone(),
+                        operation_seq: op_id.seq,
+                    },
+                ));
             }
-            kind => apply(&mut document, &mut warnings, kind),
+            kind => apply(
+                document,
+                &mut warnings,
+                kind,
+                Some(OperationProvenance {
+                    operation_actor: op_id.actor.0.clone(),
+                    operation_seq: op_id.seq,
+                }),
+            ),
         }
     }
     for kind in suggestion_resolutions {
-        apply(&mut document, &mut warnings, kind);
+        apply(document, &mut warnings, kind, None);
     }
-    for kind in comment_restores {
-        apply(&mut document, &mut warnings, kind);
+    for (kind, provenance) in comment_restores {
+        apply(document, &mut warnings, kind, Some(provenance));
     }
     for (range, mark) in mark_ranges {
         if marks_valid_for_merge(
@@ -277,26 +312,21 @@ pub fn merge_operations(
             "mark range operation",
             &range.start,
         ) {
-            apply_mark_range(&mut document, &mut warnings, range, mark);
+            apply_mark_range(document, &mut warnings, range, mark);
         }
     }
-    apply_text_run_edits(
-        &mut document,
-        &mut warnings,
-        text_run_edits,
-        &text_run_resets,
-    );
-    repair_comment_anchors(&mut document, &mut warnings);
-    repair_suggestion_anchors(&mut document, &mut warnings);
-    repair_citation_placements(&mut document, &mut warnings);
-    repair_missing_footnote_references(&mut document, &mut warnings);
-    repair_unreferenced_footnotes(&mut document, &mut warnings);
-    repair_citation_references(&mut document, &mut warnings);
-    repair_inline_citation_labels(&mut document, &mut warnings);
-    refresh_citation_projection_caches(&mut document);
-    document.warnings.extend(warnings.clone());
+    apply_text_run_edits(document, &mut warnings, text_run_edits, &text_run_resets);
+    repair_comment_anchors(document, &mut warnings);
+    repair_suggestion_anchors(document, &mut warnings);
+    repair_citation_placements(document, &mut warnings);
+    repair_missing_footnote_references(document, &mut warnings);
+    repair_unreferenced_footnotes(document, &mut warnings);
+    repair_citation_references(document, &mut warnings);
+    repair_inline_citation_labels(document, &mut warnings);
+    refresh_citation_projection_caches(document);
+    document.warnings.extend(warnings.iter().cloned());
     document.validate()?;
-    Ok(MergeResult { document, warnings })
+    Ok(warnings)
 }
 
 /// Deterministic tie-break between two payloads that claim the same

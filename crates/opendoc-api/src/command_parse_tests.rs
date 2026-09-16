@@ -34,53 +34,36 @@ fn migrated_commands_exist_in_rust_metadata() {
                 "mode": "tauri-local",
             }))
             .expect("runtime profile"),
-            subject: None,
-            document_uuid: None,
-            presence: Vec::new(),
-            permissions: Vec::new(),
         }),
         OpenDocCommand::AuthorizeRuntimeCommand(AuthorizeRuntimeCommandArgs {
             profile: runtime_profile_from_args(&json!({
                 "mode": "tauri-local",
             }))
             .expect("runtime profile"),
-            subject: None,
-            document_uuid: None,
             command_name: "get_document".to_string(),
-            permissions: Vec::new(),
         }),
         OpenDocCommand::CreateRuntimeShareInvite(CreateRuntimeShareInviteArgs {
             profile: runtime_profile_from_args(&json!({
                 "mode": "multi-user-service",
             }))
             .expect("runtime profile"),
-            subject: None,
-            document_uuid: None,
             target_subject: None,
-            actions: Vec::new(),
-            permissions: Vec::new(),
+            requested_role: None,
         }),
         OpenDocCommand::RelayRuntimeSync(RelayRuntimeSyncArgs {
             profile: runtime_profile_from_args(&json!({
                 "mode": "multi-user-service",
             }))
             .expect("runtime profile"),
-            subject: None,
-            document_uuid: None,
-            base_manifest: None,
             operations: Vec::new(),
-            permissions: Vec::new(),
-            presence: Vec::new(),
         }),
         OpenDocCommand::ResolveRuntimeDocumentLookup(ResolveRuntimeDocumentLookupArgs {
             profile: runtime_profile_from_args(&json!({
                 "mode": "tauri-local",
             }))
             .expect("runtime profile"),
-            subject: None,
             document_uuid: None,
             doi: None,
-            permissions: Vec::new(),
             service_index: Vec::new(),
             scanned_documents: Vec::new(),
         }),
@@ -297,6 +280,10 @@ fn migrated_commands_exist_in_rust_metadata() {
             block_id: "block".to_string(),
             after_inline_id: None,
         }),
+        OpenDocCommand::InsertEndnoteRefAfter(InsertFootnoteRefAfterArgs {
+            block_id: "block".to_string(),
+            after_inline_id: None,
+        }),
         OpenDocCommand::UpdateFootnoteBody(UpdateFootnoteBodyArgs {
             footnote_id: "footnote".to_string(),
             body: "Body".to_string(),
@@ -331,6 +318,10 @@ fn migrated_commands_exist_in_rust_metadata() {
             block_id: "block".to_string(),
             level: 0,
             list_kind: "bullet".to_string(),
+        }),
+        OpenDocCommand::SetOrderedListStart(SetOrderedListStartArgs {
+            block_id: "block".to_string(),
+            start: 7,
         }),
         OpenDocCommand::InsertPageBreakAfter(AfterBlockArgs {
             after_block_id: "block".to_string(),
@@ -485,6 +476,9 @@ fn migrated_commands_exist_in_rust_metadata() {
             mark_kind: "bold".to_string(),
             value: None,
             action: None,
+        }),
+        OpenDocCommand::ImportBibtex(ImportBibtexArgs {
+            source: "@book{ref, title = {Source}}".to_string(),
         }),
         OpenDocCommand::AddBibliographyReference(sample_bibliography_metadata()),
         OpenDocCommand::UpdateBibliographyReference(UpdateBibliographyReferenceArgs {
@@ -740,6 +734,13 @@ fn migrated_commands_exist_in_rust_metadata() {
             sheet_id: "sheet".to_string(),
             range: "A1:B2".to_string(),
         }),
+        OpenDocCommand::SetSpreadsheetPrintArea(SheetRangeArgs {
+            sheet_id: "sheet".to_string(),
+            range: "A1:B2".to_string(),
+        }),
+        OpenDocCommand::ClearSpreadsheetPrintArea(SheetIdArgs {
+            sheet_id: "sheet".to_string(),
+        }),
         OpenDocCommand::SetSpreadsheetBasicFilterOptions(FilterOptionsArgs {
             sheet_id: "sheet".to_string(),
             criteria: vec![SheetFilterCriterion {
@@ -843,6 +844,52 @@ fn every_rust_metadata_command_has_typed_parser() {
     }
 }
 
+/// An `optional` arg in the registry must really be one.
+///
+/// `every_rust_metadata_command_has_typed_parser` proves the declared args are
+/// *enough* for the parser; it says nothing about the ones the registry
+/// promises a caller may leave out. That promise reaches the frontend as a `?`
+/// in the generated `DesktopCommandArgs`, so a spec that marks an arg optional
+/// where the parser in fact demands it produces TypeScript that compiles and a
+/// command that fails at runtime. Nothing else compares the two: the flag and
+/// the parser arm are written by hand, in different files.
+///
+/// The opposite direction — an arg declared required that the parser would
+/// tolerate being absent — is deliberately not asserted. Fifty-one args are
+/// like that today, every one of them a `NullableString` whose parser reads a
+/// missing key as `null`, and making the caller state the null explicitly is
+/// the stricter contract rather than a broken one.
+#[test]
+fn an_arg_the_registry_calls_optional_can_really_be_left_out() {
+    let mut broken = Vec::new();
+    for spec in crate::COMMANDS {
+        for arg in spec.args.iter().filter(|arg| arg.optional) {
+            let mut object = serde_json::Map::new();
+            for other in spec.args {
+                if other.name != arg.name {
+                    object.insert(other.name.to_string(), sample_arg_value(other));
+                }
+            }
+            match parse_json_command(spec.name, &Value::Object(object)) {
+                Ok(Some(command)) => assert_eq!(command.name(), spec.name),
+                Ok(None) => broken.push(format!(
+                    "{}: no typed parser once `{}` is left out",
+                    spec.name, arg.name
+                )),
+                Err(err) => broken.push(format!(
+                    "{}: the registry marks `{}` optional, the parser refuses it missing: {err}",
+                    spec.name, arg.name
+                )),
+            }
+        }
+    }
+    assert!(
+        broken.is_empty(),
+        "the generated command bindings promise a `?` the parser does not honour:\n{}",
+        broken.join("\n")
+    );
+}
+
 fn sample_citation_item() -> AppCitationItem {
     AppCitationItem {
         reference_id: "ref".to_string(),
@@ -886,7 +933,9 @@ fn sample_arg_value(arg: &CommandArg) -> Value {
     }
     match arg.ty {
         CommandArgType::String | CommandArgType::RuntimeMode => json!(sample_string(arg.name)),
-        CommandArgType::NullableString | CommandArgType::NullableBoolean => Value::Null,
+        CommandArgType::NullableString
+        | CommandArgType::NullableNumber
+        | CommandArgType::NullableBoolean => Value::Null,
         CommandArgType::Number => json!(1),
         CommandArgType::Boolean => json!(false),
         CommandArgType::StringArray => json!(["value"]),

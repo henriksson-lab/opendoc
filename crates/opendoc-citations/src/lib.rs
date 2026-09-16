@@ -1,12 +1,17 @@
 //! Citation parsing and rendering for OpenDoc documents.
 //!
-//! Real CSL styles (APA, MLA, Chicago, IEEE, Vancouver, Harvard, Nature, and
-//! every other style bundled with `hayagriva`) are rendered through the
-//! [`hayagriva`] CSL engine. Reference sources in BibTeX/BibLaTeX, RIS, and
-//! CSL-JSON are parsed into a rich reference model. The pre-existing
-//! `render_citation_group` / `render_bibliography` entry points remain and fall
-//! back to the original lightweight renderer only for style names that no CSL
-//! style is known for (such as the historical `apa-7th` default).
+//! Real CSL styles — APA, MLA, Chicago (author-date and notes), IEEE,
+//! Vancouver, Harvard and Nature, the eight whose CSL data this crate
+//! bundles (`src/styles.rs` says which, and why those) — are rendered
+//! through the [`hayagriva`] CSL engine. Reference sources in
+//! BibTeX/BibLaTeX, RIS, and CSL-JSON are parsed into a rich reference model.
+//! The pre-existing `render_citation_group` / `render_bibliography` entry
+//! points remain and fall back to the original lightweight renderer for
+//! style names no bundled CSL style is known for — OpenDoc's own `numeric`,
+//! and any CSL style that exists upstream but is not bundled here, which
+//! [`citation_support_warnings`] reports rather than leaving silent — the
+//! historical `apa-7th` default included, which used to be exempt from both
+//! the engine and the warning.
 
 mod model;
 mod parse;
@@ -30,8 +35,9 @@ pub use render::{
     RichBibliographyEntry, RichSegment,
 };
 pub use styles::{
-    all_style_names, available_locales, available_styles, load_style, resolve_locale,
-    resolve_style_name, style_info, CitationStyleInfo,
+    available_locales, available_styles, bundled_style_names, bundled_style_provenance,
+    citation_support_warnings, load_style, resolve_locale, resolve_style_name, style_info,
+    CitationStyleInfo, UNBUNDLED_LOCALE_WARNING, UNBUNDLED_STYLE_WARNING,
 };
 
 use opendoc_core::{
@@ -58,14 +64,37 @@ impl fmt::Display for CitationError {
 
 impl std::error::Error for CitationError {}
 
-/// Style names whose plain-text output from [`render_citation_group`] and
-/// [`render_bibliography`] existing callers (document projections, caches,
-/// and their fixtures) depend on. These keep the legacy renderer in the two
-/// compatibility entry points; [`render_citation`], [`render_database`], and
-/// [`render_bibliography_rich`] always use the CSL engine (`ieee` included).
-pub const LEGACY_WRAPPER_STYLES: &[&str] = &["apa-7th", "numeric", "ieee"];
+/// The style names OpenDoc renders with its own built-in formatter *by
+/// design*, rather than through the CSL engine.
+///
+/// There is exactly one: `numeric`, which is not a CSL style at all — it is
+/// OpenDoc's own "number them in reference order" formatter, and no CSL data
+/// exists to render it with. That makes this list the set of styles
+/// [`citation_support_warnings`] is silent about: a built-in style is not a
+/// degradation.
+///
+/// It used to hold two more, and both were bugs.
+///
+/// * `ieee` **is** one of the eight bundled CSL styles. Listing it here made
+///   [`render_citation_group`] and [`render_bibliography`] format an IEEE
+///   document with the legacy renderer while [`render_citation`],
+///   [`render_database`] and [`render_bibliography_rich`] formatted the *same*
+///   document through CSL — two entry points disagreeing about one document,
+///   so what the editor showed and what the bibliography panel showed could
+///   not both be right.
+/// * `apa-7th` is the historical `CitationDatabase::default().style`, so
+///   listing it here exempted **every new document** from
+///   [`citation_support_warnings`]. It is not a CSL style and it does not
+///   render like one, which is precisely the thing that warning exists to
+///   say; the exemption made the commonest database in the product the one
+///   nobody was ever told about. It now warns like any other unbundled name.
+///   The renderer it falls back to is unchanged — an unresolvable name takes
+///   the same path with or without the exemption — so this changes what a
+///   user is *told*, not what they see.
+pub const LEGACY_WRAPPER_STYLES: &[&str] = &["numeric"];
 
-/// Whether the compatibility entry points keep the legacy renderer for a style.
+/// Whether the compatibility entry points keep the built-in renderer for a
+/// style.
 pub fn is_legacy_wrapper_style(style: &str) -> bool {
     let style = style.trim().to_ascii_lowercase();
     LEGACY_WRAPPER_STYLES.contains(&style.as_str())
@@ -109,6 +138,28 @@ pub fn render_bibliography(database: &CitationDatabase) -> Vec<RenderedBibliogra
             .collect(),
         Err(_) => render_bibliography_legacy(database),
     }
+}
+
+/// Render only records used by at least one live citation group.
+///
+/// This is the source for a generated document bibliography. A document can
+/// retain extra imported records (for example a Google Docs reference list),
+/// but the list shown in its body must be derived from citation metadata, not
+/// from that potentially stale presentation. The filtered database keeps the
+/// original live groups so numeric CSL styles retain their citation numbering
+/// and ordering.
+pub fn render_cited_bibliography(database: &CitationDatabase) -> Vec<RenderedBibliographyEntry> {
+    let cited = database
+        .citations
+        .iter()
+        .filter(|citation| !citation.deleted)
+        .flat_map(|citation| citation.items.iter().map(|item| &item.reference_id))
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut cited_database = database.clone();
+    cited_database
+        .references
+        .retain(|reference| cited.contains(&reference.id));
+    render_bibliography(&cited_database)
 }
 
 /// The original renderer, kept for style names without a CSL style.

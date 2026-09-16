@@ -7,8 +7,8 @@ use crate::docx::warnings::{
 use crate::mark;
 use crate::xml::XmlElement;
 use opendoc_core::{
-    Alignment, BlockProperties, BlockPropertyKey, Length, LineSpacing, Mark, MarkKind,
-    TextDirection,
+    Alignment, BlockProperties, BlockPropertyKey, BorderStyle, CellBorder, Color, Length,
+    LineSpacing, Mark, MarkKind, TextDirection,
 };
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -309,13 +309,99 @@ pub(super) fn parse_para_props(ppr: &XmlElement) -> ParsedParaProps {
                     TextDirection::LeftToRight
                 });
             }
-            "pBdr" => parsed.dropped.push(DROPPED_PARAGRAPH_BORDER),
-            "shd" => parsed.dropped.push(DROPPED_PARAGRAPH_SHADING),
+            "keepNext" => parsed.props.keep_with_next = Some(toggle_value(element)),
+            "pBdr" => parse_paragraph_border(element, &mut parsed),
+            "shd" => parse_paragraph_shading(element, &mut parsed),
             "tabs" => parsed.dropped.push(DROPPED_TABS),
             _ => {}
         }
     }
     parsed
+}
+
+/// Imports only the subset that has one faithful OpenDoc representation: all
+/// four outer edges must state the same supported, unpadded line. DOCX's
+/// `between`, `bar`, shadows, per-edge colours and spaces carry information a
+/// uniform paragraph frame cannot retain, so they remain a single named
+/// warning rather than becoming an attractive but false approximation.
+fn parse_paragraph_border(element: &XmlElement, parsed: &mut ParsedParaProps) {
+    let mut edges = Vec::new();
+    let mut unsupported = false;
+    for child in element.elements() {
+        match child.local.as_str() {
+            "top" | "bottom" | "left" | "right" => match parse_paragraph_border_edge(child) {
+                Some(border) => edges.push(border),
+                None => unsupported = true,
+            },
+            _ => unsupported = true,
+        }
+    }
+    if unsupported || edges.len() != 4 || edges.iter().any(|edge| *edge != edges[0]) {
+        parsed.dropped.push(DROPPED_PARAGRAPH_BORDER);
+    } else {
+        parsed.props.border = Some(edges[0]);
+    }
+}
+
+fn parse_paragraph_border_edge(element: &XmlElement) -> Option<CellBorder> {
+    if element
+        .attr("space")
+        .is_some_and(|space| space.trim() != "0")
+        || element
+            .attr("shadow")
+            .is_some_and(|shadow| matches!(shadow.trim(), "1" | "true" | "on"))
+    {
+        return None;
+    }
+    let style = match element.attr("val")?.trim().to_ascii_lowercase().as_str() {
+        "nil" | "none" => return Some(CellBorder::none()),
+        "single" => BorderStyle::Solid,
+        "dashed" => BorderStyle::Dashed,
+        "dotted" => BorderStyle::Dotted,
+        "double" => BorderStyle::Double,
+        _ => return None,
+    };
+    let eighths = element.attr("sz")?.trim().parse::<i32>().ok()?;
+    // Word measures w:sz in eighths of a point; OpenDoc's twips make only
+    // even eighths exact. A nonintegral twip is deliberately not rounded.
+    if eighths < 0 || eighths % 2 != 0 {
+        return None;
+    }
+    let width = Length::from_twips(eighths * 5 / 2).ok()?;
+    let color = element.attr("color")?.trim();
+    if color.eq_ignore_ascii_case("auto")
+        || color.len() != 6
+        || !color.chars().all(|ch| ch.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    CellBorder::new(style, width, Color::parse(&format!("#{color}")).ok()?).ok()
+}
+
+/// DOCX shading can be a patterned foreground/background pair.  A `clear`
+/// (or `nil`) fill is the only form that exactly states our single flat
+/// background; patterned and theme colours remain warned rather than guessed.
+fn parse_paragraph_shading(element: &XmlElement, parsed: &mut ParsedParaProps) {
+    let pattern = element.attr("val").map(str::trim).unwrap_or("clear");
+    if !matches!(pattern, "clear" | "nil") {
+        parsed.dropped.push(DROPPED_PARAGRAPH_SHADING);
+        return;
+    }
+    let Some(fill) = element.attr("fill").map(str::trim) else {
+        return;
+    };
+    if fill.eq_ignore_ascii_case("auto") {
+        return;
+    }
+    let valid = fill.len() == 6 && fill.chars().all(|ch| ch.is_ascii_hexdigit());
+    if !valid {
+        parsed.dropped.push(DROPPED_PARAGRAPH_SHADING);
+        return;
+    }
+    match Color::parse(&format!("#{fill}")) {
+        Ok(color) => parsed.props.background = Some(color),
+        Err(_) => parsed.dropped.push(DROPPED_PARAGRAPH_SHADING),
+    }
 }
 
 pub(super) fn parse_paragraph_alignment(element: &XmlElement, parsed: &mut ParsedParaProps) {

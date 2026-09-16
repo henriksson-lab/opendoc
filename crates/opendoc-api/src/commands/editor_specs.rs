@@ -34,6 +34,14 @@ pub(crate) const SPECS: &[CommandSpec] = &[
     ),
     command!("render_document_html", String, [], false, false, None),
     command!(
+        "render_suggestion_preview_html",
+        String,
+        [arg!("suggestionId", String), arg!("resolution", String)],
+        false,
+        false,
+        Some("read")
+    ),
+    command!(
         "apply_editor_mark",
         EditorResult,
         [

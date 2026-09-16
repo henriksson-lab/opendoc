@@ -40,4 +40,6 @@ mod repository_tests;
 #[cfg(test)]
 mod store_tests;
 #[cfg(test)]
+mod version_coverage_tests;
+#[cfg(test)]
 mod version_history_tests;

@@ -16,6 +16,7 @@
 use std::fmt::Write;
 
 use crate::font;
+use crate::paint::Rgb;
 
 /// Twips in one CSS reference pixel.
 pub const TWIPS_PER_PX: i32 = 15;
@@ -36,6 +37,10 @@ pub struct TypeScale {
     pub heading_size: [i32; 6],
     /// Extra space above `h1`..`h6`.
     pub heading_space_before: [i32; 6],
+    /// Title and subtitle are named display styles, deliberately separate
+    /// from the outline heading scale.
+    pub title_size: i32,
+    pub subtitle_size: i32,
     /// The indent a list level adds.
     pub list_indent: i32,
     /// The indent a checklist level adds: the checkbox is the marker, so the
@@ -57,11 +62,33 @@ pub struct TypeScale {
     pub cell_padding_block: i32,
     /// A table cell's horizontal padding.
     pub cell_padding_inline: i32,
-    /// A collapsed table border.
+    /// A collapsed table border, on an edge the cell states nothing for.
     pub cell_border: i32,
+    /// The colour of that default border. Here for the same reason its width
+    /// is: the stylesheet draws the table on screen and `opendoc-pdf` draws it
+    /// on paper, and a grey line on one surface and a black line on the other
+    /// would be exactly the divergence this scale exists to prevent.
+    pub cell_border_color: Rgb,
     /// Superscript and subscript size, as thousandths of the surrounding
     /// size.
     pub script_size_thousandths: u32,
+    /// Header and footer text. Page furniture is set smaller and tighter than
+    /// the body, and it lives here for the same reason every other size does:
+    /// whatever draws the furniture — the stylesheet on screen, the PDF
+    /// writer on paper — must use the number this crate measured with.
+    pub furniture_size: i32,
+    pub furniture_line_height_thousandths: u32,
+    /// The colour a link, a citation label and a footnote reference are drawn
+    /// in. Here for the same reason every size is: the PDF writer draws them
+    /// and the stylesheet draws them, and they must be the same colour.
+    /// The space above the footnote area's rule, and the indent its numbered
+    /// bodies sit at.
+    pub footnote_space_before: i32,
+    pub footnote_indent: i32,
+    pub link_color: Rgb,
+    pub citation_color: Rgb,
+    pub citation_background: Rgb,
+    pub mention_background: Rgb,
 }
 
 impl Default for TypeScale {
@@ -86,6 +113,8 @@ impl Default for TypeScale {
                 0,
                 0,
             ],
+            title_size: 26 * TWIPS_PER_PT,
+            subtitle_size: 15 * TWIPS_PER_PT,
             list_indent: 28 * TWIPS_PER_PX,
             checklist_indent: 4 * TWIPS_PER_PX,
             checkbox_size: 13 * TWIPS_PER_PX,
@@ -97,7 +126,36 @@ impl Default for TypeScale {
             cell_padding_block: 4 * TWIPS_PER_PX,
             cell_padding_inline: 8 * TWIPS_PER_PX,
             cell_border: TWIPS_PER_PX,
+            cell_border_color: Rgb {
+                red: 0x99,
+                green: 0x99,
+                blue: 0x99,
+            },
             script_size_thousandths: 750,
+            furniture_size: 10 * TWIPS_PER_PT,
+            furniture_line_height_thousandths: 1_300,
+            footnote_space_before: 12 * TWIPS_PER_PX,
+            footnote_indent: 20 * TWIPS_PER_PX,
+            link_color: Rgb {
+                red: 0x11,
+                green: 0x55,
+                blue: 0xcc,
+            },
+            citation_color: Rgb {
+                red: 0x11,
+                green: 0x55,
+                blue: 0xcc,
+            },
+            citation_background: Rgb {
+                red: 0xe8,
+                green: 0xf0,
+                blue: 0xfe,
+            },
+            mention_background: Rgb {
+                red: 0xe8,
+                green: 0xf0,
+                blue: 0xfe,
+            },
         }
     }
 }
@@ -139,6 +197,8 @@ impl TypeScale {
         };
         length("--doc-font-size", self.body_size);
         length("--doc-block-space-after", self.block_space_after);
+        length("--doc-title-size", self.title_size);
+        length("--doc-subtitle-size", self.subtitle_size);
         for (index, size) in self.heading_size.iter().enumerate() {
             length(&format!("--doc-h{}-size", index + 1), *size);
         }
@@ -155,6 +215,9 @@ impl TypeScale {
         length("--doc-cell-padding-block", self.cell_padding_block);
         length("--doc-cell-padding-inline", self.cell_padding_inline);
         length("--doc-cell-border", self.cell_border);
+        length("--doc-furniture-size", self.furniture_size);
+        length("--doc-footnote-space", self.footnote_space_before);
+        length("--doc-footnote-indent", self.footnote_indent);
         let _ = write!(
             out,
             "--doc-line-height: {}; ",
@@ -167,8 +230,30 @@ impl TypeScale {
         );
         let _ = write!(
             out,
-            "--doc-script-size: {}em;",
+            "--doc-furniture-line-height: {}; ",
+            css_number(self.furniture_line_height_thousandths)
+        );
+        let _ = write!(
+            out,
+            "--doc-script-size: {}em; ",
             css_number(self.script_size_thousandths)
+        );
+        let _ = write!(
+            out,
+            "--doc-cell-border-color: {}; ",
+            self.cell_border_color.css()
+        );
+        let _ = write!(out, "--doc-link-color: {}; ", self.link_color.css());
+        let _ = write!(out, "--doc-citation-color: {}; ", self.citation_color.css());
+        let _ = write!(
+            out,
+            "--doc-citation-background: {}; ",
+            self.citation_background.css()
+        );
+        let _ = write!(
+            out,
+            "--doc-mention-background: {};",
+            self.mention_background.css()
         );
         out
     }
@@ -250,6 +335,14 @@ mod tests {
             "--doc-page-break-space",
             "--doc-cell-padding-inline",
             "--doc-script-size",
+            "--doc-furniture-size",
+            "--doc-furniture-line-height",
+            "--doc-footnote-space",
+            "--doc-footnote-indent",
+            "--doc-link-color",
+            "--doc-citation-color",
+            "--doc-citation-background",
+            "--doc-mention-background",
         ] {
             assert!(
                 css.contains(name),
@@ -258,7 +351,15 @@ mod tests {
         }
         assert!(css.contains("--doc-h1-size: 20pt"));
         assert!(css.contains("--doc-line-height: 1.5"));
+        // The furniture scale the stylesheet reads and the PDF writer draws
+        // headers and footers with. Stated once, here.
+        assert!(css.contains("--doc-furniture-size: 10pt"));
+        assert!(css.contains("--doc-furniture-line-height: 1.3"));
         // 28 CSS pixels, stated in the model's unit and projected exactly.
         assert!(css.contains("--doc-list-indent: 21pt"));
+        // The colours the PDF writer fills a link, a citation and a mention
+        // with, stated here so the stylesheet cannot drift from them.
+        assert!(css.contains("--doc-link-color: #1155cc"));
+        assert!(css.contains("--doc-mention-background: #e8f0fe"));
     }
 }

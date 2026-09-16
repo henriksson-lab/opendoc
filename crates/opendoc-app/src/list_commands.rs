@@ -17,11 +17,11 @@ impl OpenDocApp {
         }
         let after = self.document.blocks.last().map(|block| block.id.clone());
         let list_id = list_id_for_new_item(&self.document.blocks, after.as_ref());
-        Ok(self.apply(
+        self.apply(
             "insert-block",
             "list item",
             OperationKind::InsertBlock {
-                after,
+                position: InsertPosition::after_or_last(after),
                 block: Block {
                     id: StableId::new("block"),
                     kind: BlockKind::ListItem {
@@ -33,7 +33,7 @@ impl OpenDocApp {
                     properties: BlockProperties::default(),
                 },
             },
-        ))
+        )
     }
 
     pub fn insert_list_item_after(
@@ -56,11 +56,11 @@ impl OpenDocApp {
             )));
         }
         let list_id = list_id_for_new_item(&self.document.blocks, Some(&after));
-        Ok(self.apply(
+        self.apply(
             "insert-block",
             "list item after block",
             OperationKind::InsertBlock {
-                after: Some(after),
+                position: InsertPosition::After(after),
                 block: Block {
                     id: StableId::new("block"),
                     kind: BlockKind::ListItem {
@@ -72,7 +72,7 @@ impl OpenDocApp {
                     properties: BlockProperties::default(),
                 },
             },
-        ))
+        )
     }
 
     pub fn update_list_item(
@@ -98,7 +98,7 @@ impl OpenDocApp {
                 "block {block_id} is not a list item"
             )));
         }
-        Ok(self.apply(
+        self.apply(
             "update-list-item",
             "update list item",
             OperationKind::UpdateListItem {
@@ -106,7 +106,154 @@ impl OpenDocApp {
                 level,
                 kind,
             },
-        ))
+        )
+    }
+
+    /// Sets the number at which this item's ordered list wrapper begins.
+    ///
+    /// The public command takes an item id rather than a raw `list_id`: that
+    /// makes the target visible to an editor and prevents a UI from creating a
+    /// dormant property for a run it cannot see. The journalled operation is
+    /// nevertheless keyed by `(list_id, level)`, per ADR 0021.
+    pub fn set_ordered_list_start(
+        &mut self,
+        block_id: impl AsRef<str>,
+        start: u32,
+    ) -> Result<AppDocument, AppApiError> {
+        if start == 0 {
+            return Err(AppApiError::Format(
+                "list numbering start must be positive".to_string(),
+            ));
+        }
+        let block_id = parse_id(block_id.as_ref())?;
+        let Some(block) = find_block_in_blocks(&self.document.blocks, &block_id) else {
+            return Err(AppApiError::NotFound(format!(
+                "block {block_id} was not found"
+            )));
+        };
+        let BlockKind::ListItem {
+            list_id,
+            level,
+            kind,
+        } = &block.kind
+        else {
+            return Err(AppApiError::Format(format!(
+                "block {block_id} is not a list item"
+            )));
+        };
+        if !kind.is_ordered() {
+            return Err(AppApiError::Format(format!(
+                "block {block_id} is not an ordered list item"
+            )));
+        }
+        self.apply(
+            "set-list-start",
+            "set ordered list start",
+            OperationKind::SetListStart {
+                list_id: list_id.clone(),
+                level: *level,
+                start,
+            },
+        )
+    }
+
+    /// Sets the durable counter style of this item's ordered-list wrapper.
+    /// Like the start command, this takes a visible item id rather than
+    /// allowing clients to create properties for a nonexistent run.
+    pub fn set_ordered_list_format(
+        &mut self,
+        block_id: impl AsRef<str>,
+        format: opendoc_core::OrderedListFormat,
+    ) -> Result<AppDocument, AppApiError> {
+        let block_id = parse_id(block_id.as_ref())?;
+        let Some(block) = find_block_in_blocks(&self.document.blocks, &block_id) else {
+            return Err(AppApiError::NotFound(format!(
+                "block {block_id} was not found"
+            )));
+        };
+        let BlockKind::ListItem {
+            list_id,
+            level,
+            kind,
+        } = &block.kind
+        else {
+            return Err(AppApiError::Format(format!(
+                "block {block_id} is not a list item"
+            )));
+        };
+        if !kind.is_ordered() {
+            return Err(AppApiError::Format(format!(
+                "block {block_id} is not an ordered list item"
+            )));
+        }
+        self.apply(
+            "set-list-format",
+            "set ordered list format",
+            OperationKind::SetListFormat {
+                list_id: list_id.clone(),
+                level: *level,
+                format,
+            },
+        )
+    }
+
+    pub fn set_ordered_list_format_name(
+        &mut self,
+        block_id: impl AsRef<str>,
+        format: impl AsRef<str>,
+    ) -> Result<AppDocument, AppApiError> {
+        let format = opendoc_core::OrderedListFormat::parse(format.as_ref()).ok_or_else(|| {
+            AppApiError::Format(format!(
+                "unsupported ordered list format {:?}",
+                format.as_ref()
+            ))
+        })?;
+        self.set_ordered_list_format(block_id, format)
+    }
+
+    /// Sets the durable marker glyph of this item's unordered-list wrapper.
+    /// A visible item id keeps callers from creating hidden run properties.
+    pub fn set_bullet_list_marker_name(
+        &mut self,
+        block_id: impl AsRef<str>,
+        marker: impl AsRef<str>,
+    ) -> Result<AppDocument, AppApiError> {
+        let marker = opendoc_core::BulletListMarker::parse(marker.as_ref()).ok_or_else(|| {
+            AppApiError::Format(format!(
+                "unsupported bullet list marker {:?}",
+                marker.as_ref()
+            ))
+        })?;
+        let block_id = parse_id(block_id.as_ref())?;
+        let Some(block) = find_block_in_blocks(&self.document.blocks, &block_id) else {
+            return Err(AppApiError::NotFound(format!(
+                "block {block_id} was not found"
+            )));
+        };
+        let BlockKind::ListItem {
+            list_id,
+            level,
+            kind,
+        } = &block.kind
+        else {
+            return Err(AppApiError::Format(format!(
+                "block {block_id} is not a list item"
+            )));
+        };
+        if !matches!(kind, ListKind::Bullet) {
+            return Err(AppApiError::Format(format!(
+                "block {block_id} is not a bulleted list item"
+            )));
+        }
+        self.apply(
+            "set-list-bullet-marker",
+            "set bullet list marker",
+            OperationKind::SetListBulletMarker {
+                list_id: list_id.clone(),
+                level: *level,
+                marker,
+            },
+        )
     }
 
     pub fn adjust_editor_selection_list_indent(
@@ -141,7 +288,7 @@ impl OpenDocApp {
                 ))
             })
             .collect();
-        Ok(self.apply_batch(operations))
+        self.apply_batch(operations)
     }
 }
 

@@ -12,6 +12,14 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         Some("write")
     ),
     command!(
+        "sign_current_repository_version_with_openssh_private_key",
+        AppDocument,
+        [arg!("privateKeyPem", String), arg!("signerDisplay", String)],
+        false,
+        false,
+        Some("write")
+    ),
+    command!(
         "verify_current_signature",
         String,
         [arg!("privateKeyPem", String)],

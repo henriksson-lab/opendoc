@@ -41,15 +41,14 @@ export async function loadVersions(): Promise<void> {
   }
 }
 
-function previewBlockText(block: { content: { text: string }[]; equation_source: string | null; alt_text?: string | null }): string {
-  const text = block.content.map((inline) => inline.text).join("");
-  return text || block.equation_source || block.alt_text || "";
-}
-
 function renderVersionPreview(preview: NonNullable<AppVersionView["preview"]>): string {
-  const blocks = preview.document.blocks
+  // Rust already reduced each block to a kind label and the text it says —
+  // which of the block's content, its equation source or its alt text stands
+  // in for it is a projection rule, and it is the same one the version diff
+  // uses. The only decision left here is how many lines to show.
+  const blocks = preview.blocks
     .slice(0, 60)
-    .map((block) => `<li><span class="meta">${escapeHtml(block.kind)}</span> ${escapeHtml(previewBlockText(block))}</li>`)
+    .map((block) => `<li><span class="meta">${escapeHtml(block.kind)}</span> ${escapeHtml(block.text)}</li>`)
     .join("");
   return `
     <article class="version-preview" ${preview.read_only ? 'data-read-only="true"' : ""}>
@@ -79,7 +78,7 @@ function renderVersionDiff(diff: NonNullable<AppVersionView["diff"]>): string {
     <article class="version-diff">
       <p class="version-banner">${escapeHtml(shortManifest(diff.from_manifest))} → ${escapeHtml(shortManifest(diff.to_manifest))}</p>
       <p class="meta">${diff.added} added · ${diff.removed} removed · ${diff.changed} changed</p>
-      <ol class="version-diff-entries">${entries || `<li class="empty">No block-level changes.</li>`}</ol>
+      <ol class="version-diff-entries">${entries || `<li class="empty">No durable document changes.</li>`}</ol>
       <div class="thread-actions"><button type="button" data-action="version:close-diff">Close comparison</button></div>
     </article>`;
 }

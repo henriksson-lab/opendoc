@@ -2,7 +2,8 @@
 
 use crate::error::StoreError;
 use crate::keys::{
-    clean_key_segment, doi_lookup_path, tombstone_path, uuid_lookup_path, version_label_path,
+    clean_key_segment, doi_lookup_path, tombstone_path, uuid_lookup_path, version_coverage_path,
+    version_label_path, version_signature_path, version_signature_prefix,
 };
 use crate::pack::{clean_pack_name, PackStats};
 use crate::repository::Repository;
@@ -207,6 +208,18 @@ impl ObjectStoreLayout {
 
     pub fn version_label_key(manifest: &HashRef) -> String {
         version_label_path(manifest)
+    }
+
+    pub fn version_coverage_key(manifest: &HashRef) -> String {
+        version_coverage_path(manifest)
+    }
+
+    pub fn version_signature_prefix(manifest: &HashRef) -> String {
+        version_signature_prefix(manifest)
+    }
+
+    pub fn version_signature_key(manifest: &HashRef, signer: &str) -> Result<String, StoreError> {
+        version_signature_path(manifest, signer)
     }
 }
 

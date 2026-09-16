@@ -11,6 +11,14 @@ rust_xlsxwriter = "0.99.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 regex = "1"
+# Only to pre-flight an `.xlsx` package before `calamine` reads it; the same
+# version `calamine` already builds, so this is not a second copy.
+zip = { version = "4.6", default-features = false, features = ["deflate-flate2"] }
+# `calamine` deliberately exposes values, formulas and merges rather than
+# layout metadata.  Read the small worksheet/workbook XML parts separately
+# for axis dimensions and visibility while retaining calamine as the value
+# parser.
+quick-xml = "0.38"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"

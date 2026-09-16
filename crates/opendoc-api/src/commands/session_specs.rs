@@ -46,11 +46,7 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         [
             arg!("mode", RuntimeMode),
             arg!("storageBackends", ObjectArray),
-            arg!("signingEnabled", NullableBoolean),
-            arg!("subject", NullableString),
-            arg!("documentUuid", NullableString),
-            arg!("presence", ObjectArray),
-            arg!("permissions", ObjectArray)
+            arg!("signingEnabled", NullableBoolean)
         ],
         false,
         true,
@@ -63,10 +59,7 @@ pub(crate) const SPECS: &[CommandSpec] = &[
             arg!("mode", RuntimeMode),
             arg!("storageBackends", ObjectArray),
             arg!("signingEnabled", NullableBoolean),
-            arg!("subject", NullableString),
-            arg!("documentUuid", NullableString),
-            arg!("commandName", String),
-            arg!("permissions", ObjectArray)
+            arg!("commandName", String)
         ],
         false,
         true,
@@ -79,11 +72,8 @@ pub(crate) const SPECS: &[CommandSpec] = &[
             arg!("mode", RuntimeMode),
             arg!("storageBackends", ObjectArray),
             arg!("signingEnabled", NullableBoolean),
-            arg!("subject", NullableString),
-            arg!("documentUuid", NullableString),
             arg!("targetSubject", NullableString),
-            arg!("actions", StringArray),
-            arg!("permissions", ObjectArray)
+            arg!("role", NullableString)
         ],
         false,
         true,
@@ -96,12 +86,7 @@ pub(crate) const SPECS: &[CommandSpec] = &[
             arg!("mode", RuntimeMode),
             arg!("storageBackends", ObjectArray),
             arg!("signingEnabled", NullableBoolean),
-            arg!("subject", NullableString),
-            arg!("documentUuid", NullableString),
-            arg!("baseManifest", NullableString),
-            arg!("operations", ObjectArray),
-            arg!("permissions", ObjectArray),
-            arg!("presence", ObjectArray)
+            arg!("operations", ObjectArray)
         ],
         false,
         true,
@@ -114,10 +99,8 @@ pub(crate) const SPECS: &[CommandSpec] = &[
             arg!("mode", RuntimeMode),
             arg!("storageBackends", ObjectArray),
             arg!("signingEnabled", NullableBoolean),
-            arg!("subject", NullableString),
             arg!("documentUuid", NullableString),
             arg!("doi", NullableString),
-            arg!("permissions", ObjectArray),
             arg!("serviceIndex", ObjectArray),
             arg!("scannedDocuments", ObjectArray)
         ],

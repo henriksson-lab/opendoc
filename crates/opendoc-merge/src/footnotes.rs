@@ -7,6 +7,14 @@ pub(crate) fn repair_unreferenced_footnotes(
     document: &mut Document,
     warnings: &mut Vec<ModelWarning>,
 ) {
+    // Same shape as `repair_suggestion_anchors`: every footnote already
+    // deleted is skipped below, so with none live there is no question for the
+    // reference scan to answer — and that scan walks every block, every table
+    // cell and the citation database to collect the ids it would compare
+    // against nothing.
+    if document.footnotes.iter().all(|footnote| footnote.deleted) {
+        return;
+    }
     let mut referenced = footnote_reference_ids(&document.blocks);
     referenced.extend(citation_footnote_reference_ids(document));
     for footnote in &mut document.footnotes {

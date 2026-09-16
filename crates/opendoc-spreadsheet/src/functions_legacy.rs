@@ -413,25 +413,25 @@ pub fn evaluate_function(name: &str, values: Vec<f64>) -> Result<f64, String> {
                 Ok(values.iter().sum::<f64>() / values.len() as f64)
             }
         }
-        "MIN" => values
-            .into_iter()
-            .reduce(f64::min)
-            .ok_or_else(|| "#N/A".to_string()),
-        "MAX" => values
-            .into_iter()
-            .reduce(f64::max)
-            .ok_or_else(|| "#N/A".to_string()),
+        // An empty range is not an error for MIN/MAX/PRODUCT: a range
+        // holding no numbers contributes nothing, and the identity every
+        // other spreadsheet reports is 0. (AVERAGE stays #DIV/0! — there
+        // the division by a zero count is the error.)
+        "MIN" => Ok(values.into_iter().reduce(f64::min).unwrap_or(0.0)),
+        "MAX" => Ok(values.into_iter().reduce(f64::max).unwrap_or(0.0)),
         "COUNT" => Ok(values.len() as f64),
         "PRODUCT" => {
             if values.is_empty() {
-                Err("#VALUE!".to_string())
+                Ok(0.0)
             } else {
                 Ok(values.into_iter().product())
             }
         }
         "MEDIAN" => {
+            // No numbers is a domain problem, not a type problem: every
+            // spreadsheet answers #NUM! here.
             if values.is_empty() {
-                return Err("#VALUE!".to_string());
+                return Err("#NUM!".to_string());
             }
             if values.iter().any(|value| !value.is_finite()) {
                 return Err("#NUM!".to_string());
@@ -704,18 +704,26 @@ pub fn evaluate_function(name: &str, values: Vec<f64>) -> Result<f64, String> {
             Ok(1.0 - erf_approx(value))
         }
         "ROUND" => {
+            // The places argument is optional and defaults to 0, exactly as
+            // it already does for ROUNDUP, ROUNDDOWN and TRUNC below.
             let mut values = values.into_iter();
             let Some(value) = values.next() else {
                 return Err("#VALUE!".to_string());
             };
-            let Some(places) = values.next() else {
-                return Err("#VALUE!".to_string());
-            };
+            let places = values.next().unwrap_or(0.0) as i32;
             if values.next().is_some() {
                 return Err("#VALUE!".to_string());
             }
-            let factor = 10f64.powi(places as i32);
-            Ok((value * factor).round() / factor)
+            let factor = 10f64.powi(places);
+            if !factor.is_finite() || factor == 0.0 {
+                return Err("#NUM!".to_string());
+            }
+            let out = (value * factor).round() / factor;
+            if out.is_finite() {
+                Ok(out)
+            } else {
+                Err("#NUM!".to_string())
+            }
         }
         "TRUNC" => {
             let mut values = values.into_iter();
@@ -798,10 +806,17 @@ pub fn evaluate_function(name: &str, values: Vec<f64>) -> Result<f64, String> {
             if factor == 0.0 {
                 return Err("#DIV/0!".to_string());
             }
-            if value != 0.0 && value.signum() != factor.signum() {
+            // The only combination that errors is a positive number with a
+            // negative significance — there is no multiple of a negative
+            // significance at or below a positive number. Every other sign
+            // pairing rounds down to the nearest multiple of |significance|,
+            // so FLOOR(-4.5) is -5 and FLOOR(-4.5, ±2) is -6. Requiring the
+            // signs to agree rejected all of those.
+            if value > 0.0 && factor < 0.0 {
                 return Err("#NUM!".to_string());
             }
-            let out = (value / factor).floor() * factor;
+            let magnitude = factor.abs();
+            let out = (value / magnitude).floor() * magnitude;
             if out.is_finite() {
                 Ok(out)
             } else {

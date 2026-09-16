@@ -2,6 +2,11 @@ use crate::{document_tree::blocks_reference_blob, AppApiError, AppBlobOperation,
 use opendoc_core::{digest_bytes, Document, HashRef, ModelWarning, StableId};
 use std::collections::BTreeMap;
 
+/// Asset bytes live in checkpoints and can be projected into an HTML data
+/// URI, so this is both a memory-safety boundary and a practical document-size
+/// limit. Larger source files should be downsampled before import.
+const MAX_BINARY_BLOB_BYTES: usize = 64 * 1024 * 1024;
+
 pub(crate) enum BlobLifecycleJournal {
     AppOnly,
     Blob(AppBlobOperation),
@@ -32,6 +37,7 @@ impl<'a> BlobLifecycleService<'a> {
         media_type: String,
         bytes: Vec<u8>,
     ) -> Result<BlobLifecycleJournal, AppApiError> {
+        validate_binary_blob_size(bytes.len())?;
         let hash =
             digest_bytes("sha256", &bytes).map_err(|err| AppApiError::Model(err.to_string()))?;
         let hash_text = hash.to_string();
@@ -159,6 +165,15 @@ impl<'a> BlobLifecycleService<'a> {
     }
 }
 
+pub(crate) fn validate_binary_blob_size(bytes_len: usize) -> Result<(), AppApiError> {
+    if bytes_len > MAX_BINARY_BLOB_BYTES {
+        return Err(AppApiError::Format(format!(
+            "binary blob is {bytes_len} bytes, over the {MAX_BINARY_BLOB_BYTES}-byte limit"
+        )));
+    }
+    Ok(())
+}
+
 fn clean_blob_name(name: String) -> String {
     if name.trim().is_empty() {
         "unnamed blob".to_string()
@@ -179,4 +194,15 @@ fn parse_blob_hash(blob_hash: &str) -> Result<String, AppApiError> {
     Ok(HashRef::parse(blob_hash.trim())
         .map_err(|err| AppApiError::Model(err.to_string()))?
         .to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn binary_blob_size_boundary_is_inclusive_and_does_not_allocate() {
+        validate_binary_blob_size(MAX_BINARY_BLOB_BYTES).expect("limit itself is accepted");
+        assert!(validate_binary_blob_size(MAX_BINARY_BLOB_BYTES + 1).is_err());
+    }
 }

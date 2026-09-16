@@ -5,6 +5,12 @@ edition = "2021"
 
 [dependencies]
 opendoc-core = { path = "../opendoc-core" }
-hayagriva = { version = "0.10.1", default-features = false, features = ["biblatex", "archive"] }
+# `archive` is deliberately off: it bundles 91 CSL styles and 64 locale
+# files (3.13 MB) as `include_bytes!` reached through a match, 19% of the
+# browser module. `src/styles.rs` vendors the eight styles and eight
+# locales the product can actually select, and decodes them with `ciborium`
+# — the same crate and the same bytes the archive feature would have used.
+ciborium = "0.2"
+hayagriva = { version = "0.10.1", default-features = false, features = ["biblatex"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

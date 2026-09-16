@@ -9,10 +9,13 @@ use super::{
     EditorSelectionService, OpenDocApp,
 };
 use opendoc_api::{EditorInput, EditorMarkInput, EditorPosition, EditorSelection};
-use opendoc_core::{Block, BlockKind, BlockProperties, Inline, StableId};
+use opendoc_core::{
+    digest_bytes, Block, BlockKind, BlockProperties, BlockProperty, ImageLayout, Inline,
+    InsertPosition, StableId, TableCell, TableRow,
+};
 use opendoc_merge::{BlockTextStyle, OperationKind};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::{Deref, DerefMut};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -37,14 +40,76 @@ pub(crate) struct InlineSpan {
     pub(crate) editable: bool,
 }
 
+/// Where a block sits in the document tree, as the chain of indices that
+/// reaches it from the top-level slice.
+///
+/// [`DocumentIndex`] flattens the tree, and every consumer of an entry
+/// eventually needs the `Block` itself — its `content`, which the index only
+/// summarises. Searching for it by id costs a walk of the whole tree, and the
+/// callers that do it are inside loops over a *selection*, so the search ran
+/// once per selected block: applying one mark across a 1,500-block document
+/// scanned on the order of a million block nodes. The path makes the same
+/// lookup cost the block's nesting depth, which is one step for a top-level
+/// block and three for a block inside a table cell, independent of how large
+/// the document or the selection is.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BlockPath {
+    /// `(block index, row, cell)` for each enclosing table, outermost first.
+    ancestors: Vec<(usize, usize, usize)>,
+    /// Index of the block itself within the slice those steps reach.
+    index: usize,
+}
+
+impl BlockPath {
+    /// A path that deliberately addresses no block, for an index entry that
+    /// describes a block the plan is going to *create*: it is not in the
+    /// pre-edit snapshot paths resolve against. There is no `Default` for
+    /// this type on purpose — an all-zero path would resolve to the first
+    /// block of the document instead of failing.
+    fn unresolved() -> Self {
+        Self {
+            ancestors: Vec::new(),
+            index: usize::MAX,
+        }
+    }
+
+    /// Number of block nodes a lookup through this path touches.
+    fn steps(&self) -> usize {
+        self.ancestors.len() + 1
+    }
+
+    /// The ancestor chain that addresses blocks inside one of this block's
+    /// table cells.
+    fn cell_ancestors(&self, row: usize, cell: usize) -> Vec<(usize, usize, usize)> {
+        let mut ancestors = self.ancestors.clone();
+        ancestors.push((self.index, row, cell));
+        ancestors
+    }
+
+    /// Resolve against a block slice of the same shape the path was built
+    /// from. `None` if the tree no longer has that shape.
+    pub(crate) fn resolve<'a>(&self, blocks: &'a [Block]) -> Option<&'a Block> {
+        crate::document_tree::record_block_lookup_visits(self.steps());
+        let mut slice = blocks;
+        for &(block, row, cell) in &self.ancestors {
+            let BlockKind::Table { rows, .. } = &slice.get(block)?.kind else {
+                return None;
+            };
+            slice = &rows.get(row)?.cells.get(cell)?.blocks;
+        }
+        slice.get(self.index)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct BlockEntry {
     pub(crate) id: StableId,
+    pub(crate) path: BlockPath,
     kind: BlockKind,
     /// Editable text block (paragraph, heading, list item).
     pub(crate) text_block: bool,
-    /// `true` for top-level blocks; nested table-cell blocks cannot be
-    /// split or joined because structural operations are top-level only.
+    /// `true` for document-body blocks. Nested cell blocks use the same
+    /// structural operations, but their container keeps joins local.
     top_level: bool,
     /// Identity of the container (top-level, or a table cell id) so ranges
     /// never cross containers.
@@ -74,13 +139,50 @@ fn inline_text(inline: &Inline) -> Option<&str> {
     }
 }
 
-fn inline_stable_id(inline: &Inline) -> &StableId {
+/// Selection gives each atomic inline one object position. Paste caret
+/// arithmetic must use the same projection, not only visible text.
+fn inline_width(inline: &Inline) -> usize {
+    inline_text(inline).map(char_len).unwrap_or(1)
+}
+
+/// An atomic block that is *one object*: a caret can stand before or after it
+/// and nowhere inside, so the only edit either delete key can make to it is to
+/// remove it whole.
+///
+/// A table is deliberately not one of these even though it is not a text
+/// block. The caret goes *into* a table — its cells hold ordinary blocks — so
+/// there is a real place for Backspace to act, and treating the whole grid as
+/// one object would let a keystroke at the start of the paragraph after it
+/// throw away every cell. The match is exhaustive with no catch-all so a block
+/// kind added later has to be classified rather than inheriting an answer.
+fn is_atomic_object_block(kind: &BlockKind) -> bool {
+    match kind {
+        BlockKind::PageBreak
+        | BlockKind::HorizontalRule
+        | BlockKind::TableOfContents { .. }
+        | BlockKind::Bibliography
+        | BlockKind::Image { .. }
+        | BlockKind::EquationBlock { .. } => true,
+        BlockKind::Paragraph
+        | BlockKind::Title
+        | BlockKind::Subtitle
+        | BlockKind::Heading { .. }
+        | BlockKind::ListItem { .. }
+        | BlockKind::Table { .. } => false,
+    }
+}
+
+pub(crate) fn inline_stable_id(inline: &Inline) -> &StableId {
     match inline {
         Inline::Text { id, .. }
         | Inline::Link { id, .. }
         | Inline::Citation { id, .. }
         | Inline::FootnoteRef { id, .. }
         | Inline::Mention { id, .. }
+        | Inline::GooglePersonChip { id, .. }
+        | Inline::GoogleRichLinkChip { id, .. }
+        | Inline::Dropdown { id, .. }
+        | Inline::DateChip { id, .. }
         | Inline::Equation { id, .. }
         | Inline::PageNumber { id, .. } => id,
     }
@@ -94,10 +196,24 @@ impl DocumentIndex {
     }
 
     fn push_blocks(&mut self, blocks: &[Block], top_level: bool, container: &str) {
-        for block in blocks {
+        self.push_blocks_at(blocks, top_level, container, &[]);
+    }
+
+    fn push_blocks_at(
+        &mut self,
+        blocks: &[Block],
+        top_level: bool,
+        container: &str,
+        ancestors: &[(usize, usize, usize)],
+    ) {
+        for (block_index, block) in blocks.iter().enumerate() {
             let text_block = matches!(
                 block.kind,
-                BlockKind::Paragraph | BlockKind::Heading { .. } | BlockKind::ListItem { .. }
+                BlockKind::Paragraph
+                    | BlockKind::Title
+                    | BlockKind::Subtitle
+                    | BlockKind::Heading { .. }
+                    | BlockKind::ListItem { .. }
             );
             let mut spans = Vec::new();
             let mut cursor = 0;
@@ -115,8 +231,13 @@ impl DocumentIndex {
                 cursor += len;
             }
             let len = if text_block { cursor } else { 1 };
+            let path = BlockPath {
+                ancestors: ancestors.to_vec(),
+                index: block_index,
+            };
             self.blocks.push(BlockEntry {
                 id: block.id.clone(),
+                path: path.clone(),
                 kind: block.kind.clone(),
                 text_block,
                 top_level,
@@ -125,9 +246,10 @@ impl DocumentIndex {
                 len,
             });
             if let BlockKind::Table { rows, .. } = &block.kind {
-                for row in rows {
-                    for cell in &row.cells {
-                        self.push_blocks(&cell.blocks, false, cell.id.as_str());
+                for (row_index, row) in rows.iter().enumerate() {
+                    for (cell_index, cell) in row.cells.iter().enumerate() {
+                        let cell_ancestors = path.cell_ancestors(row_index, cell_index);
+                        self.push_blocks_at(&cell.blocks, false, cell.id.as_str(), &cell_ancestors);
                     }
                 }
             }
@@ -201,7 +323,7 @@ impl DocumentIndex {
     pub(crate) fn text_of(&self, blocks: &[Block], block: usize) -> String {
         let entry = &self.blocks[block];
         let mut out = String::new();
-        if let Some(core) = find_block(blocks, &entry.id) {
+        if let Some(core) = entry.path.resolve(blocks) {
             for inline in &core.content {
                 match inline_text(inline) {
                     Some(text) => out.push_str(text),
@@ -211,24 +333,6 @@ impl DocumentIndex {
         }
         out
     }
-}
-
-fn find_block<'a>(blocks: &'a [Block], id: &StableId) -> Option<&'a Block> {
-    for block in blocks {
-        if &block.id == id {
-            return Some(block);
-        }
-        if let BlockKind::Table { rows, .. } = &block.kind {
-            for row in rows {
-                for cell in &row.cells {
-                    if let Some(found) = find_block(&cell.blocks, id) {
-                        return Some(found);
-                    }
-                }
-            }
-        }
-    }
-    None
 }
 
 pub(crate) type PlannedOp = (&'static str, &'static str, OperationKind);
@@ -341,6 +445,17 @@ impl<'a> EditorCommandService<'a> {
 
     /// Apply one editing gesture. See [`EditorInput`].
     fn apply_editor_input(&mut self, input: EditorInput) -> Result<EditorResult, AppApiError> {
+        let mut parsed_paste = if matches!(
+            input.input_type.as_str(),
+            "insertFromPaste" | "insertFromYank"
+        ) {
+            input.html.as_deref().map(clipboard_html::parse)
+        } else {
+            None
+        };
+        if let Some(paste) = &mut parsed_paste {
+            self.materialize_pasted_images(&mut paste.blocks)?;
+        }
         let index = DocumentIndex::build(&self.document.blocks);
         let anchor = index.resolve(&input.selection.anchor)?;
         let focus = index.resolve(&input.selection.focus)?;
@@ -349,11 +464,12 @@ impl<'a> EditorCommandService<'a> {
         } else {
             (focus, anchor)
         };
-        if index.blocks[start.block].container != index.blocks[end.block].container {
-            return Ok(self.unhandled(input.selection));
-        }
         let collapsed = start == end;
         let mut plan = EditPlan::new(self, index);
+        // `apply_batch` replaces the source document with its merged result,
+        // so projection-only paste warnings must be appended afterwards or
+        // they are silently discarded with the pre-batch document.
+        let mut pending_paste_warning = None;
         let outcome = match input.input_type.as_str() {
             "insertText" | "insertReplacementText" | "insertCompositionText" | "insertFromDrop" => {
                 let text = input.data.clone().unwrap_or_default();
@@ -365,12 +481,26 @@ impl<'a> EditorCommandService<'a> {
                 Some(caret)
             }
             "insertFromPaste" | "insertFromYank" => {
+                // The clipboard's `text/html` flavour, when there is one and
+                // it says more than the plain text does. It has been on the
+                // wire since the frontend was written and nothing read it,
+                // so every paste arrived as unformatted text.
+                let parsed = parsed_paste;
+                // An image-only or MathML-only hostile fragment may have no
+                // prose blocks at all. It still needs its named degradation
+                // warning even though the plain-text clipboard flavour is
+                // what supplies the text we insert below.
+                pending_paste_warning = parsed.as_ref().and_then(|paste| paste.warning);
+                let pasted = parsed.filter(|paste| !paste.blocks.is_empty());
                 let text = input.data.clone().unwrap_or_default();
-                if text.is_empty() && collapsed {
+                if text.is_empty() && pasted.is_none() && collapsed {
                     return Ok(self.unhandled(input.selection));
                 }
                 plan.delete_range(start, end);
-                Some(plan.insert_multiline(start, &text))
+                match pasted {
+                    Some(paste) => Some(plan.insert_pasted_blocks(start, paste.blocks)),
+                    None => Some(plan.insert_multiline(start, &text)),
+                }
             }
             "insertLineBreak" => {
                 plan.delete_range(start, end);
@@ -457,7 +587,11 @@ impl<'a> EditorCommandService<'a> {
         if ops.is_empty() {
             return Ok(self.unhandled(input.selection));
         }
-        let document = self.apply_batch(ops);
+        self.apply_batch(ops)?;
+        if let Some(warning) = pending_paste_warning {
+            self.push_model_warning(warning.code, warning.message);
+        }
+        let document = self.document();
         let after = DocumentIndex::build(&self.document.blocks);
         let selection = match after.block_index(caret_block_id.as_str()) {
             Some(block) => EditorSelection::collapsed(after.position(Resolved {
@@ -479,6 +613,27 @@ impl<'a> EditorCommandService<'a> {
             selection,
             handled: false,
         }
+    }
+
+    fn materialize_pasted_images(&mut self, blocks: &mut [PastedBlock]) -> Result<(), AppApiError> {
+        for block in blocks {
+            let PastedBlockKind::Image(image) = &mut block.kind else {
+                continue;
+            };
+            if image.blob_hash.is_some() {
+                continue;
+            }
+            let hash = digest_bytes("sha256", &image.bytes)
+                .map_err(|error| AppApiError::Model(error.to_string()))?
+                .to_string();
+            self.app.add_binary_blob(
+                image.name.clone(),
+                image.media_type.clone(),
+                image.bytes.clone(),
+            )?;
+            image.blob_hash = Some(hash);
+        }
+        Ok(())
     }
 }
 
@@ -505,26 +660,65 @@ impl EditPlan {
     }
 
     fn block(&self, block: usize) -> &Block {
-        find_block(&self.blocks, &self.index.blocks[block].id).expect("indexed block exists")
+        self.index.blocks[block]
+            .path
+            .resolve(&self.blocks)
+            .expect("indexed block exists")
     }
 
-    /// Delete the characters in `[from, to)` where both ends are in the same
-    /// container. Blocks strictly between the ends are removed; the tail of
-    /// the end block is joined into the start block.
+    /// Delete the characters in `[from, to)`.
+    ///
+    /// # Three cases, and why the third is not the second
+    ///
+    /// *Within one block* the characters go and nothing structural happens.
+    ///
+    /// *Across blocks of one container* — two paragraphs of the body, or two
+    /// paragraphs **of one table cell** — the blocks between the ends are
+    /// removed and the tail of the end block is joined into the start block.
+    /// A cell is a container like any other, which is why this no longer asks
+    /// whether the blocks are top level: that question refused a delete
+    /// entirely inside one cell, silently, and a cell's blocks are ordinary
+    /// blocks addressed by ordinary operations.
+    ///
+    /// *Across containers* — a selection running from the body into a cell,
+    /// or out of one — deletes the text it covers and **changes no
+    /// structure**: no block, row, cell or table is removed. That is a
+    /// decision, not a shortcut. A table's geometry is identity-managed
+    /// (ADR 0013, ADR 0019) and a selection that merely *ends* inside a table
+    /// says nothing about which rows the user meant to lose; Word answers a
+    /// selection like this the same way, by clearing the cells it crosses and
+    /// leaving the grid standing. The alternative — inferring rows to delete
+    /// from where a drag happened to stop — is how a table is lost by
+    /// accident. What is no longer an option is the old answer, which was to
+    /// do nothing at all and report success.
     pub(crate) fn delete_range(&mut self, from: Resolved, to: Resolved) {
         if to <= from {
             return;
         }
         if from.block == to.block {
+            let entry = &self.index.blocks[from.block];
+            if !entry.text_block {
+                // A range over an atomic block is a selection *of* it — there
+                // is nothing inside to delete part of, and `entry.len` is 1
+                // precisely so "before it" and "after it" are the only two
+                // positions. This is how a clicked image is deleted: the
+                // editor selects the whole figure, so both delete keys arrive
+                // here rather than at `delete_backward`/`delete_forward`.
+                if is_atomic_object_block(&entry.kind) {
+                    self.delete_block(from.block);
+                }
+                return;
+            }
             self.delete_within_block(from.block, from.abs, to.abs, true);
             return;
         }
         let start_entry = &self.index.blocks[from.block];
         let end_entry = &self.index.blocks[to.block];
-        if !start_entry.top_level || !end_entry.top_level {
-            // Ranges inside table cells: only support same-block editing.
+        if start_entry.container != end_entry.container {
+            self.delete_across_containers(from, to);
             return;
         }
+        let container = start_entry.container.clone();
         let start_len = start_entry.len;
         let start_is_text = start_entry.text_block;
         let end_is_text = end_entry.text_block;
@@ -532,7 +726,10 @@ impl EditPlan {
             self.delete_within_block(from.block, from.abs, start_len, true);
         }
         for middle in from.block + 1..to.block {
-            if self.index.blocks[middle].top_level {
+            // Siblings of the two ends, and only those: a block nested in a
+            // table between them belongs to the table's own container and
+            // goes with the table, not separately.
+            if self.index.blocks[middle].container == container {
                 self.delete_block(middle);
             }
         }
@@ -546,6 +743,36 @@ impl EditPlan {
         }
         if !start_is_text {
             self.delete_block(from.block);
+        }
+    }
+
+    /// Delete the text a range covers when its ends are in different
+    /// containers, leaving every block, cell, row and table in place.
+    ///
+    /// Each block the range touches loses exactly the part of itself the
+    /// range covers: the start block its tail, the end block its head, and
+    /// every block between them all of its text. An atomic object block
+    /// (a page break, an image, an equation block) wholly inside the range
+    /// and at the top level is deleted, because there is no "part" of one to
+    /// clear and leaving it behind would look like the delete had missed it.
+    ///
+    /// See [`EditPlan::delete_range`] for why nothing structural happens.
+    fn delete_across_containers(&mut self, from: Resolved, to: Resolved) {
+        let start_entry = self.index.blocks[from.block].clone();
+        if start_entry.text_block {
+            self.delete_within_block(from.block, from.abs, start_entry.len, true);
+        }
+        for middle in from.block + 1..to.block {
+            let entry = self.index.blocks[middle].clone();
+            if entry.text_block {
+                self.delete_within_block(middle, 0, entry.len, true);
+            } else if entry.top_level && is_atomic_object_block(&entry.kind) {
+                self.delete_block(middle);
+            }
+        }
+        let end_entry = self.index.blocks[to.block].clone();
+        if end_entry.text_block {
+            self.delete_within_block(to.block, 0, to.abs, false);
         }
     }
 
@@ -631,7 +858,7 @@ impl EditPlan {
                 OperationKind::MoveInlineToBlock {
                     inline_id: span.id.clone(),
                     target_block_id: target_entry.id.clone(),
-                    after: after.clone(),
+                    position: InsertPosition::after_or_last(after.clone()),
                 },
             ));
             after = Some(span.id.clone());
@@ -686,7 +913,7 @@ impl EditPlan {
                     "insert text run",
                     OperationKind::InsertInline {
                         block_id: entry.id.clone(),
-                        after,
+                        position: InsertPosition::after_or_last(after),
                         inline: Inline::text(text),
                     },
                 ));
@@ -698,12 +925,12 @@ impl EditPlan {
         }
     }
 
-    /// Paste: the first line goes at the caret, each further line becomes a
-    /// new block after it. Inside table cells lines stay soft breaks.
+    /// Paste: the first line goes at the caret and each further line becomes
+    /// a new sibling block, whether that sibling lives in the body or a cell.
     fn insert_multiline(&mut self, at: Resolved, text: &str) -> Resolved {
         let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
         let entry = self.index.blocks[at.block].clone();
-        if !entry.top_level || !entry.text_block || !normalized.contains('\n') {
+        if !entry.text_block || !normalized.contains('\n') {
             return self.insert_text(at, &normalized);
         }
         let mut lines = normalized.split('\n');
@@ -734,7 +961,7 @@ impl EditPlan {
                 "insert-block",
                 "paste paragraph",
                 OperationKind::InsertBlock {
-                    after: Some(previous_block_id.clone()),
+                    position: InsertPosition::After(previous_block_id.clone()),
                     block,
                 },
             ));
@@ -755,6 +982,264 @@ impl EditPlan {
         caret
     }
 
+    /// Paste with formatting: the first pasted paragraph goes at the caret,
+    /// each further one becomes a new block after it, and every run keeps the
+    /// marks the clipboard gave it.
+    ///
+    /// This is [`EditPlan::insert_multiline`] with runs instead of lines, and
+    /// it is deliberately built the same way — split first, fill the original
+    /// block, chain the middle paragraphs, prepend the last into the tail —
+    /// so a rich paste and a plain one leave the same structure behind.
+    fn insert_pasted_blocks(&mut self, at: Resolved, blocks: Vec<PastedBlock>) -> Resolved {
+        if let [PastedBlock {
+            kind: PastedBlockKind::Table { rows },
+            ..
+        }] = blocks.as_slice()
+        {
+            return self.insert_pasted_table(at, rows);
+        }
+        let entry = self.index.blocks[at.block].clone();
+        if !entry.text_block {
+            // Non-text blocks have no structural caret position, so preserve
+            // the paste as text in their only editable representation.
+            let mut caret = at;
+            for (index, block) in blocks.iter().enumerate() {
+                if index > 0 {
+                    caret = self.insert_text(caret, "\n");
+                }
+                caret = self.insert_runs(caret, &block.runs);
+            }
+            return caret;
+        }
+        let mut blocks = blocks;
+        // Images are blocks in the durable model.  A leading or trailing
+        // image needs an empty prose block on that side so the ordinary rich
+        // paste split can put it between its surrounding source text rather
+        // than losing it as the special first/final run insertion.
+        if is_atomic_pasted_block(blocks.first()) {
+            blocks.insert(0, PastedBlock::default());
+        }
+        if is_atomic_pasted_block(blocks.last()) {
+            blocks.push(PastedBlock::default());
+        }
+        // `<ol start>` and `<ol type>` are list-run settings, not item
+        // styling.  Keep this clipboard-local map separate from the item
+        // blocks so one operation is emitted for each pasted wrapper.
+        let pasted_list_settings = pasted_list_settings(&blocks);
+        let mut pasted_lists = BTreeMap::new();
+        let first = if blocks.is_empty() {
+            PastedBlock::default()
+        } else {
+            blocks.remove(0)
+        };
+        if entry.len == 0 {
+            if let Some(style) = pasted_block_style(&first, &mut pasted_lists) {
+                self.ops.push((
+                    "set-block-text-style",
+                    "paste block style",
+                    OperationKind::SetBlockTextStyle {
+                        block_id: entry.id.clone(),
+                        style,
+                    },
+                ));
+            }
+            append_pasted_block_properties(&mut self.ops, &entry.id, &first.properties);
+        }
+        if blocks.is_empty() {
+            let caret = self.insert_runs(at, &first.runs);
+            append_pasted_list_settings(&mut self.ops, &pasted_lists, &pasted_list_settings);
+            return caret;
+        }
+        let split = self.split_block(at, true);
+        let caret = self.insert_runs(at, &first.runs);
+        let Some(split) = split else {
+            let mut caret = caret;
+            for block in &blocks {
+                caret = self.insert_text(caret, "\n");
+                caret = self.insert_runs(caret, &block.runs);
+            }
+            append_pasted_list_settings(&mut self.ops, &pasted_lists, &pasted_list_settings);
+            return caret;
+        };
+        let last = blocks.pop().expect("at least one block past the first");
+        let mut previous_block_id = entry.id.clone();
+        for block in blocks {
+            let mut new_block = if is_atomic_pasted_block(Some(&block)) {
+                pasted_block_to_block(&block)
+            } else {
+                Block::paragraph("")
+            };
+            let block_id = new_block.id.clone();
+            if let Some(style) = pasted_block_style(&block, &mut pasted_lists) {
+                new_block.kind = block_kind_from_style(style);
+            } else if !is_atomic_pasted_block(Some(&block))
+                && matches!(entry.kind, BlockKind::ListItem { .. })
+            {
+                new_block.kind = entry.kind.clone();
+            }
+            if !is_atomic_pasted_block(Some(&block)) {
+                new_block.content = block.runs;
+            }
+            new_block.properties = block.properties.clone();
+            self.ops.push((
+                "insert-block",
+                "paste paragraph",
+                OperationKind::InsertBlock {
+                    position: InsertPosition::After(previous_block_id.clone()),
+                    block: new_block,
+                },
+            ));
+            previous_block_id = block_id;
+        }
+        // At the end of an otherwise empty tail, the split block is wholly
+        // owned by the final pasted block, so retaining its structural style
+        // does not restyle source prose that merely followed the caret.
+        if at.abs == entry.len {
+            if let Some(style) = pasted_block_style(&last, &mut pasted_lists) {
+                self.ops.push((
+                    "set-block-text-style",
+                    "paste final block style",
+                    OperationKind::SetBlockTextStyle {
+                        block_id: split.block_id.clone(),
+                        style,
+                    },
+                ));
+            }
+            append_pasted_block_properties(&mut self.ops, &split.block_id, &last.properties);
+        }
+        // The tail block already holds what was after the caret; the last
+        // pasted paragraph goes in front of it.
+        let mut after: Option<StableId> = None;
+        let mut trailing = 0usize;
+        for inline in last.runs {
+            trailing += inline_width(&inline);
+            let inline_id = inline_stable_id(&inline).clone();
+            self.ops.push((
+                "insert-inline",
+                "paste last paragraph",
+                OperationKind::InsertInline {
+                    block_id: split.block_id.clone(),
+                    position: match &after {
+                        Some(previous) => InsertPosition::After(previous.clone()),
+                        None => InsertPosition::First,
+                    },
+                    inline,
+                },
+            ));
+            after = Some(inline_id);
+        }
+        self.pending_caret = Some((split.block_id.clone(), trailing));
+        append_pasted_list_settings(&mut self.ops, &pasted_lists, &pasted_list_settings);
+        caret
+    }
+
+    /// Put a standalone clipboard table immediately after the block holding
+    /// the paste caret.  Table cells are real document subtrees, not HTML
+    /// retained for later rendering.  Keeping the caret in the first cell
+    /// makes the newly pasted grid immediately editable.
+    fn insert_pasted_table(
+        &mut self,
+        at: Resolved,
+        rows: &[clipboard_html::PastedTableRow],
+    ) -> Resolved {
+        let entry = self.index.blocks[at.block].clone();
+        let table_id = StableId::new("block");
+        let mut first_cell = None;
+        let rows = rows
+            .iter()
+            .map(|row| {
+                let cells = row
+                    .cells
+                    .iter()
+                    .map(|blocks| {
+                        let blocks = blocks.iter().map(pasted_block_to_block).collect::<Vec<_>>();
+                        let cell = TableCell::new(if blocks.is_empty() {
+                            vec![Block::paragraph("")]
+                        } else {
+                            blocks
+                        });
+                        if first_cell.is_none() {
+                            first_cell = Some(cell.blocks[0].id.clone());
+                        }
+                        cell
+                    })
+                    .collect();
+                TableRow {
+                    id: StableId::new("row"),
+                    height: None,
+                    header: row.header,
+                    cells,
+                }
+            })
+            .collect();
+        self.ops.push((
+            "insert-block",
+            "paste table",
+            OperationKind::InsertBlock {
+                position: InsertPosition::After(entry.id),
+                block: Block {
+                    id: table_id,
+                    kind: BlockKind::table(rows),
+                    content: Vec::new(),
+                    properties: BlockProperties::default(),
+                },
+            },
+        ));
+        if let Some(cell) = first_cell {
+            self.pending_caret = Some((cell, 0));
+        }
+        at
+    }
+
+    /// Inserts pasted runs at `at`, each as its own inline so its marks are
+    /// its own, and returns the caret after the last of them.
+    fn insert_runs(&mut self, at: Resolved, runs: &[Inline]) -> Resolved {
+        let entry = self.index.blocks[at.block].clone();
+        if !entry.text_block {
+            return at;
+        }
+        // An unmarked single run is ordinary typed text, and goes through the
+        // ordinary path so it joins the run the caret is in rather than
+        // splitting it in two for nothing.
+        if let [Inline::Text { text, marks, .. }] = runs {
+            if marks.is_empty() {
+                return self.insert_text(at, text);
+            }
+        }
+        let mut after = entry
+            .spans
+            .iter()
+            .rfind(|span| span.start + span.len <= at.abs)
+            .map(|span| span.id.clone());
+        let mut inserted = 0usize;
+        for run in runs {
+            inserted += inline_width(run);
+            let run = run.clone();
+            let inline_id = inline_stable_id(&run).clone();
+            self.ops.push((
+                "insert-inline",
+                "paste run",
+                OperationKind::InsertInline {
+                    block_id: entry.id.clone(),
+                    // A missing predecessor normally means append, but at
+                    // the true start boundary it means the pasted atomic
+                    // object belongs before the source text.
+                    position: match &after {
+                        Some(previous) => InsertPosition::After(previous.clone()),
+                        None if at.abs == 0 => InsertPosition::First,
+                        None => InsertPosition::Last,
+                    },
+                    inline: run,
+                },
+            ));
+            after = Some(inline_id);
+        }
+        Resolved {
+            block: at.block,
+            abs: at.abs + inserted,
+        }
+    }
+
     /// Enter: split the block at `at`. With `keep_placeholder` the new
     /// block always starts with an editable run (possibly empty) so callers
     /// can insert text at its start.
@@ -771,20 +1256,6 @@ impl EditPlan {
         let entry = self.index.blocks[at.block].clone();
         if !entry.text_block {
             return None;
-        }
-        if !entry.top_level {
-            // Structural operations are top-level only: soft break instead.
-            let caret = self.insert_text(at, "\n");
-            let first_inline_id = entry
-                .spans
-                .first()
-                .map(|span| span.id.clone())
-                .unwrap_or_else(|| StableId::new("text"));
-            return Some(SplitOutcome {
-                caret,
-                block_id: entry.id.clone(),
-                first_inline_id,
-            });
         }
         let block = self.block(at.block).clone();
         let at_end = at.abs >= entry.len;
@@ -811,7 +1282,9 @@ impl EditPlan {
             });
         }
         let new_kind = match &block.kind {
-            BlockKind::Heading { .. } if at_end => BlockKind::Paragraph,
+            BlockKind::Title | BlockKind::Subtitle | BlockKind::Heading { .. } if at_end => {
+                BlockKind::Paragraph
+            }
             other => other.clone(),
         };
         let new_block_id = StableId::new("block");
@@ -872,7 +1345,7 @@ impl EditPlan {
             "insert-block",
             "split paragraph",
             OperationKind::InsertBlock {
-                after: Some(block.id.clone()),
+                position: InsertPosition::After(block.id.clone()),
                 block: new_block,
             },
         ));
@@ -885,7 +1358,7 @@ impl EditPlan {
                 OperationKind::MoveInlineToBlock {
                     inline_id: inline_id.clone(),
                     target_block_id: new_block_id.clone(),
-                    after: after.clone(),
+                    position: InsertPosition::after_or_last(after.clone()),
                 },
             ));
             after = Some(inline_id);
@@ -904,9 +1377,10 @@ impl EditPlan {
         // entry so the caller can address it.
         self.index.blocks.push(BlockEntry {
             id: new_block_id.clone(),
+            path: BlockPath::unresolved(),
             kind: entry.kind.clone(),
             text_block: true,
-            top_level: true,
+            top_level: entry.top_level,
             container: entry.container.clone(),
             spans: Vec::new(),
             len: 0,
@@ -926,7 +1400,7 @@ impl EditPlan {
         let entry = self.index.blocks[at.block].clone();
         if !entry.text_block {
             // Caret on an atomic block: delete it when the caret sits after it.
-            if at.abs > 0 && entry.top_level {
+            if at.abs > 0 && is_atomic_object_block(&entry.kind) {
                 self.delete_block(at.block);
                 return Some(self.caret_before_block(at.block));
             }
@@ -963,9 +1437,6 @@ impl EditPlan {
             self.split_list_run_after_leaving(&entry.id);
             return Some(at);
         }
-        if !entry.top_level {
-            return None;
-        }
         let previous = self.previous_sibling(at.block)?;
         let previous_entry = self.index.blocks[previous].clone();
         if previous_entry.text_block {
@@ -980,7 +1451,12 @@ impl EditPlan {
             }
             return Some(caret);
         }
-        if matches!(previous_entry.kind, BlockKind::PageBreak) {
+        // The previous block holds no text the caret can join: it is one
+        // object. Backspace removes it, which is the only gesture that can —
+        // there is nowhere inside it for the caret to stand in some browsers,
+        // and a document whose picture cannot be deleted is worse than one
+        // that loses a picture to a keystroke it can also undo.
+        if is_atomic_object_block(&previous_entry.kind) {
             self.delete_block(previous);
             return Some(at);
         }
@@ -991,7 +1467,7 @@ impl EditPlan {
     fn delete_forward(&mut self, at: Resolved) -> Option<Resolved> {
         let entry = self.index.blocks[at.block].clone();
         if !entry.text_block {
-            if at.abs == 0 && entry.top_level {
+            if at.abs == 0 && is_atomic_object_block(&entry.kind) {
                 self.delete_block(at.block);
                 return Some(self.caret_before_block(at.block));
             }
@@ -1010,9 +1486,6 @@ impl EditPlan {
             self.delete_within_block(at.block, at.abs, at.abs + len, true);
             return Some(at);
         }
-        if !entry.top_level {
-            return None;
-        }
         let next = self.next_sibling(at.block)?;
         let next_entry = self.index.blocks[next].clone();
         if next_entry.text_block {
@@ -1023,7 +1496,9 @@ impl EditPlan {
             }
             return Some(at);
         }
-        if matches!(next_entry.kind, BlockKind::PageBreak) {
+        // The mirror of Backspace's last case: the next block is one object
+        // with no text to join, so Delete removes it.
+        if is_atomic_object_block(&next_entry.kind) {
             self.delete_block(next);
             return Some(at);
         }
@@ -1130,8 +1605,16 @@ impl EditorCommandService<'_> {
 
         // Pass 1: split runs at the selection boundaries so every affected
         // run lies entirely inside the selection.
+        //
+        // Each boundary pair carries **the index of the block it belongs to**.
+        // A selection routinely spans blocks that hold no text — a page break,
+        // an image, an equation block, a table — and those contribute no pair,
+        // so reading the pairs back positionally in pass 2 would hand every
+        // text block after the first non-text one somebody else's boundaries
+        // and drop the tail of the selection entirely. Splitting still
+        // happened, so the document also gained split runs carrying no mark.
         let mut split_ops: Vec<PlannedOp> = Vec::new();
-        let mut boundaries: Vec<(usize, usize)> = Vec::new();
+        let mut boundaries: Vec<(usize, usize, usize)> = Vec::new();
         for block in start.block..=end.block {
             let entry = &index.blocks[block];
             if !entry.text_block {
@@ -1143,8 +1626,11 @@ impl EditorCommandService<'_> {
             } else {
                 entry.len
             };
-            boundaries.push((from, to));
-            let core_block = find_block(&self.document.blocks, &entry.id).expect("indexed block");
+            boundaries.push((block, from, to));
+            let core_block = entry
+                .path
+                .resolve(&self.document.blocks)
+                .expect("indexed block");
             for (span, inline) in entry.spans.iter().zip(core_block.content.iter()) {
                 if !span.editable {
                     continue;
@@ -1218,7 +1704,7 @@ impl EditorCommandService<'_> {
                         "split run for formatting",
                         OperationKind::InsertInline {
                             block_id: entry.id.clone(),
-                            after: Some(after.clone()),
+                            position: InsertPosition::After(after.clone()),
                             inline: piece,
                         },
                     ));
@@ -1227,21 +1713,22 @@ impl EditorCommandService<'_> {
             }
         }
         if !split_ops.is_empty() {
-            self.apply_batch(split_ops);
+            self.apply_batch(split_ops)?;
         }
 
         // Pass 2: the runs now inside the selection.
+        //
+        // Splitting a run changes no block's identity, position or character
+        // count, so the block indices pass 1 recorded still address the same
+        // blocks in the rebuilt index.
         let index = DocumentIndex::build(&self.document.blocks);
         let mut targets: Vec<(StableId, Vec<Mark>, Option<String>, String)> = Vec::new();
-        for (offset, block) in (start.block..=end.block).enumerate() {
+        for &(block, from, to) in &boundaries {
             let entry = &index.blocks[block];
-            if !entry.text_block {
-                continue;
-            }
-            let Some(&(from, to)) = boundaries.get(offset) else {
-                continue;
-            };
-            let core_block = find_block(&self.document.blocks, &entry.id).expect("indexed block");
+            let core_block = entry
+                .path
+                .resolve(&self.document.blocks)
+                .expect("indexed block");
             for (span, inline) in entry.spans.iter().zip(core_block.content.iter()) {
                 if !span.editable || span.len == 0 {
                     continue;
@@ -1316,7 +1803,7 @@ impl EditorCommandService<'_> {
                         "convert run to link",
                         OperationKind::InsertInline {
                             block_id,
-                            after: Some(id.clone()),
+                            position: InsertPosition::After(id.clone()),
                             inline: replacement,
                         },
                     ));
@@ -1388,7 +1875,7 @@ impl EditorCommandService<'_> {
                 handled: true,
             });
         }
-        let document = self.apply_batch(ops);
+        let document = self.apply_batch(ops)?;
         let after = DocumentIndex::build(&self.document.blocks);
         let selection = self.reselect(&after, start, end);
         Ok(EditorResult {
@@ -1409,7 +1896,7 @@ impl EditorCommandService<'_> {
         }
     }
 
-    /// Insert an empty `rows` x `columns` table after a top-level block.
+    /// Insert an empty `rows` x `columns` table after any document block.
     pub fn insert_table_after_sized(
         &mut self,
         after_block_id: impl AsRef<str>,
@@ -1418,9 +1905,9 @@ impl EditorCommandService<'_> {
     ) -> Result<AppDocument, AppApiError> {
         let after = StableId::parse(after_block_id.as_ref())
             .map_err(|err| AppApiError::Model(err.to_string()))?;
-        if !self.document.blocks.iter().any(|block| block.id == after) {
+        if crate::document_tree::find_block_in_blocks(&self.document.blocks, &after).is_none() {
             return Err(AppApiError::NotFound(format!(
-                "top-level block {after} was not found"
+                "block {after} was not found"
             )));
         }
         let rows = rows.clamp(1, 200);
@@ -1428,11 +1915,11 @@ impl EditorCommandService<'_> {
         let table_rows = (0..rows)
             .map(|_| opendoc_core::TableRow::empty(columns))
             .collect();
-        Ok(self.apply_batch(vec![(
+        self.apply_batch(vec![(
             "insert-block",
             "table after block",
             OperationKind::InsertBlock {
-                after: Some(after),
+                position: InsertPosition::After(after),
                 block: Block {
                     id: StableId::new("block"),
                     kind: BlockKind::table(table_rows),
@@ -1440,7 +1927,7 @@ impl EditorCommandService<'_> {
                     properties: BlockProperties::default(),
                 },
             },
-        )]))
+        )])
     }
 }
 
@@ -1456,6 +1943,184 @@ impl DerefMut for EditorCommandService<'_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.app
     }
+}
+
+pub(crate) mod clipboard_html;
+
+use clipboard_html::{PastedBlock, PastedBlockKind};
+
+/// Explicit, safe ordered-list settings that a rich clipboard fragment gave
+/// one parse-local list wrapper. Missing fields deliberately remain inherited.
+fn pasted_list_settings(
+    blocks: &[PastedBlock],
+) -> BTreeMap<u64, (u8, Option<u32>, Option<opendoc_core::OrderedListFormat>)> {
+    blocks
+        .iter()
+        .filter_map(|block| match &block.kind {
+            PastedBlockKind::ListItem {
+                kind,
+                level,
+                list_key,
+                ordered_start,
+                ordered_format,
+            } if kind.is_ordered() && (ordered_start.is_some() || ordered_format.is_some()) => {
+                Some((*list_key, (*level, *ordered_start, *ordered_format)))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Append list-run properties only after the item operations that make their
+/// targets exist. `apply` validates the target as an ordered list level, so
+/// reversing this order would turn a valid rich paste into a warning.
+fn append_pasted_list_settings(
+    ops: &mut Vec<(&'static str, &'static str, OperationKind)>,
+    lists: &BTreeMap<u64, StableId>,
+    settings: &BTreeMap<u64, (u8, Option<u32>, Option<opendoc_core::OrderedListFormat>)>,
+) {
+    for (key, (level, start, format)) in settings {
+        let Some(list_id) = lists.get(key) else {
+            continue;
+        };
+        if let Some(start) = start {
+            ops.push((
+                "set-list-start",
+                "paste ordered-list start",
+                OperationKind::SetListStart {
+                    list_id: list_id.clone(),
+                    level: *level,
+                    start: *start,
+                },
+            ));
+        }
+        if let Some(format) = format {
+            ops.push((
+                "set-list-format",
+                "paste ordered-list format",
+                OperationKind::SetListFormat {
+                    list_id: list_id.clone(),
+                    level: *level,
+                    format: *format,
+                },
+            ));
+        }
+    }
+}
+
+/// Emit only properties the safe clipboard parser can actually populate. The
+/// target block already exists (unlike the middle pasted blocks), so these
+/// must be normal mergeable operations in the same undoable paste batch.
+fn append_pasted_block_properties(
+    ops: &mut Vec<(&'static str, &'static str, OperationKind)>,
+    block_id: &StableId,
+    properties: &BlockProperties,
+) {
+    if let Some(alignment) = properties.alignment {
+        ops.push((
+            "set-block-property",
+            "paste paragraph alignment",
+            OperationKind::SetBlockProperty {
+                block_id: block_id.clone(),
+                property: BlockProperty::Alignment(alignment),
+            },
+        ));
+    }
+    if let Some(direction) = properties.direction {
+        ops.push((
+            "set-block-property",
+            "paste paragraph direction",
+            OperationKind::SetBlockProperty {
+                block_id: block_id.clone(),
+                property: BlockProperty::Direction(direction),
+            },
+        ));
+    }
+}
+
+/// Materialise a clipboard-local list identity once per paste.  The parser
+/// cannot mint document identities, and reusing its counter across pastes
+/// would incorrectly join unrelated lists.
+pub(crate) fn pasted_block_style(
+    block: &PastedBlock,
+    lists: &mut BTreeMap<u64, StableId>,
+) -> Option<BlockTextStyle> {
+    match &block.kind {
+        PastedBlockKind::Paragraph => None,
+        PastedBlockKind::Heading { level } => Some(BlockTextStyle::Heading { level: *level }),
+        PastedBlockKind::ListItem {
+            kind,
+            level,
+            list_key,
+            ..
+        } => Some(BlockTextStyle::ListItem {
+            list_id: lists
+                .entry(*list_key)
+                .or_insert_with(|| StableId::new("list"))
+                .clone(),
+            level: *level,
+            kind: *kind,
+        }),
+        PastedBlockKind::Table { .. } => None,
+        PastedBlockKind::Image(_) => None,
+        PastedBlockKind::HorizontalRule => None,
+    }
+}
+
+pub(crate) fn block_kind_from_style(style: BlockTextStyle) -> BlockKind {
+    match style {
+        BlockTextStyle::Paragraph => BlockKind::Paragraph,
+        BlockTextStyle::Title => BlockKind::Title,
+        BlockTextStyle::Subtitle => BlockKind::Subtitle,
+        BlockTextStyle::Heading { level } => BlockKind::Heading { level },
+        BlockTextStyle::ListItem {
+            list_id,
+            level,
+            kind,
+        } => BlockKind::ListItem {
+            list_id,
+            level,
+            kind,
+        },
+    }
+}
+
+pub(crate) fn pasted_block_to_block(block: &PastedBlock) -> Block {
+    let kind = match &block.kind {
+        PastedBlockKind::Heading { level } => BlockKind::Heading { level: *level },
+        // A clipboard-local list identity cannot escape into an independently
+        // constructed cell.  Retain its words and marks as paragraphs rather
+        // than accidentally joining it to an unrelated document list.
+        PastedBlockKind::Image(image) => BlockKind::Image {
+            blob_hash: image
+                .blob_hash
+                .clone()
+                .expect("clipboard images are materialised before insertion"),
+            alt_text: image.alt_text.clone(),
+            layout: ImageLayout::default(),
+        },
+        PastedBlockKind::HorizontalRule => BlockKind::HorizontalRule,
+        PastedBlockKind::Paragraph
+        | PastedBlockKind::ListItem { .. }
+        | PastedBlockKind::Table { .. } => BlockKind::Paragraph,
+    };
+    Block {
+        id: StableId::new("block"),
+        kind,
+        content: if block.runs.is_empty() && !is_atomic_pasted_block(Some(block)) {
+            Block::paragraph("").content
+        } else {
+            block.runs.clone()
+        },
+        properties: block.properties.clone(),
+    }
+}
+
+fn is_atomic_pasted_block(block: Option<&PastedBlock>) -> bool {
+    matches!(
+        block.map(|block| &block.kind),
+        Some(PastedBlockKind::Image(_) | PastedBlockKind::HorizontalRule)
+    )
 }
 
 #[cfg(test)]

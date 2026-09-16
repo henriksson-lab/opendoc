@@ -38,12 +38,35 @@ impl TableColumn {
         }
     }
 
-    /// An auto-width column whose identity is *derived* from the table it
-    /// belongs to and its position in it, for the columns merge has to invent
-    /// rather than receive. See [`derived_stable_id`].
-    pub fn filling(table_block_id: &StableId, index: usize) -> Self {
+    /// The one column a table with no columns at all is given, whose identity
+    /// is *derived* from the table block. See [`derived_stable_id`].
+    ///
+    /// It takes **no index**. An index-derived identity was a live bug: a
+    /// column synthesised at index 3 and a later synthesis at index 3 of a
+    /// grid a delete had shifted minted the *same* id, so the table decoded
+    /// as `duplicate table column id` and the merge failed outright. Every
+    /// other invented column is derived from the cell that needs it
+    /// ([`TableColumn::for_cell`]), which is unique by construction. This one
+    /// is minted at most once per table, because it exists only when the
+    /// column list is empty.
+    pub fn filling(table_block_id: &StableId) -> Self {
         Self {
-            id: derived_stable_id("column", &[table_block_id.as_str(), &index.to_string()]),
+            id: derived_stable_id("column", &[table_block_id.as_str()]),
+            width: None,
+        }
+    }
+
+    /// An auto-width column whose identity is *derived* from the cell that
+    /// needs it: a cell sitting at a grid position no column covers.
+    ///
+    /// A cell id is unique in a document, so this is unique too — which is
+    /// exactly what an index-derived identity was not. It is the same rule
+    /// the `InsertTableCell` operation uses to name the column that adding a
+    /// cell to one row creates, so a column invented by a repair and a column
+    /// created by that operation cannot disagree about a cell.
+    pub fn for_cell(cell_id: &StableId) -> Self {
+        Self {
+            id: derived_stable_id("column", &[cell_id.as_str()]),
             width: None,
         }
     }
@@ -69,6 +92,64 @@ impl TableColumn {
                     "table column width is below 0.1in",
                 ));
             }
+        }
+        Ok(())
+    }
+}
+
+/// Where a table whose columns have an explicit total width sits in its text
+/// column. This deliberately differs from paragraph alignment: it moves the
+/// table box, never the text in each cell.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TableAlignment {
+    Start,
+    Center,
+    End,
+}
+
+impl TableAlignment {
+    pub fn parse(value: &str) -> Result<Self, ModelError> {
+        match value {
+            "start" | "left" => Ok(Self::Start),
+            "center" => Ok(Self::Center),
+            "end" | "right" => Ok(Self::End),
+            _ => Err(ModelError::InvalidDocument("unknown table alignment")),
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::Center => "center",
+            Self::End => "end",
+        }
+    }
+}
+
+/// Formatting inherited by every table-cell edge that does not state its own
+/// border. `None` intentionally means the document is silent: the view may
+/// show an editing grid, but an exporter must not turn that grid into content.
+/// `Some(CellBorder::none())` is the distinct, authored instruction that the
+/// table has no rules.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TableProperties {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub border: Option<CellBorder>,
+    /// `None` follows the text direction's start edge. Alignment only changes
+    /// a table with a fully stated width; an auto-width table fills its frame.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alignment: Option<TableAlignment>,
+}
+
+impl TableProperties {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    pub fn validate(&self) -> Result<(), ModelError> {
+        if let Some(border) = self.border {
+            border.validate()?;
         }
         Ok(())
     }
@@ -142,6 +223,14 @@ impl CellSpan {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TableRow {
     pub id: StableId,
+    /// An explicit minimum row height. `None` lets the cell contents decide
+    /// the height, as they do for a newly inserted Google Docs row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<Length>,
+    /// A header row is semantic table state, not merely bold cell content.
+    /// It projects to `<th>` cells and to Word's repeat-on-new-page flag.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub header: bool,
     pub cells: Vec<TableCell>,
 }
 
@@ -219,6 +308,8 @@ impl TableRow {
     pub fn empty(column_count: usize) -> Self {
         Self {
             id: StableId::new("row"),
+            height: None,
+            header: false,
             cells: (0..column_count).map(|_| TableCell::empty()).collect(),
         }
     }
@@ -232,7 +323,12 @@ impl TableRow {
             .iter()
             .map(|column| TableCell::filling(&id, &column.id))
             .collect();
-        Self { id, cells }
+        Self {
+            id,
+            height: None,
+            header: false,
+            cells,
+        }
     }
 }
 
@@ -463,6 +559,7 @@ pub enum TableCellPropertyKey {
     BorderStart,
     BorderEnd,
     VerticalAlignment,
+    RowHeader,
     PaddingTop,
     PaddingBottom,
     PaddingStart,
@@ -470,13 +567,14 @@ pub enum TableCellPropertyKey {
 }
 
 impl TableCellPropertyKey {
-    pub const ALL: [TableCellPropertyKey; 10] = [
+    pub const ALL: [TableCellPropertyKey; 11] = [
         TableCellPropertyKey::Background,
         TableCellPropertyKey::BorderTop,
         TableCellPropertyKey::BorderBottom,
         TableCellPropertyKey::BorderStart,
         TableCellPropertyKey::BorderEnd,
         TableCellPropertyKey::VerticalAlignment,
+        TableCellPropertyKey::RowHeader,
         TableCellPropertyKey::PaddingTop,
         TableCellPropertyKey::PaddingBottom,
         TableCellPropertyKey::PaddingStart,
@@ -491,6 +589,7 @@ impl TableCellPropertyKey {
             TableCellPropertyKey::BorderStart => "border-start",
             TableCellPropertyKey::BorderEnd => "border-end",
             TableCellPropertyKey::VerticalAlignment => "vertical-alignment",
+            TableCellPropertyKey::RowHeader => "row-header",
             TableCellPropertyKey::PaddingTop => "padding-top",
             TableCellPropertyKey::PaddingBottom => "padding-bottom",
             TableCellPropertyKey::PaddingStart => "padding-start",
@@ -521,6 +620,8 @@ pub enum TableCellProperty {
     BorderStart(CellBorder),
     BorderEnd(CellBorder),
     VerticalAlignment(VerticalAlignment),
+    /// Explicit row-header semantics; this is never inferred from position.
+    RowHeader(bool),
     PaddingTop(Length),
     PaddingBottom(Length),
     PaddingStart(Length),
@@ -536,6 +637,7 @@ impl TableCellProperty {
             TableCellProperty::BorderStart(_) => TableCellPropertyKey::BorderStart,
             TableCellProperty::BorderEnd(_) => TableCellPropertyKey::BorderEnd,
             TableCellProperty::VerticalAlignment(_) => TableCellPropertyKey::VerticalAlignment,
+            TableCellProperty::RowHeader(_) => TableCellPropertyKey::RowHeader,
             TableCellProperty::PaddingTop(_) => TableCellPropertyKey::PaddingTop,
             TableCellProperty::PaddingBottom(_) => TableCellPropertyKey::PaddingBottom,
             TableCellProperty::PaddingStart(_) => TableCellPropertyKey::PaddingStart,
@@ -547,7 +649,9 @@ impl TableCellProperty {
     /// but a deserialized payload has not been through them.
     pub fn validate(&self) -> Result<(), ModelError> {
         match self {
-            TableCellProperty::Background(_) | TableCellProperty::VerticalAlignment(_) => Ok(()),
+            TableCellProperty::Background(_)
+            | TableCellProperty::VerticalAlignment(_)
+            | TableCellProperty::RowHeader(_) => Ok(()),
             TableCellProperty::BorderTop(border)
             | TableCellProperty::BorderBottom(border)
             | TableCellProperty::BorderStart(border)
@@ -586,6 +690,8 @@ pub struct TableCellProperties {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vertical_alignment: Option<VerticalAlignment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_header: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub padding_top: Option<Length>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub padding_bottom: Option<Length>,
@@ -614,6 +720,7 @@ impl TableCellProperties {
             TableCellPropertyKey::VerticalAlignment => self
                 .vertical_alignment
                 .map(TableCellProperty::VerticalAlignment),
+            TableCellPropertyKey::RowHeader => self.row_header.map(TableCellProperty::RowHeader),
             TableCellPropertyKey::PaddingTop => self.padding_top.map(TableCellProperty::PaddingTop),
             TableCellPropertyKey::PaddingBottom => {
                 self.padding_bottom.map(TableCellProperty::PaddingBottom)
@@ -635,6 +742,7 @@ impl TableCellProperties {
             TableCellProperty::BorderStart(value) => self.border_start = Some(value),
             TableCellProperty::BorderEnd(value) => self.border_end = Some(value),
             TableCellProperty::VerticalAlignment(value) => self.vertical_alignment = Some(value),
+            TableCellProperty::RowHeader(value) => self.row_header = Some(value),
             TableCellProperty::PaddingTop(value) => self.padding_top = Some(value),
             TableCellProperty::PaddingBottom(value) => self.padding_bottom = Some(value),
             TableCellProperty::PaddingStart(value) => self.padding_start = Some(value),
@@ -653,6 +761,7 @@ impl TableCellProperties {
             TableCellPropertyKey::BorderStart => self.border_start = None,
             TableCellPropertyKey::BorderEnd => self.border_end = None,
             TableCellPropertyKey::VerticalAlignment => self.vertical_alignment = None,
+            TableCellPropertyKey::RowHeader => self.row_header = None,
             TableCellPropertyKey::PaddingTop => self.padding_top = None,
             TableCellPropertyKey::PaddingBottom => self.padding_bottom = None,
             TableCellPropertyKey::PaddingStart => self.padding_start = None,

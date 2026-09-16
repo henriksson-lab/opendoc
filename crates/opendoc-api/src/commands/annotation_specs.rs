@@ -82,6 +82,38 @@ pub(crate) const ADDITIONS: &[CommandSpec] = &[
         Some("write")
     ),
     command!(
+        "add_block_delete_suggestion",
+        AppDocument,
+        [arg!("blockId", String), arg!("author", String)],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
+        "add_block_insert_suggestion",
+        AppDocument,
+        [
+            arg!("blockId", String),
+            arg!("author", String),
+            arg!("text", String)
+        ],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
+        "add_block_replace_suggestion",
+        AppDocument,
+        [
+            arg!("blockId", String),
+            arg!("author", String),
+            arg!("text", String)
+        ],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
         "add_delete_suggestion",
         AppDocument,
         [arg!("author", String), arg!("inlineId", String)],
@@ -129,6 +161,59 @@ pub(crate) const ADDITIONS: &[CommandSpec] = &[
         Some("write")
     ),
     command!(
+        "add_text_range_format_removal_suggestion",
+        AppDocument,
+        [
+            arg!("startInlineId", String),
+            arg!("endInlineId", String),
+            arg!("author", String),
+            arg!("markKind", String),
+            arg!("value", NullableString)
+        ],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
+        "add_text_range_format_replacement_suggestion",
+        AppDocument,
+        [
+            arg!("startInlineId", String),
+            arg!("endInlineId", String),
+            arg!("author", String),
+            arg!("markKind", String),
+            arg!("expectedValue", String),
+            arg!("value", String)
+        ],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
+        "add_link_change_suggestion",
+        AppDocument,
+        [
+            arg!("inlineId", String),
+            arg!("author", String),
+            arg!("href", NullableString)
+        ],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
+        "add_paragraph_style_suggestion",
+        AppDocument,
+        [
+            arg!("blockId", String),
+            arg!("author", String),
+            arg!("style", String)
+        ],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
         "update_suggestion",
         AppDocument,
         [arg!("suggestionId", String), arg!("text", String)],
@@ -139,6 +224,49 @@ pub(crate) const ADDITIONS: &[CommandSpec] = &[
 ];
 
 pub(crate) const RESOLUTIONS: &[CommandSpec] = &[
+    command!(
+        "resolve_comment_thread",
+        AppDocument,
+        [arg!("threadId", String), arg!("resolvedBy", String)],
+        true,
+        false,
+        Some("comment")
+    ),
+    command!(
+        "reopen_comment_thread",
+        AppDocument,
+        [arg!("threadId", String)],
+        true,
+        false,
+        Some("comment")
+    ),
+    command!(
+        "set_comment_thread_action",
+        AppDocument,
+        [
+            arg!("threadId", String),
+            arg!("assignee", NullableString),
+            arg!("dueAtMs", NullableNumber),
+            arg!("completed", Boolean),
+            arg!("completedBy", NullableString)
+        ],
+        true,
+        false,
+        Some("comment")
+    ),
+    command!(
+        "set_comment_thread_reaction",
+        AppDocument,
+        [
+            arg!("threadId", String),
+            arg!("emoji", String),
+            arg!("actor", String),
+            arg!("present", Boolean)
+        ],
+        true,
+        false,
+        Some("comment")
+    ),
     command!(
         "delete_comment_thread",
         AppDocument,

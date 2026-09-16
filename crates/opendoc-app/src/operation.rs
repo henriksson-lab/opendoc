@@ -1,5 +1,14 @@
 use super::*;
 
+/// The journal line for one envelope.
+///
+/// `seq` is the **envelope's** sequence number, not the operation's. The two
+/// were one number until the counters were split, and that is what made a
+/// blob, spreadsheet or undo envelope punch a hole in an actor's *operation*
+/// numbering — a hole a collaboration service refuses, correctly, because
+/// `VectorClock::observed` reads `seq >= n` as "everything up to n". An
+/// envelope that carries a typed operation gets its operation's id from
+/// `AppOperationEnvelope::operation`, and the two numbers are free to differ.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AppOperationRecord {
     pub actor: String,
@@ -9,8 +18,16 @@ pub struct AppOperationRecord {
     pub created_at_ms: u64,
 }
 
+/// One journalled operation, and the payload it carries.
+///
+/// This is the entry an operation segment stores, so it is also the record a
+/// service would have to write for a repository it produced to be openable by
+/// a local save (see `docs/adr/0015`, "What remains"). Exactly one of
+/// `operation`, `spreadsheet` and `blob` may be set; an envelope with none of
+/// them is a marker for something the journal records but no typed operation
+/// describes, such as an undo.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub(crate) struct AppOperationEnvelope {
+pub struct AppOperationEnvelope {
     pub record: AppOperationRecord,
     pub operation: Option<Operation>,
     #[serde(default)]
@@ -61,6 +78,37 @@ impl AppOperationRecord {
 }
 
 impl AppOperationEnvelope {
+    /// The envelope a bare typed operation becomes when it arrives without
+    /// one — from a collaboration service's fanout, or out of an operation
+    /// segment a service wrote.
+    ///
+    /// The record is *derived*, never taken on trust: the actor and kind come
+    /// from the operation itself, so a record can never disagree with the
+    /// payload it describes. `created_at_ms` is zero because this replica does
+    /// not know when the operation was authored and a local clock reading
+    /// would be a fabrication; the summary is the operation kind, which is the
+    /// only description available.
+    ///
+    /// `envelope_seq` is the number this replica's journal gives the envelope.
+    /// It is *not* the operation's sequence number: a remote actor numbers its
+    /// own operations, and this replica numbers its own envelopes, and neither
+    /// may renumber the other.
+    pub fn from_operation(operation: Operation, envelope_seq: u64) -> Self {
+        let kind = rich_document_operation_kind(&operation.kind);
+        Self {
+            record: AppOperationRecord {
+                actor: operation.id.actor.0.clone(),
+                seq: envelope_seq,
+                kind: kind.to_string(),
+                summary: kind.replace('-', " "),
+                created_at_ms: 0,
+            },
+            operation: Some(operation),
+            spreadsheet: None,
+            blob: None,
+        }
+    }
+
     fn validate_source(&self) -> Result<(), AppApiError> {
         self.record.validate_source()?;
         let payload_count = usize::from(self.operation.is_some())
@@ -87,9 +135,14 @@ impl AppOperationEnvelope {
                     "operation payload sequence is zero".to_string(),
                 ));
             }
-            if operation.id.actor.0 != self.record.actor || operation.id.seq != self.record.seq {
+            // The actor must match, because the record describes the payload.
+            // The *sequence* deliberately need not: `record.seq` is the
+            // envelope's identity and `operation.id.seq` is the operation's,
+            // and requiring them to be equal is what forced every envelope
+            // carrying no operation to burn an operation id.
+            if operation.id.actor.0 != self.record.actor {
                 return Err(AppApiError::Format(
-                    "operation envelope record does not match rich-document operation id"
+                    "operation envelope record does not match rich-document operation actor"
                         .to_string(),
                 ));
             }
@@ -126,17 +179,34 @@ impl AppOperationEnvelope {
     }
 }
 
+/// Two uniqueness rules, because there are two identities.
+///
+/// `(record.actor, record.seq)` is the **envelope's**: a candidate merge and
+/// the recovery segment both deduplicate on it. `operation.id` is the
+/// **operation's**: it is what the causal order and last-writer-wins are
+/// computed from, and two different payloads under one id is history being
+/// rewritten. Checking only the first would let a journal carry one operation
+/// id twice as long as the envelopes around it were numbered differently.
 pub(crate) fn validate_operation_envelopes(
     envelopes: &[AppOperationEnvelope],
 ) -> Result<(), AppApiError> {
-    let mut seen = BTreeSet::new();
+    let mut seen_envelopes = BTreeSet::new();
+    let mut seen_operations = BTreeSet::new();
     for envelope in envelopes {
         envelope.validate_source()?;
-        if !seen.insert((envelope.record.actor.clone(), envelope.record.seq)) {
+        if !seen_envelopes.insert((envelope.record.actor.clone(), envelope.record.seq)) {
             return Err(AppApiError::Format(format!(
                 "duplicate operation envelope {}#{}",
                 envelope.record.actor, envelope.record.seq
             )));
+        }
+        if let Some(operation) = &envelope.operation {
+            if !seen_operations.insert(operation.id.clone()) {
+                return Err(AppApiError::Format(format!(
+                    "duplicate rich-document operation {}#{}",
+                    operation.id.actor.0, operation.id.seq
+                )));
+            }
         }
     }
     Ok(())
@@ -167,6 +237,9 @@ fn validate_rich_document_operation_source(kind: &OperationKind) -> Result<(), A
         OperationKind::SetDocumentLocale { locale } => {
             validate_canonical_operation_field("document locale", locale)
         }
+        OperationKind::UpsertBookmark { bookmark } => bookmark
+            .validate()
+            .map_err(|err| AppApiError::Format(err.to_string())),
         OperationKind::SetPageSetup { page_setup } => page_setup
             .validate()
             .map_err(|err| AppApiError::Format(err.to_string())),
@@ -178,17 +251,32 @@ fn validate_rich_document_operation_source(kind: &OperationKind) -> Result<(), A
             }
             Ok(())
         }
-        OperationKind::InsertBlock { after, block } => {
-            validate_optional_stable_id(after)?;
+        OperationKind::ClearPageFurnitureOverride { slot } => {
+            if slot.is_override() {
+                Ok(())
+            } else {
+                Err(AppApiError::Format(format!(
+                    "{} is ordinary furniture and cannot inherit from itself",
+                    slot.as_str()
+                )))
+            }
+        }
+        OperationKind::InsertBlock { position, block } => {
+            validate_insert_position(position)?;
             block
                 .validate_isolated()
                 .map_err(|err| AppApiError::Format(err.to_string()))
         }
         OperationKind::DeleteBlock { block_id } => validate_stable_operation_id(block_id),
+        OperationKind::MoveBlock { block_id, position } => {
+            validate_stable_operation_id(block_id)?;
+            validate_insert_position(position)
+        }
         OperationKind::SetBlockTextStyle { block_id, style } => {
             validate_stable_operation_id(block_id)?;
             match style {
                 BlockTextStyle::Paragraph => Ok(()),
+                BlockTextStyle::Title | BlockTextStyle::Subtitle => Ok(()),
                 BlockTextStyle::Heading { level } if (1..=6).contains(level) => Ok(()),
                 BlockTextStyle::Heading { .. } => Err(AppApiError::Format(
                     "heading level is outside 1..=6".to_string(),
@@ -204,11 +292,11 @@ fn validate_rich_document_operation_source(kind: &OperationKind) -> Result<(), A
         }
         OperationKind::InsertInline {
             block_id,
-            after,
+            position,
             inline,
         } => {
             validate_stable_operation_id(block_id)?;
-            validate_optional_stable_id(after)?;
+            validate_insert_position(position)?;
             inline
                 .validate()
                 .map_err(|err| AppApiError::Format(err.to_string()))
@@ -216,11 +304,11 @@ fn validate_rich_document_operation_source(kind: &OperationKind) -> Result<(), A
         OperationKind::MoveInlineToBlock {
             inline_id,
             target_block_id,
-            after,
+            position,
         } => {
             validate_stable_operation_id(inline_id)?;
             validate_stable_operation_id(target_block_id)?;
-            validate_optional_stable_id(after)
+            validate_insert_position(position)
         }
         OperationKind::AddMark { text_id, mark } => {
             validate_stable_operation_id(text_id)?;
@@ -264,6 +352,9 @@ fn validate_rich_document_operation_source(kind: &OperationKind) -> Result<(), A
         OperationKind::UpsertFootnote { footnote } => footnote
             .validate()
             .map_err(|err| AppApiError::Format(err.to_string())),
+        OperationKind::SetEndnotePlacement { footnote_id, .. } => {
+            validate_stable_operation_id(footnote_id)
+        }
         OperationKind::UpsertBibliographyReference { reference } => reference
             .validate()
             .map_err(|err| AppApiError::Format(err.to_string())),
@@ -289,8 +380,59 @@ fn validate_rich_document_operation_source(kind: &OperationKind) -> Result<(), A
             validate_canonical_operation_field("citation locale", locale)
         }
         OperationKind::DeleteCommentThread { thread_id }
-        | OperationKind::RestoreCommentThread { thread_id } => {
+        | OperationKind::RestoreCommentThread { thread_id }
+        | OperationKind::ReopenCommentThread { thread_id } => {
             validate_stable_operation_id(thread_id)
+        }
+        OperationKind::SetCommentThreadAction {
+            thread_id,
+            assignee,
+            due_at_ms,
+            completed_by,
+            completed_at_ms,
+        } => {
+            validate_stable_operation_id(thread_id)?;
+            for value in [assignee.as_deref(), completed_by.as_deref()]
+                .into_iter()
+                .flatten()
+            {
+                validate_canonical_operation_field("comment action identity", value)?;
+            }
+            if completed_by.is_some() != completed_at_ms.is_some() {
+                return Err(AppApiError::Format(
+                    "comment action completion metadata is incomplete".to_string(),
+                ));
+            }
+            if due_at_ms.is_some() && assignee.is_none() {
+                return Err(AppApiError::Format(
+                    "comment action due date requires an assignee".to_string(),
+                ));
+            }
+            if completed_by.is_some() && assignee.is_none() {
+                return Err(AppApiError::Format(
+                    "comment action completion requires an assignee".to_string(),
+                ));
+            }
+            Ok(())
+        }
+        OperationKind::SetCommentThreadReaction {
+            thread_id,
+            emoji,
+            actor,
+            ..
+        } => {
+            validate_stable_operation_id(thread_id)?;
+            opendoc_core::validate_comment_reaction_emoji(emoji)
+                .map_err(|err| AppApiError::Format(err.to_string()))?;
+            validate_canonical_operation_field("comment reaction actor", actor)
+        }
+        OperationKind::ResolveCommentThread {
+            thread_id,
+            resolved_by,
+            ..
+        } => {
+            validate_stable_operation_id(thread_id)?;
+            validate_canonical_operation_field("comment resolver", resolved_by)
         }
         OperationKind::DeleteComment {
             thread_id,
@@ -356,6 +498,22 @@ fn validate_rich_document_operation_source(kind: &OperationKind) -> Result<(), A
             validate_stable_operation_id(inline_id)?;
             validate_canonical_operation_field("mention label", label)
         }
+        OperationKind::SelectDropdownOption {
+            inline_id,
+            option_id,
+        } => {
+            validate_stable_operation_id(inline_id)?;
+            validate_canonical_operation_field("dropdown option id", option_id)
+        }
+        OperationKind::UpdateDateChip { inline_id, date } => {
+            validate_stable_operation_id(inline_id)?;
+            Inline::DateChip {
+                id: inline_id.clone(),
+                date: date.clone(),
+            }
+            .validate()
+            .map_err(|err| AppApiError::Format(err.to_string()))
+        }
         OperationKind::UpdateLinkHref { inline_id, href } => {
             validate_stable_operation_id(inline_id)?;
             validate_canonical_operation_field("link href", href)
@@ -402,6 +560,42 @@ fn validate_rich_document_operation_source(kind: &OperationKind) -> Result<(), A
             }
             Ok(())
         }
+        OperationKind::SetListStart {
+            list_id,
+            level,
+            start,
+        } => {
+            validate_stable_operation_id(list_id)?;
+            if *level > 8 {
+                return Err(AppApiError::Format(
+                    "list numbering level is outside 0..=8".to_string(),
+                ));
+            }
+            if *start == 0 {
+                return Err(AppApiError::Format(
+                    "list numbering start must be positive".to_string(),
+                ));
+            }
+            Ok(())
+        }
+        OperationKind::SetListFormat { list_id, level, .. } => {
+            validate_stable_operation_id(list_id)?;
+            if *level > 8 {
+                return Err(AppApiError::Format(
+                    "list numbering level is outside 0..=8".to_string(),
+                ));
+            }
+            Ok(())
+        }
+        OperationKind::SetListBulletMarker { list_id, level, .. } => {
+            validate_stable_operation_id(list_id)?;
+            if *level > 8 {
+                return Err(AppApiError::Format(
+                    "list bullet marker level is outside 0..=8".to_string(),
+                ));
+            }
+            Ok(())
+        }
         OperationKind::SetBlockProperty { block_id, property } => {
             validate_stable_operation_id(block_id)?;
             property
@@ -428,11 +622,37 @@ fn validate_rich_document_operation_source(kind: &OperationKind) -> Result<(), A
         OperationKind::DeleteInline { inline_id } => validate_stable_operation_id(inline_id),
         OperationKind::InsertTableRow {
             table_block_id,
-            after_row,
+            position,
             row,
+            cell_columns,
         } => {
             validate_stable_operation_id(table_block_id)?;
-            validate_optional_stable_id(after_row)?;
+            validate_insert_position(position)?;
+            // A binding that names a cell the row does not carry, or two
+            // cells for one column, is a payload no replica writes. Refusing
+            // it here means the merge never has to guess which of the two
+            // representations to believe.
+            for (cell_id, column_id) in cell_columns {
+                validate_stable_operation_id(cell_id)?;
+                validate_stable_operation_id(column_id)?;
+                if !row.cells.iter().any(|cell| &cell.id == cell_id) {
+                    return Err(AppApiError::Format(format!(
+                        "table row cell binding names cell {cell_id}, which the row does not carry"
+                    )));
+                }
+            }
+            let bound_columns: std::collections::BTreeSet<&StableId> =
+                cell_columns.values().collect();
+            if bound_columns.len() != cell_columns.len() {
+                return Err(AppApiError::Format(
+                    "table row cell bindings name one column twice".to_string(),
+                ));
+            }
+            if !cell_columns.is_empty() && cell_columns.len() != row.cells.len() {
+                return Err(AppApiError::Format(
+                    "table row cell bindings do not cover every cell of the row".to_string(),
+                ));
+            }
             validate_table_row_payload(row)
         }
         OperationKind::DeleteTableRow {
@@ -445,12 +665,12 @@ fn validate_rich_document_operation_source(kind: &OperationKind) -> Result<(), A
         OperationKind::InsertTableCell {
             table_block_id,
             row_id,
-            after_cell,
+            position,
             cell,
         } => {
             validate_stable_operation_id(table_block_id)?;
             validate_stable_operation_id(row_id)?;
-            validate_optional_stable_id(after_cell)?;
+            validate_insert_position(position)?;
             validate_table_cell_payload(cell)
         }
         OperationKind::DeleteTableCell {
@@ -464,11 +684,11 @@ fn validate_rich_document_operation_source(kind: &OperationKind) -> Result<(), A
         }
         OperationKind::InsertTableColumn {
             table_block_id,
-            after_column,
+            position,
             column,
         } => {
             validate_stable_operation_id(table_block_id)?;
-            validate_optional_stable_id(after_column)?;
+            validate_insert_position(position)?;
             validate_stable_operation_id(&column.id)?;
             column
                 .validate()
@@ -495,6 +715,59 @@ fn validate_rich_document_operation_source(kind: &OperationKind) -> Result<(), A
                 _ => Ok(()),
             }
         }
+        OperationKind::SetTableRowHeight {
+            table_block_id,
+            row_id,
+            height,
+        } => {
+            validate_stable_operation_id(table_block_id)?;
+            validate_stable_operation_id(row_id)?;
+            match height {
+                Some(height) if height.is_negative() || height.twips() == 0 => Err(
+                    AppApiError::Format("table row height must be positive".to_string()),
+                ),
+                _ => Ok(()),
+            }
+        }
+        OperationKind::SetTableRowHeader {
+            table_block_id,
+            row_id,
+            ..
+        } => {
+            validate_stable_operation_id(table_block_id)?;
+            validate_stable_operation_id(row_id)
+        }
+        OperationKind::ReorderTableRows {
+            table_block_id,
+            row_ids,
+        } => {
+            validate_stable_operation_id(table_block_id)?;
+            if row_ids.is_empty() {
+                return Err(AppApiError::Format("table row order is empty".to_string()));
+            }
+            for row_id in row_ids {
+                validate_stable_operation_id(row_id)?;
+            }
+            Ok(())
+        }
+        OperationKind::SetTableBorder {
+            table_block_id,
+            border,
+        } => {
+            validate_stable_operation_id(table_block_id)?;
+            border
+                .map(opendoc_core::CellBorder::validate)
+                .transpose()
+                .map(|_| ())
+                .map_err(|err| AppApiError::Format(err.to_string()))
+        }
+        OperationKind::SetTableAlignment {
+            table_block_id,
+            alignment: _,
+        } => {
+            validate_stable_operation_id(table_block_id)?;
+            Ok(())
+        }
         OperationKind::SetTableCellSpan { cell_id, span } => {
             validate_stable_operation_id(cell_id)?;
             span.validate()
@@ -518,11 +791,13 @@ fn validate_stable_operation_id(id: &StableId) -> Result<(), AppApiError> {
         .map_err(|err| AppApiError::Format(err.to_string()))
 }
 
-fn validate_optional_stable_id(id: &Option<StableId>) -> Result<(), AppApiError> {
-    if let Some(id) = id {
-        validate_stable_operation_id(id)?;
+/// An anchored position has to name a well-formed sibling id; `First` and
+/// `Last` name none, so there is nothing to check.
+fn validate_insert_position(position: &InsertPosition) -> Result<(), AppApiError> {
+    match position.anchor() {
+        Some(id) => validate_stable_operation_id(id),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 fn validate_nonzero_operation_revision(
@@ -551,6 +826,10 @@ fn inline_is_empty_source_text(inline: &Inline) -> bool {
     match inline {
         Inline::Text { text, .. } | Inline::Link { text, .. } => text.trim().is_empty(),
         Inline::Mention { .. }
+        | Inline::GooglePersonChip { .. }
+        | Inline::GoogleRichLinkChip { .. }
+        | Inline::Dropdown { .. }
+        | Inline::DateChip { .. }
         | Inline::Equation { .. }
         | Inline::Citation { .. }
         | Inline::FootnoteRef { .. }
@@ -573,6 +852,8 @@ fn validate_table_row_payload(row: &opendoc_core::TableRow) -> Result<(), AppApi
 fn validate_table_cell_payload(cell: &opendoc_core::TableCell) -> Result<(), AppApiError> {
     let row = opendoc_core::TableRow {
         id: StableId::new("row-validator"),
+        height: None,
+        header: false,
         cells: vec![cell.clone()],
     };
     validate_table_row_payload(&row)
@@ -589,10 +870,13 @@ pub(crate) fn rich_document_operation_kind(kind: &OperationKind) -> &'static str
         OperationKind::SetDocumentTitle { .. } => "set-document-title",
         OperationKind::SetDocumentDoi { .. } => "set-document-doi",
         OperationKind::SetDocumentLocale { .. } => "set-document-locale",
+        OperationKind::UpsertBookmark { .. } => "upsert-bookmark",
         OperationKind::SetPageSetup { .. } => "set-page-setup",
         OperationKind::SetPageFurniture { .. } => "set-page-furniture",
+        OperationKind::ClearPageFurnitureOverride { .. } => "clear-page-furniture-override",
         OperationKind::InsertBlock { .. } => "insert-block",
         OperationKind::DeleteBlock { .. } => "delete-block",
+        OperationKind::MoveBlock { .. } => "move-block",
         OperationKind::InsertInline { .. } => "insert-inline",
         OperationKind::MoveInlineToBlock { .. } => "move-inline-to-block",
         OperationKind::AddMark { .. } => "add-mark",
@@ -602,7 +886,12 @@ pub(crate) fn rich_document_operation_kind(kind: &OperationKind) -> &'static str
         OperationKind::UpdateSuggestionInsertContent { .. } => "update-suggestion",
         OperationKind::AddCommentThread { .. } => "add-comment-thread",
         OperationKind::AddCommentReply { .. } => "add-comment-reply",
+        OperationKind::ResolveCommentThread { .. } => "resolve-comment-thread",
+        OperationKind::ReopenCommentThread { .. } => "reopen-comment-thread",
+        OperationKind::SetCommentThreadAction { .. } => "set-comment-thread-action",
+        OperationKind::SetCommentThreadReaction { .. } => "set-comment-thread-reaction",
         OperationKind::UpsertFootnote { .. } => "upsert-footnote",
+        OperationKind::SetEndnotePlacement { .. } => "set-endnote-placement",
         OperationKind::UpsertBibliographyReference { .. } => "upsert-bibliography-reference",
         OperationKind::DeleteBibliographyReference { .. } => "delete-bibliography-reference",
         OperationKind::UpsertCitationGroup { .. } => "upsert-citation-group",
@@ -618,6 +907,8 @@ pub(crate) fn rich_document_operation_kind(kind: &OperationKind) -> &'static str
         OperationKind::DeleteText { .. } => "delete-text",
         OperationKind::UpdateInlineEquationSource { .. } => "update-inline-equation-source",
         OperationKind::UpdateMentionLabel { .. } => "update-mention-label",
+        OperationKind::SelectDropdownOption { .. } => "select-dropdown-option",
+        OperationKind::UpdateDateChip { .. } => "update-date-chip",
         OperationKind::UpdateLinkHref { .. } => "update-link-href",
         OperationKind::UpdateBlockEquationSource { .. } => "update-block-equation-source",
         OperationKind::UpdateImageAltText { .. } => "update-image-alt-text",
@@ -626,6 +917,9 @@ pub(crate) fn rich_document_operation_kind(kind: &OperationKind) -> &'static str
         OperationKind::SetBlockTextStyle { .. } => "set-block-text-style",
         OperationKind::UpdateHeadingLevel { .. } => "update-heading-level",
         OperationKind::UpdateListItem { .. } => "update-list-item",
+        OperationKind::SetListStart { .. } => "set-list-start",
+        OperationKind::SetListFormat { .. } => "set-list-format",
+        OperationKind::SetListBulletMarker { .. } => "set-list-bullet-marker",
         OperationKind::SetBlockProperty { .. } => "set-block-property",
         OperationKind::ClearBlockProperty { .. } => "clear-block-property",
         OperationKind::AcceptSuggestion { .. } => "accept-suggestion",
@@ -638,6 +932,11 @@ pub(crate) fn rich_document_operation_kind(kind: &OperationKind) -> &'static str
         OperationKind::InsertTableColumn { .. } => "insert-table-column",
         OperationKind::DeleteTableColumn { .. } => "delete-table-column",
         OperationKind::SetTableColumnWidth { .. } => "set-table-column-width",
+        OperationKind::SetTableRowHeight { .. } => "set-table-row-height",
+        OperationKind::SetTableRowHeader { .. } => "set-table-row-header",
+        OperationKind::ReorderTableRows { .. } => "reorder-table-rows",
+        OperationKind::SetTableBorder { .. } => "set-table-border",
+        OperationKind::SetTableAlignment { .. } => "set-table-alignment",
         OperationKind::SetTableCellSpan { .. } => "set-table-cell-span",
         OperationKind::SetTableCellProperty { .. } => "set-table-cell-property",
         OperationKind::ClearTableCellProperty { .. } => "clear-table-cell-property",
@@ -646,7 +945,7 @@ pub(crate) fn rich_document_operation_kind(kind: &OperationKind) -> &'static str
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
-pub(crate) enum AppBlobOperation {
+pub enum AppBlobOperation {
     Add {
         id: String,
         name: String,
@@ -777,7 +1076,7 @@ fn validate_blob_operation_media_type(media_type: &str) -> Result<(), AppApiErro
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
-pub(crate) enum AppSpreadsheetOperation {
+pub enum AppSpreadsheetOperation {
     SetWorkbookMetadata {
         title: String,
         locale: String,
@@ -868,6 +1167,23 @@ pub(crate) enum AppSpreadsheetOperation {
         address: String,
         validation: AppCellValidation,
     },
+    /// The whole workbook was replaced, wholesale.
+    ///
+    /// An import is the one command that does that, and before this it
+    /// journalled a bare app envelope carrying no spreadsheet payload at all
+    /// — which `merge_spreadsheet_envelope_streams` skips. Crash recovery
+    /// replays from the recovery segment's base workbook and repository merge
+    /// from the merge base, so both reproduced the workbook as it was
+    /// *before* the import and silently resurrected the edits it replaced.
+    ///
+    /// The payload is the imported workbook itself rather than the file it
+    /// came from: replay then reproduces exactly what the user saw, and does
+    /// not depend on the importer answering the same way it did on the day.
+    /// Boxed because it is an order of magnitude larger than every other
+    /// variant.
+    ReplaceWorkbook {
+        workbook: Box<AppSpreadsheetWorkbook>,
+    },
     MergeCells {
         sheet_id: String,
         range: String,
@@ -885,6 +1201,23 @@ pub(crate) enum AppSpreadsheetOperation {
     SetBasicFilter {
         sheet_id: String,
         range: String,
+    },
+    /// A last-writer-wins print-area assignment. The range is canonical A1.
+    SetPrintArea {
+        sheet_id: String,
+        range: String,
+    },
+    /// Clear only the exact print area observed by the author.  Carrying the
+    /// target prevents a delayed clear from erasing another actor's area.
+    ClearPrintArea {
+        sheet_id: String,
+        range: String,
+    },
+    /// A last-writer-wins paper-orientation assignment.  The value is a typed
+    /// enum so journal replay cannot invent a PDF geometry.
+    SetPrintOrientation {
+        sheet_id: String,
+        orientation: AppSheetPrintOrientation,
     },
     SetBasicFilterOptions {
         sheet_id: String,
@@ -943,6 +1276,20 @@ pub(crate) enum AppSpreadsheetOperation {
         column: String,
         /// Width in pixels; `0` clears the explicit width.
         width: u32,
+    },
+    /// Hides or reveals one row. Separate from [`SetRowHeight`] because
+    /// hiding is not a size: a hidden row keeps the height it was given.
+    ///
+    /// [`SetRowHeight`]: AppSpreadsheetOperation::SetRowHeight
+    SetRowHidden {
+        sheet_id: String,
+        row: String,
+        hidden: bool,
+    },
+    SetColumnHidden {
+        sheet_id: String,
+        column: String,
+        hidden: bool,
     },
     CopyRange {
         sheet_id: String,
@@ -1005,10 +1352,14 @@ impl AppSpreadsheetOperation {
             Self::SetCellValidation { .. } => "set-spreadsheet-cell-validation",
             Self::ClearCellValidation { .. } => "clear-spreadsheet-cell-validation",
             Self::RestoreCellValidation { .. } => "restore-spreadsheet-cell-validation",
+            Self::ReplaceWorkbook { .. } => "replace-spreadsheet-workbook",
             Self::MergeCells { .. } => "merge-spreadsheet-cells",
             Self::UnmergeCells { .. } => "unmerge-spreadsheet-cells",
             Self::RestoreMerge { .. } => "restore-spreadsheet-merge",
             Self::SetBasicFilter { .. } => "set-spreadsheet-basic-filter",
+            Self::SetPrintArea { .. } => "set-spreadsheet-print-area",
+            Self::ClearPrintArea { .. } => "clear-spreadsheet-print-area",
+            Self::SetPrintOrientation { .. } => "set-spreadsheet-print-orientation",
             Self::SetBasicFilterOptions { .. } => "set-spreadsheet-basic-filter-options",
             Self::ClearBasicFilter { .. } => "clear-spreadsheet-basic-filter",
             Self::RestoreBasicFilter { .. } => "restore-spreadsheet-basic-filter",
@@ -1020,6 +1371,8 @@ impl AppSpreadsheetOperation {
             Self::SetCellFormat { .. } => "set-spreadsheet-cell-format",
             Self::SetRowHeight { .. } => "set-spreadsheet-row-height",
             Self::SetColumnWidth { .. } => "set-spreadsheet-column-width",
+            Self::SetRowHidden { .. } => "set-spreadsheet-row-hidden",
+            Self::SetColumnHidden { .. } => "set-spreadsheet-column-hidden",
             Self::CopyRange { .. } => "copy-spreadsheet-range",
             Self::SortRange { .. } => "sort-spreadsheet-range",
             Self::FillRange { .. } => "fill-spreadsheet-range",
@@ -1172,6 +1525,9 @@ impl AppSpreadsheetOperation {
                 validate_canonical_sheet_id(sheet_id)?;
                 validate_canonical_cell_address("spreadsheet cell operation address", address)?;
             }
+            Self::ReplaceWorkbook { workbook } => {
+                workbook.validate_source()?;
+            }
             Self::MergeCells { sheet_id, range } => {
                 validate_canonical_sheet_id(sheet_id)?;
                 validate_canonical_merge_range("spreadsheet merge operation range", range)?;
@@ -1199,6 +1555,13 @@ impl AppSpreadsheetOperation {
             Self::SetBasicFilter { sheet_id, range } => {
                 validate_canonical_sheet_id(sheet_id)?;
                 validate_canonical_cell_range("spreadsheet filter operation range", range)?;
+            }
+            Self::SetPrintArea { sheet_id, range } | Self::ClearPrintArea { sheet_id, range } => {
+                validate_canonical_sheet_id(sheet_id)?;
+                validate_canonical_cell_range("spreadsheet print area operation range", range)?;
+            }
+            Self::SetPrintOrientation { sheet_id, .. } => {
+                validate_canonical_sheet_id(sheet_id)?;
             }
             Self::SetBasicFilterOptions {
                 sheet_id,
@@ -1282,6 +1645,16 @@ impl AppSpreadsheetOperation {
                 validate_canonical_sheet_id(sheet_id)?;
                 validate_canonical_column_label(column)?;
                 validate_axis_size_operation_px("spreadsheet column width operation", *width)?;
+            }
+            Self::SetRowHidden { sheet_id, row, .. } => {
+                validate_canonical_sheet_id(sheet_id)?;
+                validate_canonical_row_label(row)?;
+            }
+            Self::SetColumnHidden {
+                sheet_id, column, ..
+            } => {
+                validate_canonical_sheet_id(sheet_id)?;
+                validate_canonical_column_label(column)?;
             }
             Self::CopyRange {
                 sheet_id,
@@ -1504,6 +1877,22 @@ fn validate_cell_format_operation_property(property: &str, value: &str) -> Resul
                 )));
             }
         }
+        "wrap_strategy" => {
+            if !matches!(value.trim(), "wrap" | "") {
+                return Err(AppApiError::Format(format!(
+                    "unsupported text wrap strategy {}",
+                    value.trim()
+                )));
+            }
+        }
+        "vertical_align" => {
+            if !matches!(value.trim(), "top" | "middle" | "bottom" | "") {
+                return Err(AppApiError::Format(format!(
+                    "unsupported vertical alignment {}",
+                    value.trim()
+                )));
+            }
+        }
         "number_format" => {
             validate_optional_canonical_operation_field("number format", value)?;
         }
@@ -1588,8 +1977,8 @@ mod tests {
         let mut app = OpenDocApp::new_sample();
         app.new_document("Envelope kinds");
         let base = app.document.clone();
-        app.add_paragraph("Hello");
-        app.add_paragraph("world");
+        app.add_paragraph("Hello").expect("paragraph");
+        app.add_paragraph("world").expect("paragraph");
 
         // Backspace at the start of the last paragraph joins it into the
         // previous one, which is the editor path that emits
@@ -1616,7 +2005,7 @@ mod tests {
         let mut app = OpenDocApp::new_sample();
         app.new_document("Envelope kinds");
         let base = app.document.clone();
-        app.add_paragraph("Hello world");
+        app.add_paragraph("Hello world").expect("paragraph");
         let last = app.document.blocks.len() - 1;
 
         // Bolding the first word splits the paragraph into two runs, so the
@@ -1652,9 +2041,9 @@ mod tests {
         let mut app = OpenDocApp::new_sample();
         app.new_document("Envelope kinds");
         let base = app.document.clone();
-        app.add_paragraph("alpha");
+        app.add_paragraph("alpha").expect("paragraph");
         app.add_heading("beta", 2).expect("heading is added");
-        app.add_table();
+        app.add_table().expect("a table");
         app.set_document_title("Renamed").expect("title is set");
         let last = app.document.blocks.len() - 1;
         let _ = app.apply_editor_input(editor_input(caret(&app, last, 0), "insertParagraph"));
@@ -1665,5 +2054,70 @@ mod tests {
             .any(|envelope| envelope.operation.is_some()));
         let replayed = round_trip_and_replay(&app, &base);
         assert_eq!(replayed, app.document);
+    }
+
+    /// The four structural inserts anchor with an `InsertPosition` rather than
+    /// an `after: Option<StableId>`, so their source validation goes through
+    /// `validate_insert_position`. An `After` still has to name a well-formed
+    /// id; `First` and `Last` name none and so have nothing to check.
+    ///
+    /// Decoding, not authoring, is what this guards: no command can build a
+    /// malformed anchor, but an operation segment read off disk or off a socket
+    /// can carry one.
+    #[test]
+    fn a_malformed_insert_anchor_is_refused_on_every_structural_insert() {
+        // A `StableId` cannot be *constructed* malformed outside its own
+        // crate; it can only be decoded that way, which is exactly the route
+        // this validation exists to cover.
+        let bad = || {
+            InsertPosition::After(
+                serde_json::from_str::<StableId>("\" bad \"").expect("decodes as written"),
+            )
+        };
+        let block = || Block::paragraph("body");
+        let inline = || Inline::text("run");
+        let table_cell = || opendoc_core::TableCell::new(vec![Block::paragraph("cell")]);
+        let ok_id = || StableId::parse("blk-one").unwrap();
+
+        let refused = [
+            OperationKind::InsertBlock {
+                position: bad(),
+                block: block(),
+            },
+            OperationKind::InsertInline {
+                block_id: ok_id(),
+                position: bad(),
+                inline: inline(),
+            },
+            OperationKind::MoveInlineToBlock {
+                inline_id: ok_id(),
+                target_block_id: ok_id(),
+                position: bad(),
+            },
+            OperationKind::InsertTableCell {
+                table_block_id: ok_id(),
+                row_id: ok_id(),
+                position: bad(),
+                cell: table_cell(),
+            },
+        ];
+        for kind in refused {
+            let error = validate_rich_document_operation_source(&kind)
+                .expect_err("a malformed insert anchor has to be refused");
+            assert!(
+                matches!(error, AppApiError::Format(_)),
+                "{kind:?} was refused with {error:?}"
+            );
+        }
+
+        // And the two positions that name no anchor are accepted, so the
+        // check above is about the anchor rather than about the operation.
+        for position in [InsertPosition::First, InsertPosition::Last] {
+            validate_rich_document_operation_source(&OperationKind::InsertBlock {
+                position,
+                block: block(),
+            })
+            .expect("First and Last name no anchor, so there is nothing to reject");
+        }
     }
 }

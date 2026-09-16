@@ -1,16 +1,17 @@
 //! Spreadsheet model validation and constructors shared by import, edit,
 //! recalculation, and export paths.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use serde::{Deserialize, Serialize};
 
 use crate::SpreadsheetError;
 
 use super::address::{
-    column_to_number, normalize_cell_address, normalize_cell_range, normalize_column_label,
-    normalize_merge_range, normalize_named_range_name, normalize_row_label, parse_cell_range,
-    range_contains_column_number, split_cell_address, CellRange,
+    cell_address, column_to_number, normalize_cell_address, normalize_cell_range,
+    normalize_column_label, normalize_merge_range, normalize_named_range_name, normalize_row_label,
+    parse_cell_range, range_contains_column_number, split_cell_address,
+    validate_canonical_column_label, validate_canonical_row_label, CellRange,
 };
 use super::google::{
     validate_google_sheets_export_axis_labels, validate_google_sheets_export_cells,
@@ -57,6 +58,25 @@ pub fn validate_canonical_cell_range(label: &str, value: &str) -> Result<(), Spr
     Ok(())
 }
 
+/// Normalizes a print rectangle to a direction-independent inclusive A1 range.
+/// Unlike a formula reference, a print rectangle has no meaningful direction:
+/// `D4:B2` and `B2:D4` designate the same paper box and must not become two
+/// serializable spellings of it.
+fn normalize_print_area(value: &str) -> Result<String, SpreadsheetError> {
+    let range = normalize_cell_range(value)?;
+    let parsed = parse_cell_range(&range)?;
+    let start = cell_address(parsed.start_column, parsed.start_row)?;
+    let end = cell_address(
+        parsed.start_column + parsed.width - 1,
+        parsed.start_row + parsed.height - 1,
+    )?;
+    Ok(if start == end {
+        start
+    } else {
+        format!("{start}:{end}")
+    })
+}
+
 pub fn validate_filter_condition(value: &str) -> Result<(), SpreadsheetError> {
     match value {
         "text_contains" | "text_equals" | "number_greater" | "number_less" | "number_equal" => {
@@ -65,23 +85,6 @@ pub fn validate_filter_condition(value: &str) -> Result<(), SpreadsheetError> {
         other => Err(SpreadsheetError::Format(format!(
             "unsupported filter condition {other}"
         ))),
-    }
-}
-
-pub fn classify_cell_value(value: &str) -> &'static str {
-    if value.starts_with('=') {
-        "formula"
-    } else if !value.is_empty()
-        && value.trim() == value
-        && value.parse::<f64>().is_ok_and(f64::is_finite)
-    {
-        "number"
-    } else if matches!(value, "TRUE" | "FALSE" | "true" | "false") {
-        "bool"
-    } else if value.is_empty() {
-        "empty"
-    } else {
-        "string"
     }
 }
 
@@ -481,6 +484,10 @@ pub struct Sheet {
     pub rows: Vec<String>,
     pub columns: Vec<String>,
     pub cells: Vec<Cell>,
+    /// Floating raster pictures anchored to cell rectangles.  The bytes belong
+    /// to the application blob store, not to this value-only workbook model.
+    #[serde(default)]
+    pub images: Vec<SheetImage>,
     /// Explicit row heights in pixels by row label.
     #[serde(default)]
     pub row_heights: BTreeMap<String, u32>,
@@ -497,12 +504,71 @@ pub struct Sheet {
     /// Tab colour as `#rrggbb`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tab_color: Option<String>,
+    /// Sheet-owned paper settings. This begins with an optional print area and
+    /// Letter orientation; page size, scaling, margins, headers, and manual
+    /// breaks deliberately remain absent until they have durable cross-export
+    /// semantics.
+    #[serde(default)]
+    pub print_settings: SheetPrintSettings,
+}
+
+/// The durable subset of a spreadsheet's paper contract.
+///
+/// A missing `print_area` means the PDF exporter derives the used visible
+/// range. A present area is an inclusive canonical A1 range and may include
+/// blank cells, which are still meaningful on paper. Orientation is explicit
+/// even though landscape is the compatibility default: a sheet can choose
+/// portrait paper without pretending that page size or scaling was imported.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SheetPrintSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub print_area: Option<String>,
+    #[serde(default)]
+    pub orientation: SheetPrintOrientation,
+}
+
+/// The two orientations of the spreadsheet PDF's fixed Letter media box.
+///
+/// This is deliberately an enum rather than an unconstrained string.  The
+/// exporter needs a total paper geometry for every persisted value, and an
+/// unknown orientation must fail source validation rather than silently fall
+/// back to a different page shape.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SheetPrintOrientation {
+    Portrait,
+    #[default]
+    Landscape,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SheetMerge {
     pub id: String,
     pub range: String,
+}
+
+/// A spreadsheet picture whose box follows a pair of cell anchors.
+///
+/// Offsets are CSS pixels from the respective cell's top-left corner.  The
+/// end anchor is exclusive in the same sense as OOXML's `to` marker: an image
+/// from A1 to C4 covers the rectangular grid region beginning at A1 and ending
+/// immediately before C4, subject to its offsets.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SheetImage {
+    pub id: String,
+    pub blob_hash: String,
+    pub start_column: String,
+    pub start_row: String,
+    #[serde(default)]
+    pub start_offset_x_px: u32,
+    #[serde(default)]
+    pub start_offset_y_px: u32,
+    pub end_column: String,
+    pub end_row: String,
+    #[serde(default)]
+    pub end_offset_x_px: u32,
+    #[serde(default)]
+    pub end_offset_y_px: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -717,36 +783,95 @@ impl Sheet {
         validate_sheet_axis_metadata(self)?;
         validate_sheet_axis_sizes(self)?;
         validate_google_sheets_export_ranges(self)?;
-        validate_google_sheets_export_cells(self)
+        validate_google_sheets_export_cells(self)?;
+        self.print_settings.validate_source(self)?;
+        let mut image_ids = BTreeSet::new();
+        for image in &self.images {
+            image.validate_source(self)?;
+            if !image_ids.insert(image.id.clone()) {
+                return Err(SpreadsheetError::Format(format!(
+                    "duplicate spreadsheet image {}",
+                    image.id
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Sets the optional inclusive print area, normalizing user input before
+    /// it becomes durable state. `None` restores the used-visible-range
+    /// default used by the PDF exporter.
+    pub fn set_print_area(&mut self, print_area: Option<&str>) -> Result<(), SpreadsheetError> {
+        let print_area = match print_area {
+            Some(range) => Some(normalize_print_area(range)?),
+            None => None,
+        };
+        let candidate = SheetPrintSettings {
+            print_area,
+            orientation: self.print_settings.orientation,
+        };
+        candidate.validate_source(self)?;
+        self.print_settings = candidate;
+        Ok(())
+    }
+
+    /// Changes the orientation of the PDF's fixed Letter media box.
+    pub fn set_print_orientation(&mut self, orientation: SheetPrintOrientation) {
+        self.print_settings.orientation = orientation;
     }
 
     pub fn ensure_address(&mut self, address: &str) {
         let (column, row) = split_cell_address(address);
+        let mut added = false;
         if !self.columns.iter().any(|item| item == &column) {
             self.columns.push(column);
             self.columns.sort();
+            added = true;
         }
         if !self.rows.iter().any(|item| item == &row) {
             self.rows.push(row);
             self.rows
                 .sort_by_key(|value| value.parse::<u32>().unwrap_or(0));
+            added = true;
         }
-        self.ensure_axis_metadata();
+        if added {
+            self.ensure_axis_metadata();
+        }
     }
 
+    /// Gives every visible row and column an axis metadata entry, in axis
+    /// order.
+    ///
+    /// Membership goes through a hash set rather than a scan of the existing
+    /// axes. The scan made this O(rows²): `evaluate` calls it once per sheet
+    /// per evaluation, and importing a sheet whose last used cell sits at row
+    /// 65,000 spent minutes here comparing 65,000 labels against 65,000 axes.
     pub fn ensure_axis_metadata(&mut self) {
-        let rows = self.rows.clone();
-        let columns = self.columns.clone();
-        for row in rows {
-            if !self.row_axes.iter().any(|axis| axis.label == row) {
-                self.row_axes.push(row_axis(row));
-            }
-        }
-        for column in columns {
-            if !self.column_axes.iter().any(|axis| axis.label == column) {
-                self.column_axes.push(column_axis(column));
-            }
-        }
+        let known_rows: HashSet<&str> = self
+            .row_axes
+            .iter()
+            .map(|axis| axis.label.as_str())
+            .collect();
+        let missing_rows: Vec<String> = self
+            .rows
+            .iter()
+            .filter(|row| !known_rows.contains(row.as_str()))
+            .cloned()
+            .collect();
+        let known_columns: HashSet<&str> = self
+            .column_axes
+            .iter()
+            .map(|axis| axis.label.as_str())
+            .collect();
+        let missing_columns: Vec<String> = self
+            .columns
+            .iter()
+            .filter(|column| !known_columns.contains(column.as_str()))
+            .cloned()
+            .collect();
+        self.row_axes.extend(missing_rows.into_iter().map(row_axis));
+        self.column_axes
+            .extend(missing_columns.into_iter().map(column_axis));
         self.row_axes
             .sort_by_key(|axis| axis.label.parse::<u32>().unwrap_or(0));
         self.column_axes
@@ -764,6 +889,206 @@ impl Sheet {
             .iter_mut()
             .find(|cell| cell.address == address)
             .expect("newly inserted spreadsheet cell exists")
+    }
+}
+
+impl SheetPrintSettings {
+    pub fn validate_source(&self, sheet: &Sheet) -> Result<(), SpreadsheetError> {
+        let Some(print_area) = &self.print_area else {
+            return Ok(());
+        };
+        let normalized = normalize_print_area(print_area)?;
+        if *print_area != normalized {
+            return Err(SpreadsheetError::Format(format!(
+                "sheet {} print area {print_area} is not canonical; expected {normalized}",
+                sheet.id
+            )));
+        }
+        let (start, end) = normalized
+            .split_once(':')
+            .unwrap_or((&normalized, &normalized));
+        let (start_column, start_row) = split_cell_address(start);
+        let (end_column, end_row) = split_cell_address(end);
+        if !sheet.columns.contains(&start_column)
+            || !sheet.columns.contains(&end_column)
+            || !sheet.rows.contains(&start_row)
+            || !sheet.rows.contains(&end_row)
+        {
+            return Err(SpreadsheetError::Format(format!(
+                "sheet {} print area {print_area} is outside the sheet grid",
+                sheet.id
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod print_settings_tests {
+    use super::{Sheet, SheetPrintOrientation};
+    use crate::io::blank_sheet;
+
+    #[test]
+    fn print_area_is_canonical_bounded_and_clearable() {
+        let mut sheet = blank_sheet("sheet-1", "Sheet1", 4, 4);
+        sheet
+            .set_print_area(Some(" d4 : b2 "))
+            .expect("normalizes print area");
+        assert_eq!(sheet.print_settings.print_area.as_deref(), Some("B2:D4"));
+        assert!(sheet.validate_source().is_ok());
+        assert!(sheet.set_print_area(Some("E1:E1")).is_err());
+        assert_eq!(sheet.print_settings.print_area.as_deref(), Some("B2:D4"));
+        sheet.set_print_area(None).expect("clears print area");
+        assert_eq!(sheet.print_settings.print_area, None);
+    }
+
+    #[test]
+    fn deserialized_print_area_must_already_be_canonical() {
+        let mut sheet = blank_sheet("sheet-1", "Sheet1", 4, 4);
+        sheet.print_settings.print_area = Some("b2:d4".to_string());
+        assert!(sheet.validate_source().is_err());
+    }
+
+    #[test]
+    fn print_orientation_is_a_durable_closed_set_with_landscape_compatibility_default() {
+        let mut sheet = blank_sheet("sheet-1", "Sheet1", 4, 4);
+        assert_eq!(
+            sheet.print_settings.orientation,
+            SheetPrintOrientation::Landscape
+        );
+        sheet.set_print_orientation(SheetPrintOrientation::Portrait);
+        let json = serde_json::to_string(&sheet).expect("serializes print orientation");
+        assert!(json.contains("\"orientation\":\"portrait\""));
+        let reread: Sheet = serde_json::from_str(&json).expect("deserializes print orientation");
+        assert_eq!(
+            reread.print_settings.orientation,
+            SheetPrintOrientation::Portrait
+        );
+    }
+}
+
+impl SheetImage {
+    pub fn validate_source(&self, sheet: &Sheet) -> Result<(), SpreadsheetError> {
+        if self.id.trim().is_empty() || self.id.trim() != self.id {
+            return Err(SpreadsheetError::Format(
+                "spreadsheet image id is empty or not canonical".to_string(),
+            ));
+        }
+        // This is intentionally a reference-shaped validation only. Blob
+        // existence/media type belongs to the app's blob owner (ADR 0045).
+        let Some((algorithm, digest)) = self.blob_hash.split_once(':') else {
+            return Err(SpreadsheetError::Format(format!(
+                "spreadsheet image {} has invalid blob hash",
+                self.id
+            )));
+        };
+        if algorithm.is_empty()
+            || digest.is_empty()
+            || !algorithm
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            || !digest
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        {
+            return Err(SpreadsheetError::Format(format!(
+                "spreadsheet image {} has invalid blob hash",
+                self.id
+            )));
+        }
+        validate_canonical_column_label(&self.start_column)?;
+        validate_canonical_row_label(&self.start_row)?;
+        validate_canonical_column_label(&self.end_column)?;
+        validate_canonical_row_label(&self.end_row)?;
+        let start_column = column_to_number(&self.start_column).ok_or_else(|| {
+            SpreadsheetError::Format(format!(
+                "spreadsheet image {} start column is invalid",
+                self.id
+            ))
+        })?;
+        let end_column = column_to_number(&self.end_column).ok_or_else(|| {
+            SpreadsheetError::Format(format!(
+                "spreadsheet image {} end column is invalid",
+                self.id
+            ))
+        })?;
+        let start_row = self.start_row.parse::<u32>().map_err(|_| {
+            SpreadsheetError::Format(format!(
+                "spreadsheet image {} start row is invalid",
+                self.id
+            ))
+        })?;
+        let end_row = self.end_row.parse::<u32>().map_err(|_| {
+            SpreadsheetError::Format(format!("spreadsheet image {} end row is invalid", self.id))
+        })?;
+        if !sheet.columns.contains(&self.start_column)
+            || !sheet.columns.contains(&self.end_column)
+            || !sheet.rows.contains(&self.start_row)
+            || !sheet.rows.contains(&self.end_row)
+        {
+            return Err(SpreadsheetError::Format(format!(
+                "spreadsheet image {} anchor is outside sheet grid",
+                self.id
+            )));
+        }
+        if (
+            end_row,
+            end_column,
+            self.end_offset_y_px,
+            self.end_offset_x_px,
+        ) <= (
+            start_row,
+            start_column,
+            self.start_offset_y_px,
+            self.start_offset_x_px,
+        ) {
+            return Err(SpreadsheetError::Format(format!(
+                "spreadsheet image {} has an empty or reversed anchor",
+                self.id
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod sheet_image_tests {
+    use super::*;
+    use crate::io::blank_sheet;
+
+    fn image() -> SheetImage {
+        SheetImage {
+            id: "drawing-1".to_string(),
+            blob_hash: "sha256:abc_DEF-123.png".to_string(),
+            start_column: "A".to_string(),
+            start_row: "1".to_string(),
+            start_offset_x_px: 0,
+            start_offset_y_px: 0,
+            end_column: "C".to_string(),
+            end_row: "4".to_string(),
+            end_offset_x_px: 0,
+            end_offset_y_px: 0,
+        }
+    }
+
+    #[test]
+    fn sheet_images_are_durable_two_cell_anchors() {
+        let mut sheet = blank_sheet("sheet-1", "Sheet1", 10, 10);
+        sheet.images.push(image());
+        assert!(sheet.validate_source().is_ok());
+    }
+
+    #[test]
+    fn sheet_images_reject_empty_or_outside_anchors() {
+        let mut sheet = blank_sheet("sheet-1", "Sheet1", 10, 10);
+        let mut drawing = image();
+        drawing.end_column = "A".to_string();
+        drawing.end_row = "1".to_string();
+        sheet.images.push(drawing);
+        assert!(sheet.validate_source().is_err());
+        sheet.images[0] = image();
+        sheet.images[0].end_column = "Z".to_string();
+        assert!(sheet.validate_source().is_err());
     }
 }
 
@@ -816,7 +1141,13 @@ pub struct CellValidation {
 impl CellValidation {
     pub fn new(kind: &str, values: Vec<String>, strict: bool) -> Result<Self, SpreadsheetError> {
         let kind = match kind.trim().to_ascii_lowercase().as_str() {
-            "list" | "one_of_list" | "one_of_range" => "list".to_string(),
+            // A literal dropdown and a dropdown whose choices come from a
+            // sheet range look similar in the UI, but are not interchangeable
+            // on the wire. In particular, exporting a range name as a
+            // one-item `ONE_OF_LIST` changes its meaning. Retain the latter
+            // spelling so the Google Sheets codec can write it back exactly.
+            "list" | "one_of_list" => "list".to_string(),
+            "one_of_range" => "one_of_range".to_string(),
             "number_greater" | "number_less" | "number_between" | "text_contains"
             | "custom_formula" => kind.trim().to_ascii_lowercase(),
             "" => {
@@ -896,6 +1227,23 @@ impl CellValidation {
                 "list validation requires at least one value".to_string(),
             ));
         }
+        if normalized == "one_of_range" {
+            let [reference] = self.values.as_slice() else {
+                return Err(SpreadsheetError::Format(
+                    "range-list validation requires exactly one A1 range".to_string(),
+                ));
+            };
+            let body = reference
+                .trim_start_matches('=')
+                .rsplit_once('!')
+                .map_or(reference.trim_start_matches('='), |(_, range)| range);
+            let body = body.replace('$', "");
+            if !body.contains(':') || normalize_cell_range(&body).is_err() {
+                return Err(SpreadsheetError::Format(
+                    "range-list validation must name one rectangular A1 range".to_string(),
+                ));
+            }
+        }
         Ok(())
     }
 }
@@ -953,6 +1301,12 @@ pub struct CellFormat {
     pub text_color: Option<String>,
     pub background_color: Option<String>,
     pub horizontal_align: Option<String>,
+    /// How text whose measured width exceeds the cell box is displayed.
+    /// `wrap` is deliberately the only non-default strategy: spill, clip,
+    /// shrink-to-fit and rotation need neighbouring-cell/layout semantics.
+    pub wrap_strategy: Option<String>,
+    /// Vertical position inside the stored row height.
+    pub vertical_align: Option<String>,
     pub number_format: Option<String>,
 }
 
@@ -962,7 +1316,6 @@ pub struct CellDependency {
     pub address: String,
     pub dependencies: Vec<String>,
     pub dependents: Vec<String>,
-    pub invalidation_order: Vec<String>,
 }
 
 impl CellDependency {
@@ -981,7 +1334,6 @@ impl CellDependency {
         validate_dependency_label("dependency graph address", &self.address)?;
         validate_dependency_labels("dependency", &self.dependencies)?;
         validate_dependency_labels("dependent", &self.dependents)?;
-        validate_dependency_labels("invalidation", &self.invalidation_order)?;
         Ok(())
     }
 }

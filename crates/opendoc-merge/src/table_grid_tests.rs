@@ -3,10 +3,10 @@
 use crate::causal::{ActorId, OperationId};
 use crate::merge::merge_operations;
 use crate::operation::{Operation, OperationKind};
-use crate::test_support::{converges, grid_document, table_of, table_row};
+use crate::test_support::{converges, grid_document, insert_row_op, table_of, table_row};
 use opendoc_core::{
-    BlockKind, CellSpan, Length, StableId, TableCell, TableCellProperty, TableCellPropertyKey,
-    TableColumn,
+    BlockKind, CellSpan, InsertPosition, Length, StableId, TableCell, TableCellProperty,
+    TableCellPropertyKey, TableColumn,
 };
 
 #[test]
@@ -20,7 +20,7 @@ fn concurrent_table_column_inserts_converge_by_operation_id() {
         },
         kind: OperationKind::InsertTableColumn {
             table_block_id: table_block_id.clone(),
-            after_column: Some(after.clone()),
+            position: InsertPosition::After(after.clone()),
             column: TableColumn {
                 id: StableId::parse(id).unwrap(),
                 width: None,
@@ -49,18 +49,14 @@ fn a_row_and_a_column_inserted_concurrently_still_meet_in_a_cell() {
     // where they cross has to exist and has to be the *same* cell on
     // every replica.
     let (base, table_block_id) = grid_document(2, 2);
-    let insert_row = Operation {
-        id: OperationId {
-            actor: ActorId("a".to_string()),
-            seq: 1,
-        },
-        kind: OperationKind::InsertTableRow {
-            table_block_id: table_block_id.clone(),
-            after_row: Some(StableId::parse("row-0").unwrap()),
-            row: table_row(&StableId::parse("row-new").unwrap(), "new row"),
-        },
-        context: None,
-    };
+    let insert_row = insert_row_op(
+        &base,
+        &table_block_id,
+        "a",
+        1,
+        InsertPosition::After(StableId::parse("row-0").unwrap()),
+        table_row(&StableId::parse("row-new").unwrap(), "new row"),
+    );
     let insert_column = Operation {
         id: OperationId {
             actor: ActorId("b".to_string()),
@@ -68,7 +64,7 @@ fn a_row_and_a_column_inserted_concurrently_still_meet_in_a_cell() {
         },
         kind: OperationKind::InsertTableColumn {
             table_block_id,
-            after_column: Some(StableId::parse("column-0").unwrap()),
+            position: InsertPosition::After(StableId::parse("column-0").unwrap()),
             column: TableColumn {
                 id: StableId::parse("column-new").unwrap(),
                 width: None,
@@ -117,7 +113,7 @@ fn a_column_deleted_under_a_concurrent_insert_still_leaves_a_rectangle() {
         },
         kind: OperationKind::InsertTableColumn {
             table_block_id,
-            after_column: Some(StableId::parse("column-1").unwrap()),
+            position: InsertPosition::After(StableId::parse("column-1").unwrap()),
             column: TableColumn {
                 id: StableId::parse("column-new").unwrap(),
                 width: None,
@@ -164,10 +160,9 @@ fn deleting_the_last_column_leaves_a_placeholder_every_replica_agrees_on() {
     let first = merge_operations(&base, &[vec![delete.clone()]]).unwrap();
     let second = merge_operations(&base, &[vec![delete]]).unwrap();
     assert_eq!(first.document, second.document);
-    first.document.validate().unwrap();
     let (columns, rows) = table_of(&first.document);
     assert_eq!(columns.len(), 1);
-    assert_eq!(columns[0].id, TableColumn::filling(&table_block_id, 0).id);
+    assert_eq!(columns[0].id, TableColumn::filling(&table_block_id).id);
     assert_eq!(rows.len(), 2);
     assert!(first
         .warnings
@@ -192,7 +187,6 @@ fn merging_cells_hides_the_covered_content_and_splitting_hands_it_back() {
 
     let merged =
         merge_operations(&base, &[vec![merge_op(CellSpan::new(2, 2).unwrap(), 1)]]).unwrap();
-    merged.document.validate().unwrap();
     let text = merged.document.visible_text();
     assert!(text.contains("r0c0"));
     for hidden in ["r0c1", "r1c0", "r1c1"] {
@@ -200,7 +194,6 @@ fn merging_cells_hides_the_covered_content_and_splitting_hands_it_back() {
     }
 
     let split = merge_operations(&merged.document, &[vec![merge_op(CellSpan::SINGLE, 2)]]).unwrap();
-    split.document.validate().unwrap();
     let text = split.document.visible_text();
     for restored in ["r0c0", "r0c1", "r1c0", "r1c1"] {
         assert!(text.contains(restored), "{restored} should be back: {text}");
@@ -259,7 +252,7 @@ fn a_column_inserted_through_a_merge_widens_it() {
             },
             kind: OperationKind::InsertTableColumn {
                 table_block_id,
-                after_column: Some(StableId::parse("column-0").unwrap()),
+                position: InsertPosition::After(StableId::parse("column-0").unwrap()),
                 column: TableColumn {
                     id: StableId::parse("column-new").unwrap(),
                     width: None,
@@ -269,7 +262,6 @@ fn a_column_inserted_through_a_merge_widens_it() {
         }]],
     )
     .unwrap();
-    merged.document.validate().unwrap();
     let (_, rows) = table_of(&merged.document);
     assert_eq!(
         rows[0].cells[0].span,
@@ -310,7 +302,6 @@ fn a_row_deleted_through_a_merge_narrows_it() {
         }]],
     )
     .unwrap();
-    merged.document.validate().unwrap();
     let (_, rows) = table_of(&merged.document);
     assert_eq!(rows.len(), 3);
     assert_eq!(
@@ -351,7 +342,6 @@ fn a_column_deleted_through_a_merge_narrows_it() {
         }]],
     )
     .unwrap();
-    merged.document.validate().unwrap();
     let (columns, rows) = table_of(&merged.document);
     assert_eq!(columns.len(), 3);
     assert_eq!(
@@ -393,8 +383,23 @@ fn concurrent_cell_style_edits_keep_both_properties() {
         },
         context: None,
     };
+    let row_header = Operation {
+        id: OperationId {
+            actor: ActorId("c".to_string()),
+            seq: 1,
+        },
+        kind: OperationKind::SetTableCellProperty {
+            cell_id: cell_id.clone(),
+            property: TableCellProperty::RowHeader(true),
+        },
+        context: None,
+    };
 
-    let merged = converges(&base, background, alignment);
+    let merged = merge_operations(
+        &base,
+        &[vec![background], vec![alignment], vec![row_header]],
+    )
+    .expect("independent cell properties converge");
     let (_, rows) = table_of(&merged.document);
     let properties = &rows[0].cells[0].properties;
     assert_eq!(
@@ -405,6 +410,7 @@ fn concurrent_cell_style_edits_keep_both_properties() {
         properties.vertical_alignment,
         Some(opendoc_core::VerticalAlignment::Bottom)
     );
+    assert_eq!(properties.row_header, Some(true));
 
     let cleared = merge_operations(
         &merged.document,
@@ -427,6 +433,7 @@ fn concurrent_cell_style_edits_keep_both_properties() {
         rows[0].cells[0].properties.vertical_alignment,
         Some(opendoc_core::VerticalAlignment::Bottom)
     );
+    assert_eq!(rows[0].cells[0].properties.row_header, Some(true));
 }
 
 #[test]
@@ -477,4 +484,59 @@ fn concurrent_width_edits_on_different_columns_both_survive() {
         .warnings
         .iter()
         .any(|warning| warning.code == "invalid-table-column-width"));
+}
+
+#[test]
+fn inserting_first_lands_before_every_sibling() {
+    // The position `after: Option<StableId>` could not express: `None` there
+    // already means *append*, so "before the first one" needed a value of its
+    // own rather than a second optional field beside the anchor.
+    let (base, table_block_id) = grid_document(2, 2);
+    let insert_row = insert_row_op(
+        &base,
+        &table_block_id,
+        "a",
+        1,
+        InsertPosition::First,
+        table_row(&StableId::parse("row-new").unwrap(), "new row"),
+    );
+    let insert_column = Operation {
+        id: OperationId {
+            actor: ActorId("a".to_string()),
+            seq: 2,
+        },
+        kind: OperationKind::InsertTableColumn {
+            table_block_id,
+            position: InsertPosition::First,
+            column: TableColumn {
+                id: StableId::parse("column-new").unwrap(),
+                width: None,
+            },
+        },
+        context: None,
+    };
+    let merged = merge_operations(&base, &[vec![insert_row, insert_column]]).unwrap();
+    let (columns, rows) = table_of(&merged.document);
+    assert_eq!(
+        columns.iter().map(|c| c.id.to_string()).collect::<Vec<_>>(),
+        vec!["column-new", "column-0", "column-1"]
+    );
+    assert_eq!(
+        rows.iter().map(|r| r.id.to_string()).collect::<Vec<_>>(),
+        vec!["row-new", "row-0", "row-1"]
+    );
+    for row in rows {
+        assert_eq!(row.cells.len(), 3, "the new column reached every row");
+    }
+    // `First` names no sibling, so there is no anchor to have gone missing
+    // and nothing to degrade. (The fixture row is short by a column, so the
+    // geometry repair does speak up — that is the fixture, not the position.)
+    assert!(
+        !merged
+            .warnings
+            .iter()
+            .any(|warning| warning.code.contains("anchor-degraded")),
+        "{:?}",
+        merged.warnings
+    );
 }

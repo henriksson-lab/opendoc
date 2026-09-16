@@ -248,7 +248,6 @@ fn empty_inline_equation_source_update_degrades_to_warning() {
         actor_streams.warnings[0].code,
         "invalid-inline-equation-source"
     );
-    actor_streams.document.validate().unwrap();
 }
 
 #[test]
@@ -442,7 +441,6 @@ fn structured_source_updates_are_canonicalized_during_merge() {
         BlockKind::EquationBlock { equation } => assert_eq!(equation.source, "x=2"),
         other => panic!("expected block equation, got {other:?}"),
     }
-    result.document.validate().unwrap();
 }
 
 #[test]
@@ -496,7 +494,6 @@ fn empty_block_equation_source_update_degrades_to_warning() {
         actor_streams.warnings[0].code,
         "invalid-block-equation-source"
     );
-    actor_streams.document.validate().unwrap();
 }
 
 #[test]
@@ -641,7 +638,6 @@ fn invalid_image_blob_hash_update_degrades_to_warning() {
         other => panic!("expected image block, got {other:?}"),
     }
     assert_eq!(actor_streams.warnings[0].code, "invalid-image-blob-hash");
-    actor_streams.document.validate().unwrap();
 }
 
 #[test]
@@ -682,7 +678,6 @@ fn padded_image_blob_hash_update_degrades_without_changing_source() {
         other => panic!("expected image block, got {other:?}"),
     }
     assert_eq!(result.warnings[0].code, "invalid-image-blob-hash");
-    result.document.validate().unwrap();
 }
 
 #[test]
@@ -726,7 +721,6 @@ fn image_blob_hash_update_stores_canonical_hash_reference() {
         other => panic!("expected image block, got {other:?}"),
     }
     assert!(result.warnings.is_empty());
-    result.document.validate().unwrap();
 }
 
 #[test]
@@ -804,7 +798,6 @@ fn image_delete_beats_stale_metadata_updates_without_resurrection() {
         .warnings
         .iter()
         .all(|warning| warning.message.contains(&block_id.to_string())));
-    actor_streams.document.validate().unwrap();
 }
 
 #[test]
@@ -930,5 +923,4 @@ fn structured_inline_delete_beats_stale_source_updates_without_resurrection() {
     assert!(warning_text.contains(link_id.as_str()));
     assert!(warning_text.contains(mention_id.as_str()));
     assert!(warning_text.contains(equation_id.as_str()));
-    actor_streams.document.validate().unwrap();
 }

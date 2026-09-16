@@ -85,59 +85,56 @@ pub fn parse_json_command(
                 locale: arg_string(args, "locale")?,
             },
         ))),
+        "set_bookmark" => Ok(Some(OpenDocCommand::SetBookmark(SetBookmarkArgs {
+            bookmark_id: arg_optional_string(args, "bookmarkId")?,
+            name: arg_string(args, "name")?,
+            block_id: arg_string(args, "blockId")?,
+        }))),
+        "delete_bookmark" => Ok(Some(OpenDocCommand::DeleteBookmark(BookmarkIdArgs {
+            bookmark_id: arg_string(args, "bookmarkId")?,
+        }))),
         "add_paragraph" => Ok(Some(OpenDocCommand::AddParagraph(AddParagraphArgs {
             text: arg_string(args, "text")?,
         }))),
         "render_document_html" => Ok(Some(OpenDocCommand::RenderDocumentHtml)),
+        "render_suggestion_preview_html" => Ok(Some(OpenDocCommand::RenderSuggestionPreviewHtml(
+            SuggestionPreviewArgs {
+                suggestion_id: arg_string(args, "suggestionId")?,
+                resolution: arg_string(args, "resolution")?,
+            },
+        ))),
         "get_runtime_profile" => Ok(Some(OpenDocCommand::GetRuntimeProfile(
             runtime_profile_from_args(args)?,
         ))),
         "get_runtime_session" => Ok(Some(OpenDocCommand::GetRuntimeSession(
             GetRuntimeSessionArgs {
                 profile: runtime_profile_from_args(args)?,
-                subject: arg_optional_string(args, "subject")?,
-                document_uuid: arg_optional_string(args, "documentUuid")?,
-                presence: arg_presence_peers(args, "presence")?,
-                permissions: arg_permission_grants(args, "permissions")?,
             },
         ))),
         "authorize_runtime_command" => Ok(Some(OpenDocCommand::AuthorizeRuntimeCommand(
             AuthorizeRuntimeCommandArgs {
                 profile: runtime_profile_from_args(args)?,
-                subject: arg_optional_string(args, "subject")?,
-                document_uuid: arg_optional_string(args, "documentUuid")?,
                 command_name: arg_string(args, "commandName")?,
-                permissions: arg_permission_grants(args, "permissions")?,
             },
         ))),
         "create_runtime_share_invite" => Ok(Some(OpenDocCommand::CreateRuntimeShareInvite(
             CreateRuntimeShareInviteArgs {
                 profile: runtime_profile_from_args(args)?,
-                subject: arg_optional_string(args, "subject")?,
-                document_uuid: arg_optional_string(args, "documentUuid")?,
                 target_subject: arg_optional_string(args, "targetSubject")?,
-                actions: arg_runtime_share_actions(args, "actions"),
-                permissions: arg_permission_grants(args, "permissions")?,
+                requested_role: arg_optional_string(args, "role")?,
             },
         ))),
         "relay_runtime_sync" => Ok(Some(OpenDocCommand::RelayRuntimeSync(
             RelayRuntimeSyncArgs {
                 profile: runtime_profile_from_args(args)?,
-                subject: arg_optional_string(args, "subject")?,
-                document_uuid: arg_optional_string(args, "documentUuid")?,
-                base_manifest: arg_optional_string(args, "baseManifest")?,
                 operations: arg_relay_operations(args, "operations")?,
-                permissions: arg_permission_grants(args, "permissions")?,
-                presence: arg_presence_peers(args, "presence")?,
             },
         ))),
         "resolve_runtime_document_lookup" => Ok(Some(
             OpenDocCommand::ResolveRuntimeDocumentLookup(ResolveRuntimeDocumentLookupArgs {
                 profile: runtime_profile_from_args(args)?,
-                subject: arg_optional_string(args, "subject")?,
                 document_uuid: arg_optional_string(args, "documentUuid")?,
                 doi: arg_optional_string(args, "doi")?,
-                permissions: arg_permission_grants(args, "permissions")?,
                 service_index: arg_runtime_lookup_entries(args, "serviceIndex")?,
                 scanned_documents: arg_runtime_lookup_entries(args, "scannedDocuments")?,
             }),
@@ -155,6 +152,13 @@ pub fn parse_json_command(
         ))),
         "export_google_docs_json" => Ok(Some(OpenDocCommand::ExportGoogleDocsJson)),
         "export_docx" => Ok(Some(OpenDocCommand::ExportDocx)),
+        "export_odt" => Ok(Some(OpenDocCommand::ExportOdt)),
+        "export_pdf" => Ok(Some(OpenDocCommand::ExportPdf)),
+        "export_html" => Ok(Some(OpenDocCommand::ExportHtml)),
+        "export_text" => Ok(Some(OpenDocCommand::ExportText)),
+        "export_image_blob" => Ok(Some(OpenDocCommand::ExportImageBlob(ExportImageBlobArgs {
+            blob_hash: arg_string(args, "blobHash")?,
+        }))),
         "import_google_sheets_json" => Ok(Some(OpenDocCommand::ImportGoogleSheetsJson(
             ImportGoogleSheetsJsonArgs {
                 json_text: arg_string(args, "jsonText")?,
@@ -250,6 +254,14 @@ pub fn parse_json_command(
                 signer_display: arg_string(args, "signerDisplay")?,
             },
         ))),
+        "sign_current_repository_version_with_openssh_private_key" => Ok(Some(
+            OpenDocCommand::SignCurrentRepositoryVersionWithOpenSshPrivateKey(
+                SignCurrentRepositoryVersionWithOpenSshPrivateKeyArgs {
+                    private_key_pem: arg_string(args, "privateKeyPem")?,
+                    signer_display: arg_string(args, "signerDisplay")?,
+                },
+            ),
+        )),
         "verify_current_signature" => Ok(Some(OpenDocCommand::VerifyCurrentSignature(
             VerifyCurrentSignatureArgs {
                 private_key_pem: arg_string(args, "privateKeyPem")?,
@@ -370,6 +382,11 @@ pub fn parse_json_command(
             block_id_args(args)?,
         ))),
         "delete_block" => Ok(Some(OpenDocCommand::DeleteBlock(block_id_args(args)?))),
+        "move_block" => Ok(Some(OpenDocCommand::MoveBlock(MoveBlockArgs {
+            block_id: arg_string(args, "blockId")?,
+            anchor_block_id: arg_string(args, "anchorBlockId")?,
+            placement: arg_string(args, "placement")?,
+        }))),
         "set_block_text_style" => Ok(Some(OpenDocCommand::SetBlockTextStyle(
             SetBlockTextStyleArgs {
                 block_id: arg_string(args, "blockId")?,
@@ -407,7 +424,18 @@ pub fn parse_json_command(
                 alignment: arg_string(args, "alignment")?,
             },
         ))),
+        "set_page_furniture_html" => Ok(Some(OpenDocCommand::SetPageFurnitureHtml(
+            SetPageFurnitureHtmlArgs {
+                slot: arg_string(args, "slot")?,
+                html: arg_string(args, "html")?,
+            },
+        ))),
         "clear_page_furniture" => Ok(Some(OpenDocCommand::ClearPageFurniture(
+            PageFurnitureSlotArgs {
+                slot: arg_string(args, "slot")?,
+            },
+        ))),
+        "clear_page_furniture_override" => Ok(Some(OpenDocCommand::ClearPageFurnitureOverride(
             PageFurnitureSlotArgs {
                 slot: arg_string(args, "slot")?,
             },
@@ -518,6 +546,44 @@ pub fn parse_json_command(
                 },
             )))
         }
+        "set_block_keep_with_next" => Ok(Some(OpenDocCommand::SetBlockKeepWithNext(
+            SetBlockBoolArgs {
+                block_id: arg_string(args, "blockId")?,
+                value: arg_bool(args, "keepWithNext")?,
+            },
+        ))),
+        "set_editor_selection_block_keep_with_next" => Ok(Some(
+            OpenDocCommand::SetEditorSelectionBlockKeepWithNext(SetEditorSelectionBlockBoolArgs {
+                selection: editor_selection_arg(args)?,
+                value: arg_bool(args, "keepWithNext")?,
+            }),
+        )),
+        "set_block_background" => Ok(Some(OpenDocCommand::SetBlockBackground(
+            SetBlockColorArgs {
+                block_id: arg_string(args, "blockId")?,
+                color: arg_string(args, "color")?,
+            },
+        ))),
+        "set_editor_selection_block_background" => Ok(Some(
+            OpenDocCommand::SetEditorSelectionBlockBackground(SetEditorSelectionBlockColorArgs {
+                selection: editor_selection_arg(args)?,
+                color: arg_string(args, "color")?,
+            }),
+        )),
+        "set_block_border" => Ok(Some(OpenDocCommand::SetBlockBorder(SetBlockBorderArgs {
+            block_id: arg_string(args, "blockId")?,
+            style: arg_string(args, "style")?,
+            twips: arg_i32(args, "twips")?,
+            color: arg_string(args, "color")?,
+        }))),
+        "set_editor_selection_block_border" => Ok(Some(
+            OpenDocCommand::SetEditorSelectionBlockBorder(SetEditorSelectionBlockBorderArgs {
+                selection: editor_selection_arg(args)?,
+                style: arg_string(args, "style")?,
+                twips: arg_i32(args, "twips")?,
+                color: arg_string(args, "color")?,
+            }),
+        )),
         "clear_block_property" => Ok(Some(OpenDocCommand::ClearBlockProperty(
             ClearBlockPropertyArgs {
                 block_id: arg_string(args, "blockId")?,
@@ -591,8 +657,22 @@ pub fn parse_json_command(
                 label: arg_string(args, "label")?,
             },
         ))),
+        "insert_date_chip_after" => Ok(Some(OpenDocCommand::InsertDateChipAfter(
+            InsertDateChipAfterArgs {
+                block_id: arg_string(args, "blockId")?,
+                after_inline_id: arg_optional_string(args, "afterInlineId")?,
+                date: arg_string(args, "date")?,
+            },
+        ))),
         "add_footnote_ref" => Ok(Some(OpenDocCommand::AddFootnoteRef)),
+        "add_endnote_ref" => Ok(Some(OpenDocCommand::AddEndnoteRef)),
         "insert_footnote_ref_after" => Ok(Some(OpenDocCommand::InsertFootnoteRefAfter(
+            InsertFootnoteRefAfterArgs {
+                block_id: arg_string(args, "blockId")?,
+                after_inline_id: arg_optional_string(args, "afterInlineId")?,
+            },
+        ))),
+        "insert_endnote_ref_after" => Ok(Some(OpenDocCommand::InsertEndnoteRefAfter(
             InsertFootnoteRefAfterArgs {
                 block_id: arg_string(args, "blockId")?,
                 after_inline_id: arg_optional_string(args, "afterInlineId")?,
@@ -641,6 +721,24 @@ pub fn parse_json_command(
             level: arg_u8(args, "level")?,
             list_kind: arg_string(args, "listKind")?,
         }))),
+        "set_ordered_list_start" => Ok(Some(OpenDocCommand::SetOrderedListStart(
+            SetOrderedListStartArgs {
+                block_id: arg_string(args, "blockId")?,
+                start: arg_u32(args, "start")?,
+            },
+        ))),
+        "set_ordered_list_format" => Ok(Some(OpenDocCommand::SetOrderedListFormat(
+            SetOrderedListFormatArgs {
+                block_id: arg_string(args, "blockId")?,
+                format: arg_string(args, "format")?,
+            },
+        ))),
+        "set_bullet_list_marker" => Ok(Some(OpenDocCommand::SetBulletListMarker(
+            SetBulletListMarkerArgs {
+                block_id: arg_string(args, "blockId")?,
+                marker: arg_string(args, "marker")?,
+            },
+        ))),
         "adjust_editor_selection_list_indent" => Ok(Some(
             OpenDocCommand::AdjustEditorSelectionListIndent(AdjustEditorSelectionListIndentArgs {
                 selection: editor_selection_arg(args)?,
@@ -651,6 +749,16 @@ pub fn parse_json_command(
             after_block_args(args)?,
         ))),
         "add_page_break" => Ok(Some(OpenDocCommand::AddPageBreak)),
+        "insert_horizontal_rule_after" => Ok(Some(OpenDocCommand::InsertHorizontalRuleAfter(
+            after_block_args(args)?,
+        ))),
+        "add_horizontal_rule" => Ok(Some(OpenDocCommand::AddHorizontalRule)),
+        "insert_table_of_contents_after" => Ok(Some(OpenDocCommand::InsertTableOfContentsAfter(
+            after_block_args(args)?,
+        ))),
+        "insert_bibliography_after" => Ok(Some(OpenDocCommand::InsertBibliographyAfter(
+            after_block_args(args)?,
+        ))),
         "insert_table_after" => Ok(Some(OpenDocCommand::InsertTableAfter(
             insert_table_after_args(args)?,
         ))),
@@ -698,6 +806,47 @@ pub fn parse_json_command(
                 column_id: arg_string(args, "columnId")?,
             },
         ))),
+        "set_table_row_height" => Ok(Some(OpenDocCommand::SetTableRowHeight(
+            SetTableRowHeightArgs {
+                table_block_id: arg_string(args, "tableBlockId")?,
+                row_id: arg_string(args, "rowId")?,
+                twips: arg_i32(args, "twips")?,
+            },
+        ))),
+        "clear_table_row_height" => Ok(Some(OpenDocCommand::ClearTableRowHeight(TableRowArgs {
+            table_block_id: arg_string(args, "tableBlockId")?,
+            row_id: arg_string(args, "rowId")?,
+        }))),
+        "set_table_row_header" => Ok(Some(OpenDocCommand::SetTableRowHeader(
+            SetTableRowHeaderArgs {
+                table_block_id: arg_string(args, "tableBlockId")?,
+                row_id: arg_string(args, "rowId")?,
+                header: arg_bool(args, "header")?,
+            },
+        ))),
+        "sort_table_rows" => Ok(Some(OpenDocCommand::SortTableRows(SortTableRowsArgs {
+            table_block_id: arg_string(args, "tableBlockId")?,
+            column_id: arg_string(args, "columnId")?,
+            descending: arg_bool(args, "descending")?,
+        }))),
+        "set_table_border" => Ok(Some(OpenDocCommand::SetTableBorder(SetTableBorderArgs {
+            table_block_id: arg_string(args, "tableBlockId")?,
+            style: arg_string(args, "style")?,
+            twips: arg_i32(args, "twips")?,
+            color: arg_string(args, "color")?,
+        }))),
+        "clear_table_border" => Ok(Some(OpenDocCommand::ClearTableBorder(TableArgs {
+            table_block_id: arg_string(args, "tableBlockId")?,
+        }))),
+        "set_table_alignment" => Ok(Some(OpenDocCommand::SetTableAlignment(
+            SetTableAlignmentArgs {
+                table_block_id: arg_string(args, "tableBlockId")?,
+                alignment: arg_string(args, "alignment")?,
+            },
+        ))),
+        "clear_table_alignment" => Ok(Some(OpenDocCommand::ClearTableAlignment(TableArgs {
+            table_block_id: arg_string(args, "tableBlockId")?,
+        }))),
         "merge_table_cells" => Ok(Some(OpenDocCommand::MergeTableCells(MergeTableCellsArgs {
             cell_id: arg_string(args, "cellId")?,
             row_span: arg_u32(args, "rowSpan")?,
@@ -727,6 +876,12 @@ pub fn parse_json_command(
                 alignment: arg_string(args, "alignment")?,
             }),
         )),
+        "set_table_cell_row_header" => Ok(Some(OpenDocCommand::SetTableCellRowHeader(
+            SetTableCellRowHeaderArgs {
+                cell_id: arg_string(args, "cellId")?,
+                row_header: arg_bool(args, "rowHeader")?,
+            },
+        ))),
         "set_table_cell_padding" => Ok(Some(OpenDocCommand::SetTableCellPadding(
             SetTableCellPaddingArgs {
                 cell_id: arg_string(args, "cellId")?,
@@ -791,6 +946,32 @@ pub fn parse_json_command(
         "add_comment_reply" => Ok(Some(OpenDocCommand::AddCommentReply(
             thread_author_body_args(args)?,
         ))),
+        "resolve_comment_thread" => Ok(Some(OpenDocCommand::ResolveCommentThread(
+            ResolveCommentThreadArgs {
+                thread_id: arg_string(args, "threadId")?,
+                resolved_by: arg_string(args, "resolvedBy")?,
+            },
+        ))),
+        "reopen_comment_thread" => Ok(Some(OpenDocCommand::ReopenCommentThread(thread_id_args(
+            args,
+        )?))),
+        "set_comment_thread_action" => Ok(Some(OpenDocCommand::SetCommentThreadAction(
+            SetCommentThreadActionArgs {
+                thread_id: arg_string(args, "threadId")?,
+                assignee: arg_optional_string(args, "assignee")?,
+                due_at_ms: arg_optional_u64(args, "dueAtMs")?,
+                completed: arg_bool(args, "completed")?,
+                completed_by: arg_optional_string(args, "completedBy")?,
+            },
+        ))),
+        "set_comment_thread_reaction" => Ok(Some(OpenDocCommand::SetCommentThreadReaction(
+            SetCommentThreadReactionArgs {
+                thread_id: arg_string(args, "threadId")?,
+                emoji: arg_string(args, "emoji")?,
+                actor: arg_string(args, "actor")?,
+                present: arg_bool(args, "present")?,
+            },
+        ))),
         "delete_comment_thread" => Ok(Some(OpenDocCommand::DeleteCommentThread(thread_id_args(
             args,
         )?))),
@@ -815,6 +996,26 @@ pub fn parse_json_command(
         "add_block_suggestion" => Ok(Some(OpenDocCommand::AddBlockSuggestion(
             block_author_text_args(args)?,
         ))),
+        "add_block_delete_suggestion" => Ok(Some(OpenDocCommand::AddBlockDeleteSuggestion(
+            BlockDeleteSuggestionArgs {
+                block_id: arg_string(args, "blockId")?,
+                author: arg_string(args, "author")?,
+            },
+        ))),
+        "add_block_insert_suggestion" => Ok(Some(OpenDocCommand::AddBlockInsertSuggestion(
+            BlockInsertSuggestionArgs {
+                block_id: arg_string(args, "blockId")?,
+                author: arg_string(args, "author")?,
+                text: arg_string(args, "text")?,
+            },
+        ))),
+        "add_block_replace_suggestion" => Ok(Some(OpenDocCommand::AddBlockReplaceSuggestion(
+            BlockReplaceSuggestionArgs {
+                block_id: arg_string(args, "blockId")?,
+                author: arg_string(args, "author")?,
+                text: arg_string(args, "text")?,
+            },
+        ))),
         "add_delete_suggestion" => Ok(Some(OpenDocCommand::AddDeleteSuggestion(
             DeleteSuggestionArgs {
                 author: arg_string(args, "author")?,
@@ -836,6 +1037,43 @@ pub fn parse_json_command(
                 value: arg_optional_string(args, "value")?,
             }),
         )),
+        "add_text_range_format_removal_suggestion" => {
+            Ok(Some(OpenDocCommand::AddTextRangeFormatRemovalSuggestion(
+                TextRangeFormatRemovalSuggestionArgs {
+                    start_inline_id: arg_string(args, "startInlineId")?,
+                    end_inline_id: arg_string(args, "endInlineId")?,
+                    author: arg_string(args, "author")?,
+                    mark_kind: arg_string(args, "markKind")?,
+                    value: arg_optional_string(args, "value")?,
+                },
+            )))
+        }
+        "add_text_range_format_replacement_suggestion" => Ok(Some(
+            OpenDocCommand::AddTextRangeFormatReplacementSuggestion(
+                TextRangeFormatReplacementSuggestionArgs {
+                    start_inline_id: arg_string(args, "startInlineId")?,
+                    end_inline_id: arg_string(args, "endInlineId")?,
+                    author: arg_string(args, "author")?,
+                    mark_kind: arg_string(args, "markKind")?,
+                    expected_value: arg_string(args, "expectedValue")?,
+                    value: arg_string(args, "value")?,
+                },
+            ),
+        )),
+        "add_link_change_suggestion" => Ok(Some(OpenDocCommand::AddLinkChangeSuggestion(
+            LinkChangeSuggestionArgs {
+                inline_id: arg_string(args, "inlineId")?,
+                author: arg_string(args, "author")?,
+                href: arg_optional_string(args, "href")?,
+            },
+        ))),
+        "add_paragraph_style_suggestion" => Ok(Some(OpenDocCommand::AddParagraphStyleSuggestion(
+            ParagraphStyleSuggestionArgs {
+                block_id: arg_string(args, "blockId")?,
+                author: arg_string(args, "author")?,
+                style: arg_string(args, "style")?,
+            },
+        ))),
         "update_suggestion" => Ok(Some(OpenDocCommand::UpdateSuggestion(
             UpdateSuggestionArgs {
                 suggestion_id: arg_string(args, "suggestionId")?,
@@ -877,6 +1115,9 @@ pub fn parse_json_command(
                 CommandParseError::Format(format!("invalid editor mark input: {err}"))
             })?,
         ))),
+        "import_bibtex" => Ok(Some(OpenDocCommand::ImportBibtex(ImportBibtexArgs {
+            source: arg_string(args, "source")?,
+        }))),
         "add_bibliography_reference" => Ok(Some(OpenDocCommand::AddBibliographyReference(
             bibliography_reference_metadata_args(args)?,
         ))),
@@ -920,6 +1161,16 @@ pub fn parse_json_command(
         "update_mention_label" => Ok(Some(OpenDocCommand::UpdateMentionLabel(InlineLabelArgs {
             inline_id: arg_string(args, "inlineId")?,
             label: arg_string(args, "label")?,
+        }))),
+        "select_dropdown_option" => Ok(Some(OpenDocCommand::SelectDropdownOption(
+            SelectDropdownOptionArgs {
+                inline_id: arg_string(args, "inlineId")?,
+                option_id: arg_string(args, "optionId")?,
+            },
+        ))),
+        "update_date_chip" => Ok(Some(OpenDocCommand::UpdateDateChip(UpdateDateChipArgs {
+            inline_id: arg_string(args, "inlineId")?,
+            date: arg_string(args, "date")?,
         }))),
         "update_link_href" => Ok(Some(OpenDocCommand::UpdateLinkHref(InlineHrefArgs {
             inline_id: arg_string(args, "inlineId")?,
@@ -983,6 +1234,59 @@ pub fn parse_json_command(
             ImageBlockPlacementArgs {
                 block_id: arg_string(args, "blockId")?,
                 placement: arg_string(args, "placement")?,
+            },
+        ))),
+        "set_image_block_wrap_clearance" => Ok(Some(OpenDocCommand::SetImageBlockWrapClearance(
+            ImageBlockWrapClearanceArgs {
+                block_id: arg_string(args, "blockId")?,
+                top_twips: arg_i32(args, "topTwips")?,
+                end_twips: arg_i32(args, "endTwips")?,
+                bottom_twips: arg_i32(args, "bottomTwips")?,
+                start_twips: arg_i32(args, "startTwips")?,
+            },
+        ))),
+        "set_image_block_positioned" => Ok(Some(OpenDocCommand::SetImageBlockPositioned(
+            ImageBlockPositionedArgs {
+                block_id: arg_string(args, "blockId")?,
+                anchor_block_id: arg_optional_string(args, "anchorBlockId")?,
+                horizontal_offset_twips: arg_i32(args, "horizontalOffsetTwips")?,
+                vertical_offset_twips: arg_i32(args, "verticalOffsetTwips")?,
+                layer: arg_string(args, "layer")?,
+            },
+        ))),
+        "clear_image_block_positioned" => Ok(Some(OpenDocCommand::ClearImageBlockPositioned(
+            BlockIdArgs {
+                block_id: arg_string(args, "blockId")?,
+            },
+        ))),
+        "set_image_block_effects" => Ok(Some(OpenDocCommand::SetImageBlockEffects(
+            ImageBlockEffectsArgs {
+                block_id: arg_string(args, "blockId")?,
+                rotation_degrees: arg_i16(args, "rotationDegrees")?,
+                opacity_percent: arg_u8(args, "opacityPercent")?,
+            },
+        ))),
+        "set_image_block_crop" => Ok(Some(OpenDocCommand::SetImageBlockCrop(
+            ImageBlockCropArgs {
+                block_id: arg_string(args, "blockId")?,
+                top_percent: arg_u8(args, "topPercent")?,
+                right_percent: arg_u8(args, "rightPercent")?,
+                bottom_percent: arg_u8(args, "bottomPercent")?,
+                left_percent: arg_u8(args, "leftPercent")?,
+            },
+        ))),
+        "set_image_block_caption" => Ok(Some(OpenDocCommand::SetImageBlockCaption(
+            ImageBlockCaptionArgs {
+                block_id: arg_string(args, "blockId")?,
+                caption: arg_string(args, "caption")?,
+            },
+        ))),
+        "set_image_block_border" => Ok(Some(OpenDocCommand::SetImageBlockBorder(
+            ImageBlockBorderArgs {
+                block_id: arg_string(args, "blockId")?,
+                style: arg_string(args, "style")?,
+                twips: arg_i32(args, "twips")?,
+                color: arg_string(args, "color")?,
             },
         ))),
         "describe_spreadsheet_selection" => Ok(Some(OpenDocCommand::DescribeSpreadsheetSelection(
@@ -1144,6 +1448,18 @@ pub fn parse_json_command(
         "set_spreadsheet_basic_filter" => Ok(Some(OpenDocCommand::SetSpreadsheetBasicFilter(
             sheet_range_args(args)?,
         ))),
+        "set_spreadsheet_print_area" => Ok(Some(OpenDocCommand::SetSpreadsheetPrintArea(
+            sheet_range_args(args)?,
+        ))),
+        "clear_spreadsheet_print_area" => Ok(Some(OpenDocCommand::ClearSpreadsheetPrintArea(
+            sheet_id_args(args)?,
+        ))),
+        "set_spreadsheet_print_orientation" => Ok(Some(
+            OpenDocCommand::SetSpreadsheetPrintOrientation(SheetPrintOrientationArgs {
+                sheet_id: arg_string(args, "sheetId")?,
+                orientation: arg_string(args, "orientation")?,
+            }),
+        )),
         "set_spreadsheet_basic_filter_options" => Ok(Some(
             OpenDocCommand::SetSpreadsheetBasicFilterOptions(FilterOptionsArgs {
                 sheet_id: arg_string(args, "sheetId")?,
@@ -1204,6 +1520,22 @@ pub fn parse_json_command(
                 width: arg_u32(args, "width")?,
             },
         ))),
+        "set_spreadsheet_selection_rows_hidden" => Ok(Some(
+            OpenDocCommand::SetSpreadsheetSelectionRowsHidden(SpreadsheetSelectionHiddenArgs {
+                sheet_id: arg_string(args, "sheetId")?,
+                anchor: arg_string(args, "anchor")?,
+                focus: arg_string(args, "focus")?,
+                hidden: arg_bool(args, "hidden")?,
+            }),
+        )),
+        "set_spreadsheet_selection_columns_hidden" => Ok(Some(
+            OpenDocCommand::SetSpreadsheetSelectionColumnsHidden(SpreadsheetSelectionHiddenArgs {
+                sheet_id: arg_string(args, "sheetId")?,
+                anchor: arg_string(args, "anchor")?,
+                focus: arg_string(args, "focus")?,
+                hidden: arg_bool(args, "hidden")?,
+            }),
+        )),
         "copy_spreadsheet_range" => Ok(Some(OpenDocCommand::CopySpreadsheetRange(CopyRangeArgs {
             sheet_id: arg_string(args, "sheetId")?,
             source_range: arg_string(args, "sourceRange")?,
@@ -1242,6 +1574,7 @@ pub fn parse_json_command(
             },
         ))),
         "export_spreadsheet_xlsx" => Ok(Some(OpenDocCommand::ExportSpreadsheetXlsx)),
+        "export_spreadsheet_pdf" => Ok(Some(OpenDocCommand::ExportSpreadsheetPdf)),
         "add_spreadsheet_named_range" => Ok(Some(OpenDocCommand::AddSpreadsheetNamedRange(
             named_range_args(args)?,
         ))),

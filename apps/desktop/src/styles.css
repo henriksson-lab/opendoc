@@ -266,6 +266,7 @@ button.primary {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  flex-wrap: wrap;
   gap: 16px;
   padding: 8px 16px;
   background: var(--surface);
@@ -276,6 +277,18 @@ button.primary {
   display: flex;
   align-items: center;
   gap: 12px;
+}
+
+.topbar-left {
+  min-width: 0;
+  flex: 1 1 20rem;
+}
+
+.topbar-right {
+  min-width: 0;
+  flex: 1 1 24rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .icon-button {
@@ -362,6 +375,13 @@ button.primary {
   z-index: 20;
   min-width: 260px;
   padding: 6px;
+  /* Table commands are deliberately comprehensive.  Flowing a long menu into
+     columns keeps every command reachable without a viewport-dependent
+     scroll target (and avoids hiding the lower cell controls). */
+  display: grid;
+  grid-auto-flow: column;
+  grid-template-rows: repeat(13, auto);
+  grid-auto-columns: minmax(260px, 1fr);
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -581,6 +601,12 @@ button.primary {
   border-left: 1px solid var(--border);
 }
 
+/* The class's explicit flex display wins over the browser's low-specificity
+   hidden rule. A closed panel must leave the layout entirely. */
+.side-panel[hidden] {
+  display: none;
+}
+
 .panel-header {
   display: flex;
   justify-content: space-between;
@@ -600,6 +626,40 @@ button.primary {
   display: grid;
   gap: 10px;
   align-content: start;
+}
+
+.document-outline {
+  min-width: 0;
+}
+
+.document-outline ol {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.document-outline li {
+  padding-inline-start: calc((var(--outline-level) - 1) * 12px);
+}
+
+.document-outline button {
+  width: 100%;
+  overflow: hidden;
+  padding: 5px 6px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  text-align: start;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.document-outline button:hover,
+.document-outline button:focus-visible {
+  background: var(--accent-soft);
 }
 
 /* Separates the warnings one export produced from the document's own. */
@@ -641,6 +701,44 @@ button.primary {
   margin: 0 0 6px;
 }
 
+.comment-anchor-link {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.comment-filters {
+  display: flex;
+  gap: 4px;
+  margin: 8px 0;
+}
+
+.comment-navigation {
+  display: flex;
+  gap: 6px;
+  margin: 0 0 8px;
+}
+
+.thread.current {
+  border-color: var(--accent, #1a73e8);
+  box-shadow: 0 0 0 2px var(--accent-soft, #e8f0fe);
+}
+
+.suggestion.current {
+  border-color: var(--accent, #1a73e8);
+  box-shadow: 0 0 0 2px var(--accent-soft, #e8f0fe);
+}
+
+.comment-filter.active {
+  background: var(--accent-soft, #e8f0fe);
+  border-color: var(--accent, #1a73e8);
+}
+
 .comment p,
 .thread p,
 .suggestion p,
@@ -653,6 +751,73 @@ button.primary {
   flex-wrap: wrap;
   gap: 6px;
   margin-top: 6px;
+}
+
+.suggestion-preview-document {
+  max-height: min(60vh, 44rem);
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px;
+  background: var(--paper, #fff);
+}
+
+.inline-comment-reply {
+  margin-top: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+
+.inline-comment-reply label {
+  display: grid;
+  gap: 4px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.inline-comment-reply textarea {
+  box-sizing: border-box;
+  min-height: 4.5rem;
+  resize: vertical;
+  width: 100%;
+}
+
+/* The review journal is evidence rather than a second editable comment body.
+ * A native details disclosure keeps long-lived threads scannable and works
+ * without JavaScript state; all values inside are plain escaped text. */
+.comment-provenance {
+  margin-top: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 6px;
+}
+
+.comment-provenance summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.comment-provenance ol {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+
+.comment-provenance li {
+  margin: 5px 0;
+}
+
+.comment-history-event {
+  font-weight: 600;
+}
+
+.comment-history-prior {
+  margin: 2px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.comment-history-go {
+  margin-left: 4px;
+  font-size: 12px;
 }
 
 .operations,
@@ -713,8 +878,12 @@ button.primary {
      model calls them start/end rather than left/right for the same reason. */
   inset-inline-start: var(--page-margin-start);
   inset-inline-end: var(--page-margin-end);
-  font-size: 10pt;
-  line-height: 1.3;
+  /* Projected by `opendoc-layout::style`, like every other document size: the
+     PDF writer draws headers and footers with these numbers, so a literal
+     here would put the printed page and the screen a point apart. The
+     literal after the comma is the fallback used before the first layout. */
+  font-size: var(--doc-furniture-size, 10pt);
+  line-height: var(--doc-furniture-line-height, 1.3);
   color: #202124;
   overflow: hidden;
 }
@@ -758,21 +927,26 @@ button.primary {
 
 .footnote-area {
   width: var(--page-width);
-  padding-block: 12px 24px;
+  padding-block: var(--doc-footnote-space, 9pt) calc(2 * var(--doc-footnote-space, 9pt));
   padding-inline: var(--page-margin-start) var(--page-margin-end);
   background: #fff;
   color: #202124;
   font-family: var(--font-doc);
-  font-size: 9pt;
+  /* Footnote bodies are set at the caption size, and the scale states it:
+     `TypeScale::caption_size` is what the layout engine measured them with. */
+  font-size: var(--doc-caption-size, 9pt);
   border-top: 1px solid var(--border);
 }
 
 .doc-footnotes {
-  padding-left: 20px;
+  padding-left: var(--doc-footnote-indent, 15pt);
   margin: 0;
 }
 
 .doc-body {
+  /* Positioned images are anchored by the renderer's durable twip geometry;
+     the editor resolves block anchors against this containing block. */
+  position: relative;
   outline: none;
   /* Tall enough that clicking below the last paragraph still lands in the
      editable host, and no taller. It was a flat 800px, which is larger than
@@ -803,6 +977,16 @@ button.primary {
   font-size: var(--doc-h1-size, 20pt);
   font-weight: 400;
   margin-top: var(--doc-h1-space-before, 16pt);
+}
+
+.doc-body .doc-title {
+  font-size: var(--doc-title-size, 26pt);
+  font-weight: 400;
+}
+
+.doc-body .doc-subtitle {
+  font-size: var(--doc-subtitle-size, 15pt);
+  color: #666;
 }
 
 .doc-body h2 {
@@ -843,35 +1027,30 @@ button.primary {
   margin-bottom: 0;
 }
 
-.doc-body ul.depth-1,
-.doc-body ul.depth-4 {
-  list-style-type: circle;
-}
-
-.doc-body ul.depth-2,
-.doc-body ul.depth-5 {
-  list-style-type: square;
-}
-
-.doc-body ol.depth-1,
-.doc-body ol.depth-4 {
-  list-style-type: lower-alpha;
-}
-
-.doc-body ol.depth-2,
-.doc-body ol.depth-5 {
-  list-style-type: lower-roman;
-}
+/* The disc/circle/square and decimal/alpha/roman cycles are NOT here.
+   They arrive as `AppDocumentLayout.list_style`, written by
+   `opendoc_layout::list_style_type_rules` from the same `list_style_type` the
+   painted page picks its markers with, and are installed by `pagination.ts`
+   into the `doc-list-style` element. CSS cannot say "cycle for ever", so the
+   cycle has a last rule; stating it twice is stating twice where the screen
+   stops cycling and where the PDF stops, and those two are the thing that has
+   to agree. Do not write it out again here. */
 
 .doc-body li {
   margin: 0;
 }
 
 /* Checklists (PLAN77 B6). The marker is the checkbox itself, so the list
-   drops its bullet and reclaims the indent the bullet would have used. The
-   selector matches `.doc-body ul.depth-N` in specificity and comes later, so
-   it wins without needing !important. */
-.doc-body ul.doc-checklist {
+   drops its bullet and reclaims the indent the bullet would have used.
+
+   Both classes are named on purpose. The depth rules this has to beat now
+   live in an injected `<style>` element that the browser sees *after* this
+   file, so matching them in specificity is no longer enough — a checklist at
+   depth 1 would take `list-style-type: circle` from the later rule and draw a
+   bullet next to its checkbox. A checklist list always carries both classes
+   (`ListMarker::class`), so this is one step more specific and order stops
+   mattering. */
+.doc-body ul.doc-list.doc-checklist {
   list-style: none;
   padding-inline-start: var(--doc-checklist-indent, 3pt);
   padding-left: 0;
@@ -923,11 +1102,23 @@ button.primary {
   text-decoration: underline line-through;
 }
 
+/* No horizontal padding, deliberately, and the same for `.citation-label` and
+   `.mention` below. ADR 0014's guarantee is that a run's width *is* the sum of
+   its glyphs' advances — that is what lets `opendoc-layout` break a line in
+   Rust and have Chrome break it in the same place. Inline padding is the one
+   thing that made the sentence false: 2px here and 6px on a mention were
+   enough to change a paragraph's line count. It is a *skin* — nothing in the
+   document model says a code run is four twips wider — so it must not decide
+   where the pages break, and the only way to keep a theme out of the page
+   breaks is for it to occupy no advance. The HTML export
+   (`opendoc-render/src/standalone.rs`) has always omitted it, so this makes
+   the app agree with the export rather than the other way round. The
+   background and the rounded corner, which cost no width, stay. An e2e check
+   reads the computed padding back out of Chrome. */
 .mark-code {
   font-family: var(--doc-mono-family, "OpenDoc Mono", "Courier New", monospace);
   background: #f1f3f4;
   border-radius: 3px;
-  padding: 0 2px;
 }
 
 .mark-superscript {
@@ -941,29 +1132,27 @@ button.primary {
 }
 
 .run-link {
-  color: #1155cc;
+  color: var(--doc-link-color, #1155cc);
   text-decoration: underline;
   cursor: text;
 }
 
 .citation-label {
-  color: #1155cc;
-  background: #e8f0fe;
+  color: var(--doc-citation-color, #1155cc);
+  background: var(--doc-citation-background, #e8f0fe);
   border-radius: 3px;
-  padding: 0 2px;
 }
 
 .footnote-ref {
-  color: #1155cc;
-  font-size: 0.75em;
+  color: var(--doc-link-color, #1155cc);
+  font-size: var(--doc-script-size, 0.75em);
   vertical-align: super;
   cursor: default;
 }
 
 .mention {
-  background: #e8f0fe;
+  background: var(--doc-mention-background, #e8f0fe);
   border-radius: 10px;
-  padding: 0 6px;
 }
 
 /* === Equations ============================================================
@@ -1133,6 +1322,11 @@ button.primary {
   background: #fef7cd;
 }
 
+.comment-anchor-target {
+  outline: 2px solid var(--accent, #1a73e8);
+  outline-offset: 2px;
+}
+
 .suggested-insert {
   color: #188038;
   text-decoration: underline;
@@ -1157,16 +1351,18 @@ button.primary {
   height: auto;
 }
 
+.doc-image figcaption {
+  margin-top: 4pt;
+  color: var(--muted);
+  font-size: var(--doc-caption-size, 9pt);
+  text-align: inherit;
+}
+
 .doc-image-placeholder {
   display: inline-block;
   padding: 24px;
   border: 1px dashed var(--border);
   color: var(--muted);
-}
-
-.doc-image figcaption {
-  color: var(--muted);
-  font-size: var(--doc-caption-size, 9pt);
 }
 
 /* Placement. `data-placement` is projected by `opendoc-render` from the
@@ -1175,14 +1371,29 @@ button.primary {
    default and needs no rule: it is what a figure already does. */
 .doc-image[data-placement="wrap-start"] {
   float: inline-start;
-  margin: 0 12pt 6pt 0;
+  margin: var(--doc-image-clearance-top, 0) var(--doc-image-clearance-end, 12pt) var(--doc-image-clearance-bottom, 6pt) var(--doc-image-clearance-start, 0);
   text-align: start;
 }
 
 .doc-image[data-placement="wrap-end"] {
   float: inline-end;
-  margin: 0 0 6pt 12pt;
+  margin: var(--doc-image-clearance-top, 0) var(--doc-image-clearance-end, 0) var(--doc-image-clearance-bottom, 6pt) var(--doc-image-clearance-start, 12pt);
   text-align: start;
+}
+
+.doc-image[data-positioned="true"] {
+  margin: 0;
+  /* An out-of-flow object is never a float, even if an old stylesheet has a
+     placement rule in cache. The model rejects the combination as well. */
+  float: none;
+}
+
+.doc-image[data-positioned="true"][data-position-layer="behind-text"] {
+  z-index: 0;
+}
+
+.doc-image[data-positioned="true"][data-position-layer="in-front-of-text"] {
+  z-index: 2;
 }
 
 /* Resize affordance. There is no handle element to hover — the hit zone is
@@ -1214,6 +1425,23 @@ button.primary {
   break-after: page;
 }
 
+.doc-horizontal-rule {
+  border: 0;
+  border-top: var(--doc-horizontal-rule-width, 0.75pt) solid var(--doc-horizontal-rule-color, #6b7280);
+  margin: var(--doc-horizontal-rule-space, 12pt) 0;
+}
+
+.doc-table-of-contents {
+  margin: var(--doc-block-space-after, 10pt) 0;
+  padding: 10pt 12pt;
+  border: 1px solid color-mix(in srgb, var(--muted, #5f6368) 35%, transparent);
+}
+
+.doc-table-of-contents ol { margin: 0; padding-inline-start: 1.4em; }
+.doc-bibliography { margin: var(--doc-block-space-after) 0; }
+.doc-bibliography h2 { margin: 0 0 var(--doc-block-space-after); }
+.doc-bibliography ol { margin: 0; padding-inline-start: 1.4em; }
+
 /* A field whose value pagination has not filled in — a page number in an
    exported HTML file, or in the body where it is not on a page. Shown as the
    field it is, the way a word processor shows an unresolved one, rather than
@@ -1226,17 +1454,56 @@ button.primary {
 .doc-table {
   border-collapse: collapse;
   width: 100%;
-  margin: 0 0 10pt;
+  margin: 0 0 var(--doc-block-space-after, 10pt);
+  position: relative;
 }
 
-.doc-table td {
-  border: 1px solid #999;
-  padding: 4px 8px;
+/* Editor-only hit bands: pseudo-elements keep the selection controls out of
+   the document tree, exports, and Rust's source-of-truth layout. */
+.doc-body[contenteditable="true"] .doc-table::before,
+.doc-body[contenteditable="true"] .doc-table::after {
+  content: "";
+  position: absolute;
+  background: color-mix(in srgb, var(--blue, #1a73e8) 12%, transparent);
+}
+
+.doc-body[contenteditable="true"] .doc-table::before {
+  inset: 0 0 auto 0;
+  height: 10px;
+  cursor: col-resize;
+}
+
+.doc-body[contenteditable="true"] .doc-table::after {
+  inset: 0 auto 0 0;
+  width: 10px;
+  cursor: row-resize;
+}
+
+.doc-table td,
+.doc-table th {
+  border: var(--doc-table-border, var(--doc-cell-border, 0.75pt) solid var(--doc-cell-border-color, #999999));
+  padding: var(--doc-cell-padding-block, 3pt) var(--doc-cell-padding-inline, 6pt);
   vertical-align: top;
+  /* Not a document length: the layout engine measures a cell's content, not a
+     floor under an empty one. This is the width that keeps an empty cell
+     clickable on screen. */
   min-width: 40px;
 }
 
-.doc-table td p:last-child {
+/* `<th>` carries repeat-header semantics, not implicit presentation. The
+   browser defaults it to bold, centred text; source formatting owns both. */
+.doc-table th {
+  font-weight: inherit;
+  text-align: inherit;
+}
+
+/* Semantic leading header rows repeat in the browser's print table layout. */
+.doc-table thead {
+  display: table-header-group;
+}
+
+.doc-table td p:last-child,
+.doc-table th p:last-child {
   margin-bottom: 0;
 }
 
@@ -1245,6 +1512,20 @@ button.primary {
   display: flex;
   flex-direction: column;
   height: 100%;
+}
+
+.sheet-image-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.sheet-image {
+  position: absolute;
+  object-fit: fill;
+  pointer-events: auto;
+  /* A spreadsheet drawing is an atomic object, never cell text. */
+  user-select: none;
 }
 
 .formula-bar {
@@ -1282,6 +1563,7 @@ button.primary {
   overflow: auto;
   outline: none;
   background: var(--surface);
+  position: relative;
 }
 
 .sheet-grid {
@@ -1303,6 +1585,14 @@ button.primary {
   overflow: hidden;
   text-overflow: ellipsis;
   position: relative;
+}
+
+/* The durable `wrap` strategy changes only line breaking.  It intentionally
+   does not invent Google Sheets spill, clip, shrink-to-fit, or rotation. */
+.sheet-grid td.text-wrap {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
 }
 
 /* Default axis sizes. These mirror APP_DEFAULT_ROW_HEIGHT_PX /
@@ -1482,6 +1772,16 @@ button.primary {
   font-size: 18px;
 }
 
+/* Prose a dialog states rather than asks for: the question a confirm puts, or
+   a value there is nothing to type into. `pre-wrap` because some of them are
+   lists (the keyboard-shortcut sheet). */
+.modal-form p {
+  margin: 0;
+  max-width: 52ch;
+  white-space: pre-wrap;
+  color: var(--text);
+}
+
 .modal-form label {
   display: grid;
   gap: 4px;
@@ -1496,6 +1796,14 @@ button.primary {
   padding: 6px 8px;
   background: transparent;
   width: 100%;
+}
+
+/* A field the dialog will not change. It stays selectable and copyable — that
+   is what it is for — but it must not look like somewhere to type. */
+.modal-form input[readonly],
+.modal-form textarea[readonly] {
+  background: var(--bg);
+  cursor: default;
 }
 
 .modal-actions {
@@ -1641,4 +1949,238 @@ button.primary {
 
 .version-after {
   margin: 2px 0;
+}
+
+/* ---- Collaboration ------------------------------------------------------
+ *
+ * The connection state and who else is here, in the topbar. The pill's colour
+ * is the phase and nothing else, so "live" and "reconnecting" are told apart
+ * at a glance rather than by reading.
+ */
+.collab {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+  flex: 1 1 20rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.collab-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.25rem 0.6rem;
+  border: 1px solid var(--border, #d0d5dd);
+  border-radius: 999px;
+  background: transparent;
+  font: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.collab-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: #98a2b3;
+}
+
+.collab-pill.phase-live .collab-dot {
+  background: #17b26a;
+}
+
+.collab-pill.phase-connecting .collab-dot,
+.collab-pill.phase-reconnecting .collab-dot {
+  background: #f79009;
+}
+
+.collab-pill.phase-closed .collab-dot {
+  background: #f04438;
+}
+
+.collab-role {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #475467;
+}
+
+.collab-pending {
+  font-size: 0.7rem;
+  color: #b54708;
+  white-space: nowrap;
+}
+
+.collab-peers {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  min-width: 0;
+  flex: 0 1 16rem;
+  overflow: hidden;
+}
+
+.collab-peer {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.15rem 0.45rem 0.15rem 0.15rem;
+  border-radius: 999px;
+  background: hsl(var(--peer-hue, 210) 70% 95%);
+  border: 1px solid hsl(var(--peer-hue, 210) 60% 80%);
+  font-size: 0.75rem;
+  max-width: 11rem;
+}
+
+.collab-peer-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.25rem;
+  height: 1.25rem;
+  border-radius: 50%;
+  background: hsl(var(--peer-hue, 210) 60% 45%);
+  color: #fff;
+  font-size: 0.6rem;
+  font-weight: 600;
+}
+
+.collab-peer-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.collab-peer.self .collab-peer-name {
+  font-weight: 600;
+}
+
+.collab-peer-count {
+  font-size: 0.65rem;
+  color: #475467;
+}
+
+.collab-follow {
+  border: 0;
+  border-radius: 0.2rem;
+  padding: 0.08rem 0.25rem;
+  background: transparent;
+  color: #344054;
+  font: 600 0.62rem/1.1 var(--font-ui, sans-serif);
+  cursor: pointer;
+}
+
+.collab-follow:hover,
+.collab-follow:focus-visible {
+  background: hsl(var(--peer-hue, 210) 65% 88%);
+}
+
+.collab-follow:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.collab-presence-alerts {
+  border: 0;
+  border-radius: 0.25rem;
+  padding: 0.15rem 0.3rem;
+  background: transparent;
+  color: #475467;
+  font: 0.67rem/1.1 var(--font-ui, sans-serif);
+  cursor: pointer;
+}
+
+.collab-copy-link {
+  border: 0;
+  border-radius: 0.25rem;
+  padding: 0.15rem 0.3rem;
+  background: transparent;
+  color: #475467;
+  font: 0.67rem/1.1 var(--font-ui, sans-serif);
+  cursor: pointer;
+}
+
+.collab-presence-alerts:hover,
+.collab-presence-alerts:focus-visible,
+.collab-copy-link:hover,
+.collab-copy-link:focus-visible {
+  background: #eaecf0;
+  color: #1d2939;
+}
+
+/* Membership messages remain available to assistive technology without
+ * changing the compact visual presence bar. */
+.collab-presence-announcement {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.collab-notice {
+  max-width: 18rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.72rem;
+  color: #b54708;
+}
+
+.collab-notice.fatal {
+  color: #b42318;
+  font-weight: 600;
+}
+
+/* Presence is a viewport projection, intentionally outside `.doc-body` so it
+ * cannot become editable or alter a local browser selection. The user can
+ * keep typing through it; colour is keyed by the service-issued actor id. */
+.remote-presence-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  pointer-events: none;
+}
+
+.remote-caret {
+  position: fixed;
+  width: 2px;
+  min-height: 12px;
+  background: hsl(var(--peer-hue, 210) 68% 43%);
+  border-radius: 1px;
+  box-shadow: 0 0 0 1px hsl(var(--peer-hue, 210) 70% 96% / 0.8);
+}
+
+.remote-selection {
+  position: fixed;
+  background: hsl(var(--peer-hue, 210) 78% 50% / 0.22);
+  border-radius: 1px;
+}
+
+.remote-caret-label {
+  position: absolute;
+  inset-inline-start: -2px;
+  top: -1.25rem;
+  max-width: 5rem;
+  overflow: hidden;
+  padding: 0.08rem 0.25rem;
+  border-radius: 0.2rem;
+  background: hsl(var(--peer-hue, 210) 68% 43%);
+  color: #fff;
+  font: 600 0.62rem/1.1 var(--font-ui, sans-serif);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .remote-caret,
+  .remote-selection,
+  .remote-caret-label {
+    transition: none;
+  }
 }

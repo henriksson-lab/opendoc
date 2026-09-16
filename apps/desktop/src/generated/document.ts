@@ -21,20 +21,41 @@ export type AppDocument = {
   doi: string | null;
   /** The sheet the document is laid out on. Source state: stored, signed and
    * merged. Lengths are twips (twentieths of a point). */
-  page_setup?: AppPageSetup;
+  page_setup: AppPageSetup;
   /** Blocks repeated at the top of every page. Source state. */
-  header?: AppBlock[];
+  header: AppBlock[];
   /** Blocks repeated at the bottom of every page. Source state. */
-  footer?: AppBlock[];
+  footer: AppBlock[];
+  /** `null` inherits `header`; `[]` intentionally suppresses page-one's header. */
+  first_page_header?: AppBlock[];
+  /** `null` inherits `footer`; `[]` intentionally suppresses page-one's footer. */
+  first_page_footer?: AppBlock[];
+  /** `null` inherits `header`; `[]` intentionally suppresses even-page headers. */
+  even_page_header?: AppBlock[];
+  /** `null` inherits `footer`; `[]` intentionally suppresses even-page footers. */
+  even_page_footer?: AppBlock[];
+  /** Numbering starts keyed by stable list-run id. Missing level entries start
+   * at one; this is source state rather than a renderer inference. */
+  list_properties?: Record<string, AppListProperties>;
+  /** Durable named navigation targets. Deleted entries are retained as
+   * tombstones so an old replica cannot resurrect them. */
+  bookmarks: AppBookmark[];
   /** Everything about the page that is derived rather than stored. Projection
    * only: it never reaches a snapshot or a signature. */
-  page_layout?: AppPageLayout;
-  visible_text: string;
+  page_layout: AppPageLayout;
+  /** Word and character counts of the document text. The text itself is not
+   * carried: it was 83 KB of every keystroke's payload with no reader here. */
   word_count: number;
   character_count: number;
   blocks: AppBlock[];
   footnotes: AppFootnote[];
+  /** Footnotes rendered after the ordinary footnote trailer. */
+  endnote_ids: string[];
   comments: AppCommentThread[];
+  /** Durable review provenance for comment edits, deletion, and restoration. */
+  comment_history: AppCommentHistoryEntry[];
+  /** Bounded, read-only document-local review activity. */
+  comment_activity: AppCommentActivityEntry[];
   suggestions: AppSuggestion[];
   citations: AppCitationDatabase;
   workbook: AppSpreadsheetWorkbook;
@@ -52,13 +73,79 @@ export type AppDocument = {
   operation_count: number;
   operations: AppOperationRecord[];
   recovery_sessions: AppRecoverySession[];
-  body_html: string;
+  /** The rendered body as its ordered top-level elements, not as one string.
+   * A consumer applies the body a fragment at a time and re-parses only the
+   * ones whose markup changed; the pieces concatenate, in order, to exactly
+   * the whole body. */
+  body_fragments: AppBodyFragment[];
   footnotes_html: string;
   /** Rendered header markup, rendered once. Repeating it on every page is
    * pagination's job — see docs/adr/0009-pagination-and-page-geometry.md. */
-  header_html?: string;
+  header_html: string;
   /** Rendered footer markup, rendered once. */
-  footer_html?: string;
+  footer_html: string;
+  /** Rendered first-page header override, once. */
+  first_page_header_html: string;
+  /** Rendered first-page footer override, once. */
+  first_page_footer_html: string;
+  /** Rendered even-page header override, once. */
+  even_page_header_html: string;
+  /** Rendered even-page footer override, once. */
+  even_page_footer_html: string;
+};
+
+export type AppListProperties = {
+  ordered_starts?: Record<string, number>;
+  /** Explicit list-run counter styles. Missing levels use the depth cycle. */
+  ordered_formats?: Record<string, "decimal" | "lower-alpha" | "upper-alpha" | "lower-roman" | "upper-roman">;
+  /** Explicit safe Unicode unordered-list glyphs. Missing levels use disc/circle/square. */
+  bullet_markers?: Record<string, string>;
+};
+
+/** A named stable block target with a revisioned deletion tombstone. */
+export type AppBookmark = {
+  id: string;
+  name: string;
+  block_id: string;
+  revision: number;
+  deleted: boolean;
+};
+
+/** Immutable review evidence for a comment lifecycle event. */
+export type AppCommentHistoryEntry = {
+  thread_id: string;
+  comment_id: string;
+  /** "edited" | "deleted" | "restored" */
+  kind: string;
+  actor: string;
+  at_ms: number;
+  previous_body: AppInline[] | null;
+};
+
+/** One replayable event in the document-local review activity stream. */
+export type AppCommentActivityEntry = {
+  operation_actor: string;
+  operation_seq: number;
+  actor: string;
+  /** Deterministic logical time, not wall-clock time. */
+  at_ms: number;
+  thread_id: string;
+  comment_id: string | null;
+  kind: "thread_created" | "reply_added" | "thread_resolved" | "thread_reopened" | "thread_deleted" | "thread_restored" | "comment_edited" | "comment_deleted" | "comment_restored" | "action_set" | "reaction_added" | "reaction_removed";
+};
+
+/** One top-level element of the rendered body.
+ *
+ * The finest cut the renderer can make: a paragraph, a table, an image — or a
+ * whole list run, since a nested item's closing tag is written after its child
+ * list closes. `blocks` is how many blocks the element covers, one for
+ * everything but a list run. `block_id` is the first block it renders, unique
+ * across a body and also the first `data-block-id` inside `html`, which is how
+ * a consumer finds the live element the fragment belongs to. */
+export type AppBodyFragment = {
+  block_id: string;
+  blocks: number;
+  html: string;
 };
 
 /** Page geometry in twips (twentieths of a point), the unit the model stores,
@@ -73,6 +160,8 @@ export type AppPageSetup = {
   margin_end_twips: number;
   margin_header_twips: number;
   margin_footer_twips: number;
+  /** Displayed number for the first physical page. */
+  page_number_start: number;
 };
 
 /** Everything about the page derived from AppPageSetup rather than stored
@@ -80,17 +169,17 @@ export type AppPageSetup = {
 export type AppPageLayout = {
   /** The standard size these dimensions are, in either orientation, or null
    * for a custom page. Recovered by measuring. */
-  size_name?: string | null;
+  size_name: string | null;
   /** "portrait" | "landscape", derived from the dimensions. */
-  orientation?: string;
+  orientation: string;
   /** Page geometry as CSS custom properties, ready for a style attribute. */
-  style?: string;
+  style: string;
   /** The same geometry as an @page rule. Custom properties do not apply inside
    * @page, so the print box needs its own concrete projection. */
-  print_style?: string;
+  print_style: string;
   /** The sizes the page-setup dialog offers, so the frontend never hard-codes
    * a paper dimension. */
-  size_presets?: AppPageSizePreset[];
+  size_presets: AppPageSizePreset[];
 };
 
 export type AppPageSizePreset = {
@@ -103,49 +192,83 @@ export type AppPageSizePreset = {
 export type AppBlock = {
   id: string;
   kind: string;
-  level: number | null;
+  level?: number;
   /** Projection of `list_kind`: true only for an ordered list item. A checklist
    * item is false here — read `list_kind` to tell a checklist from a bullet. */
-  ordered: boolean | null;
+  ordered?: boolean;
   /** The list run this item belongs to. Adjacent items sharing this id are one
    * list; a different id starts a new list and restarts numbering. */
-  list_id?: string | null;
+  list_id?: string;
   /** "bullet" | "ordered" | "checklist" */
-  list_kind?: string | null;
+  list_kind?: string;
   /** Checkbox state, present only for checklist items. */
-  checked?: boolean | null;
+  checked?: boolean;
   properties?: AppBlockProperties;
   style_value: string;
-  equation_source: string | null;
-  blob_hash?: string | null;
-  alt_text?: string | null;
-  /** Display width of an image block, in twips. Null/absent means the image is
-   * drawn at the size its bytes decode to — never filled in with that size. */
-  image_width_twips?: number | null;
+  equation_source?: string;
+  blob_hash?: string;
+  alt_text?: string;
+  /** Display width of an image block, in twips. Absent means the image is drawn
+   * at the size its bytes decode to — never filled in with that size. */
+  image_width_twips?: number;
   /** Display height, in twips. Absent with a width present means "scale to keep
    * the aspect ratio". */
-  image_height_twips?: number | null;
+  image_height_twips?: number;
   /** "block" | "wrap-start" | "wrap-end" */
-  image_placement?: string | null;
+  image_placement?: string;
+  /** Authored logical wrap clearance, in twips; absent uses target defaults. */
+  image_wrap_clearance?: { top: number; end: number; bottom: number; start: number };
+  /** Clockwise visual rotation in whole degrees. */
+  image_rotation_degrees?: number;
+  /** Image opacity in the inclusive range 0..100. */
+  image_opacity_percent?: number;
+  image_crop_top_percent?: number;
+  image_crop_right_percent?: number;
+  image_crop_bottom_percent?: number;
+  image_crop_left_percent?: number;
+  image_caption?: string;
+  image_border?: AppCellBorder;
+  /** Durable positioned-object geometry (ADR 0022). */
+  image_positioned?: AppPositionedImage;
   content: AppInline[];
-  rows: AppBlock[][][];
+  /** The contents of a table block's grid, cell by cell. Absent on every other
+   * kind of block. */
+  rows?: AppBlock[][][];
   row_ids?: string[];
   cell_ids?: string[][];
   /** The grid's shape — columns and per-cell spans and styling — present only
    * on a table block. `rows`, `row_ids` and `cell_ids` carry its contents. */
-  table?: AppTable | null;
+  table?: AppTable;
+};
+
+/** An image coordinate system and layer. Values retain Rust's serde shape. */
+export type AppPositionedImage = {
+  anchor: "PageContent" | { Block: string };
+  horizontal_offset: number;
+  vertical_offset: number;
+  layer: "BehindText" | "InFrontOfText";
 };
 
 /** The shape of a table block. `cells` is in the same order as `rows`. */
 export type AppTable = {
   columns: AppTableColumn[];
+  /** The table-wide border inherited by cell edges that state none of their
+   * own. Absent means the document leaves the table border unspecified. */
+  border?: AppCellBorder;
+  /** "start" | "center" | "end". This positions the table box, not cell text. */
+  alignment?: string;
+  /** Explicit row heights in twips, parallel with `row_ids`. An absent item
+   * means the row grows to its content. */
+  row_heights_twips?: (number | undefined)[];
+  /** Semantic header flags, parallel with `row_ids`. */
+  row_headers?: boolean[];
   cells: AppTableCell[][];
 };
 
 export type AppTableColumn = {
   id: string;
-  /** Null/absent means auto: the view shares out what the sized columns leave. */
-  width_twips?: number | null;
+  /** Absent means auto: the view shares out what the sized columns leave. */
+  width_twips?: number;
 };
 
 export type AppTableCell = {
@@ -157,20 +280,22 @@ export type AppTableCell = {
   properties?: AppTableCellProperties;
 };
 
-/** Cell-level formatting. Lengths are twips, colours are hex (#rrggbb), and a
- * null/absent field means the cell inherits that property. */
+/** Cell-level formatting. Lengths are twips, colours are hex (#rrggbb), and an
+ * absent field means the cell inherits that property. */
 export type AppTableCellProperties = {
-  background?: string | null;
-  border_top?: AppCellBorder | null;
-  border_bottom?: AppCellBorder | null;
-  border_start?: AppCellBorder | null;
-  border_end?: AppCellBorder | null;
+  background?: string;
+  border_top?: AppCellBorder;
+  border_bottom?: AppCellBorder;
+  border_start?: AppCellBorder;
+  border_end?: AppCellBorder;
   /** "top" | "middle" | "bottom" */
-  vertical_alignment?: string | null;
-  padding_top_twips?: number | null;
-  padding_bottom_twips?: number | null;
-  padding_start_twips?: number | null;
-  padding_end_twips?: number | null;
+  vertical_alignment?: string;
+  /** Explicit semantic row-header state; absent has no authored role. */
+  row_header?: boolean;
+  padding_top_twips?: number;
+  padding_bottom_twips?: number;
+  padding_start_twips?: number;
+  padding_end_twips?: number;
 };
 
 export type AppCellBorder = {
@@ -182,33 +307,58 @@ export type AppCellBorder = {
 
 /** Block-level paragraph formatting. Lengths are twips (twentieths of a point),
  * the unit the model stores, so the projection cannot drift by rounding.
- * A null/absent field means the block inherits that property. */
+ * An absent field means the block inherits that property; a block that
+ * inherits every one of them has no properties object at all. */
 export type AppBlockProperties = {
   /** "start" | "center" | "end" | "justify" */
-  alignment?: string | null;
-  indent_start_twips?: number | null;
-  indent_end_twips?: number | null;
+  alignment?: string;
+  indent_start_twips?: number;
+  indent_end_twips?: number;
   /** Negative means a hanging indent. */
-  indent_first_line_twips?: number | null;
+  indent_first_line_twips?: number;
   /** "multiple" | "exact" | "at-least" */
-  line_spacing_mode?: string | null;
+  line_spacing_mode?: string;
   /** Thousandths of a line for "multiple", twips for the other two modes. */
-  line_spacing_value?: number | null;
-  space_before_twips?: number | null;
-  space_after_twips?: number | null;
+  line_spacing_value?: number;
+  /** How the pair above reads to a person — "Single", "1.15×", "Exactly 24 pt".
+   * A projection: the commands never take it, and setting it changes nothing. */
+  line_spacing_label?: string;
+  space_before_twips?: number;
+  space_after_twips?: number;
   /** "ltr" | "rtl" */
-  direction?: string | null;
+  direction?: string;
+  /** Keep this paragraph with its next sibling when pagination permits. */
+  keep_with_next?: boolean;
+  /** Flat paragraph background in canonical #rrggbb form. */
+  background?: string;
+  /** One uniform paragraph frame; table cells retain per-edge borders. */
+  border?: AppCellBorder;
 };
 
 export type AppInline = {
   id: string;
   kind: string;
   text: string;
-  href: string | null;
-  target_id: string | null;
-  marks: string[];
-  mark_kinds: string[];
+  href?: string;
+  target_id?: string;
+  marks?: string[];
+  mark_kinds?: string[];
   mark_values: Record<string, string>;
+  dropdown_options?: AppDropdownOption[];
+  selected_option_id?: string;
+  /** Canonical YYYY-MM-DD value of an atomic date chip. */
+  date?: string;
+  /** Read-only Google person identity carried by an imported smart chip. */
+  google_person_email?: string;
+  google_person_id?: string;
+  /** Read-only provider metadata carried by an imported rich-link chip. */
+  google_rich_link_id?: string;
+  google_rich_link_mime_type?: string;
+};
+
+export type AppDropdownOption = {
+  id: string;
+  label: string;
 };
 
 export type AppFootnote = {
@@ -258,8 +408,28 @@ export type AppCommentThread = {
   id: string;
   anchor: string;
   anchor_label: string;
+  /** Evidence retained when a comment's original target was deleted. */
+  orphaned_quote: string | null;
+  orphaned_context: string | null;
+  /** Provenance warning retained with deleted-anchor evidence. */
+  orphaned_warning: string | null;
   comments: AppComment[];
+  state: string;
+  resolved_by: string | null;
+  resolved_at_ms: number | null;
+  /** Offline display-name assignment; identity resolution belongs to a service. */
+  action_assignee: string | null;
+  action_due_at_ms: number | null;
+  action_completed_by: string | null;
+  action_completed_at_ms: number | null;
+  reactions: AppCommentThreadReaction[];
   deleted: boolean;
+};
+
+/** A document-local emoji reaction and the actors that hold it. */
+export type AppCommentThreadReaction = {
+  emoji: string;
+  actors: string[];
 };
 
 export type AppComment = {
@@ -267,6 +437,7 @@ export type AppComment = {
   author: string;
   body: string;
   deleted: boolean;
+  created_at_ms: number;
 };
 
 export type AppSuggestion = {
@@ -279,6 +450,24 @@ export type AppSuggestion = {
   anchor_label: string | null;
   range_start: string | null;
   range_end: string | null;
+  /** Stable target for a structural suggestion, when applicable. */
+  block_id: string | null;
+  /** Proposed paragraph identity for a structural insert or replacement. */
+  structural_block_id: string | null;
+  /** Exact source paragraph retained for a block-replacement compare-and-set. */
+  structural_expected_block: AppBlock | null;
+  /** Proposed insertion placement, when this is a structural insert. */
+  block_position: string | null;
+  /** Atomic target for a proposed link add, removal, or replacement. */
+  link_inline_id: string | null;
+  link_expected_href: string | null;
+  link_href: string | null;
+  /** Source style retained as an acceptance precondition. */
+  paragraph_style_expected: string | null;
+  /** Style a reviewer may apply to the same surviving block. */
+  paragraph_style_proposed: string | null;
+  /** Source value retained by a value-bearing format replacement. */
+  format_expected_value: string | null;
   marks: string[];
   content: AppInline[];
   provenance: string[];
@@ -289,3 +478,41 @@ export type EditorResult = {
   selection: EditorSelection;
   handled: boolean;
 };
+
+// Unit factors of `opendoc_core::Length` — the unit every document length in
+// this contract is stated in. Divide by these; never write 20 or 1440 out.
+export const APP_TWIPS_PER_POINT = 20;
+export const APP_TWIPS_PER_INCH = 1440;
+// Bounds `opendoc_core::Length` accepts. Indents and first-line offsets may be
+// negative (a hanging indent, or content bled into the margin).
+export const APP_MIN_LENGTH_TWIPS = -31680;
+export const APP_MAX_LENGTH_TWIPS = 31680;
+// Bounds accepted by set_image_block_width / set_image_block_height /
+// set_image_block_size. Outside them the command fails rather than clamps.
+export const APP_MIN_IMAGE_TWIPS = 360;
+export const APP_MAX_IMAGE_TWIPS = 31680;
+// The value an `afterRow` / `afterColumnId` argument takes to mean "before
+// every existing sibling". Omitting the argument still means *append* — that
+// is what makes a replayed insert whose anchor was deleted degrade to the end
+// instead of vanishing — so the one position an id cannot name has a keyword
+// of its own instead of a second optional argument beside it.
+export const APP_INSERT_FIRST = "first";
+
+/** One entry of {@link APP_LINE_SPACING_PRESETS}. `mode` and `value` are the
+ *  pair set_block_line_spacing and set_editor_selection_block_line_spacing
+ *  take; `label` is how that spacing reads to a person. */
+export type AppLineSpacingPreset = {
+  mode: string;
+  value: number;
+  label: string;
+};
+
+/** The line spacings the UI offers, in the order it should offer them. The
+ *  mode/value pair is the model's own encoding, so nothing has to join it into
+ *  a string or take one apart again. */
+export const APP_LINE_SPACING_PRESETS: AppLineSpacingPreset[] = [
+  { mode: "multiple", value: 1000, label: "Single" },
+  { mode: "multiple", value: 1150, label: "1.15×" },
+  { mode: "multiple", value: 1500, label: "1.5×" },
+  { mode: "multiple", value: 2000, label: "Double" },
+];

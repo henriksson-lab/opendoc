@@ -1,12 +1,26 @@
 export type DialogField = {
   name: string;
   label: string;
-  type?: "text" | "textarea" | "number" | "select" | "password" | "color";
+  type?: "text" | "textarea" | "number" | "date" | "select" | "password" | "color";
   value?: string;
   options?: { value: string; label: string }[];
   placeholder?: string;
   /** Granularity of a `number` field. Defaults to `"any"`; see below. */
   step?: string;
+  /**
+   * Shows a value the dialog will not change.
+   *
+   * A read-only field is still a field: it is focusable, selectable and
+   * copyable, and it is still reported back in the result, so a caller reads
+   * it the same way it reads any other. What it is not is editable — which is
+   * the honest version of File ▸ Details, where a plain `textarea` invited an
+   * edit that silently did nothing.
+   *
+   * Not supported on `select`: a `<select>` has no read-only state (only
+   * `disabled`, which drops the value out of the form), so a fixed choice is
+   * a `text` field showing the chosen label.
+   */
+  readonly?: boolean;
 };
 
 /**
@@ -28,6 +42,14 @@ let afterDialogClose: () => void = () => {};
 
 /** Titles of dialogs that are currently on screen, used to reject duplicates. */
 const openDialogTitles = new Set<string>();
+
+/**
+ * Native `<dialog>` does not derive an accessible name from a contained
+ * heading.  Keep generated targets unique even when two different commands
+ * happen to open dialogs at once, rather than reusing a pleasant-looking but
+ * duplicate `id`.
+ */
+let nextDialogA11yId = 0;
 
 /**
  * Input types that support text selection. `setSelectionRange` is not defined on
@@ -79,6 +101,14 @@ export function toast(message: string): void {
 
 export function promptDialog(options: {
   title: string;
+  /**
+   * Prose above the fields: a question to answer, or a value to read.
+   *
+   * A dialog that only has something to *say* is all body and no fields —
+   * see `confirmDialog`. Saying it through a dummy field instead is what put
+   * an empty one-line text box under every confirm in the app.
+   */
+  body?: string;
   fields: DialogField[];
   submit?: string;
   cancel?: string;
@@ -93,20 +123,30 @@ export function promptDialog(options: {
     openDialogTitles.add(options.title);
     const dialog = document.createElement("dialog");
     dialog.className = "modal";
+    const dialogA11yId = ++nextDialogA11yId;
+    const titleId = `opendoc-dialog-title-${dialogA11yId}`;
+    const descriptionId = `opendoc-dialog-description-${dialogA11yId}`;
+    dialog.setAttribute("aria-labelledby", titleId);
+    if (options.body) dialog.setAttribute("aria-describedby", descriptionId);
     dialog.innerHTML = `
       <form method="dialog" class="modal-form">
-        <h2>${escapeHtml(options.title)}</h2>
+        <h2 id="${titleId}">${escapeHtml(options.title)}</h2>
+        ${options.body ? `<p id="${descriptionId}" class="modal-body">${escapeHtml(options.body)}</p>` : ""}
         ${options.fields
           .map((field) => {
             const id = `field-${field.name}`;
+            // `readonly` is the attribute, not `disabled`: a disabled control
+            // is skipped by form submission and cannot be selected, and both
+            // of those are wrong for a value the user is here to read.
+            const readonly = field.readonly && field.type !== "select" ? " readonly" : "";
             const control =
               field.type === "textarea"
-                ? `<textarea id="${id}" name="${escapeHtml(field.name)}" rows="5" placeholder="${escapeHtml(field.placeholder ?? "")}">${escapeHtml(field.value ?? "")}</textarea>`
+                ? `<textarea id="${id}" name="${escapeHtml(field.name)}" rows="5"${readonly} placeholder="${escapeHtml(field.placeholder ?? "")}">${escapeHtml(field.value ?? "")}</textarea>`
                 : field.type === "select"
                   ? `<select id="${id}" name="${escapeHtml(field.name)}">${(field.options ?? [])
                       .map((option) => `<option value="${escapeHtml(option.value)}"${option.value === field.value ? " selected" : ""}>${escapeHtml(option.label)}</option>`)
                       .join("")}</select>`
-                  : `<input id="${id}" name="${escapeHtml(field.name)}" type="${field.type ?? "text"}"${numberStep(field)} value="${escapeHtml(field.value ?? "")}" placeholder="${escapeHtml(field.placeholder ?? "")}">`;
+                  : `<input id="${id}" name="${escapeHtml(field.name)}" type="${field.type ?? "text"}"${numberStep(field)}${readonly} value="${escapeHtml(field.value ?? "")}" placeholder="${escapeHtml(field.placeholder ?? "")}">`;
             return `<label for="${id}"><span>${escapeHtml(field.label)}</span>${control}</label>`;
           })
           .join("")}
@@ -137,15 +177,30 @@ export function promptDialog(options: {
       afterDialogClose();
     });
     dialog.showModal();
-    focusFieldAtEnd(form.querySelector<HTMLElement>("input, textarea, select"));
+    // A dialog with no fields has nothing to type in, so the primary button
+    // takes focus instead: that is the control Enter should then answer, and
+    // leaving focus on Cancel would make Enter mean "no".
+    focusFieldAtEnd(
+      form.querySelector<HTMLElement>("input, textarea, select") ?? dialog.querySelector<HTMLElement>("button.primary"),
+    );
   });
 }
 
+/**
+ * A yes/no question. Resolves true only if the user accepted it.
+ *
+ * A confirm has **no fields**: the question is the dialog's body and the
+ * answer is which control closed it — the submit button resolves the form,
+ * while Cancel, Escape and any other close resolve `null`. It used to be a
+ * `promptDialog` carrying one dummy text field, which is why "Discard unsaved
+ * changes?" — and every other confirm, including the window-close guard —
+ * showed an unused one-line text box under the question.
+ *
+ * Everything else is `promptDialog`'s: the dialog is modal and so
+ * focus-trapped, Escape cancels it, duplicate titles cannot stack, and
+ * `setDialogAfterClose` returns focus to the editor once it is gone.
+ */
 export async function confirmDialog(title: string, body: string, okLabel = "OK"): Promise<boolean> {
-  const result = await promptDialog({
-    title,
-    fields: [{ name: "note", label: body, type: "text", value: "" }],
-    submit: okLabel,
-  });
+  const result = await promptDialog({ title, body, fields: [], submit: okLabel });
   return result !== null;
 }

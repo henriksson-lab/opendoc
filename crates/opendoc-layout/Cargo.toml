@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 opendoc-core = { path = "../opendoc-core" }
+opendoc-citations = { path = "../opendoc-citations" }
 # Font metrics only: a zero-allocation, pure-Rust TrueType parser with no
 # filesystem and no C dependency, so it builds for wasm32-unknown-unknown.
 # Shaping features (GSUB/GPOS) are deliberately not used — the bundled faces

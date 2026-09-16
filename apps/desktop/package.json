@@ -15,7 +15,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "verify": "node scripts/verify.mjs",
     "smoke": "node scripts/smoke.mjs",
-    "e2e": "node --experimental-websocket scripts/e2e.mjs"
+    "e2e": "npm run build:app && node --experimental-websocket scripts/e2e.mjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0",

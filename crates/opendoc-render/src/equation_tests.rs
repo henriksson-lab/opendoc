@@ -33,6 +33,18 @@ fn block_equation_renders_display_mathml_not_latex_source() {
         "{}",
         rendering.html
     );
+    assert!(
+        rendering
+            .html
+            .contains("role=\"group\" aria-label=\"Block equation\""),
+        "{}",
+        rendering.html
+    );
+    assert!(
+        rendering.html.contains("tabindex=\"0\""),
+        "{}",
+        rendering.html
+    );
 }
 
 #[test]
@@ -132,4 +144,115 @@ fn footnote_equations_report_their_warnings() {
     );
     assert_eq!(rendering.warnings.len(), 1, "{:?}", rendering.warnings);
     assert_eq!(rendering.warnings[0].code, WARNING_EQUATION_RENDER_FAILED);
+}
+
+/// The LaTeX that `math_core` 0.8.2 turns into escaping markup.
+///
+/// `\operatorname` does not escape its argument, and it strips whitespace —
+/// hence the `/` separators, which an HTML parser accepts in place of spaces.
+/// `\text{}`, `\mathrm{}` and a bare `<` are all escaped correctly; this one
+/// command is the hole.
+const OPERATORNAME_XSS: &str = r"\operatorname{</math><img/src=x/onerror=alert(1)>}";
+
+/// Nothing from the equation source may reach the markup as a *tag*, in any of
+/// the places an equation is written into it.
+///
+/// The payload's characters may still appear — escaped, as visible text inside
+/// the degraded equation — and that is the point: the check is that `<` and `>`
+/// around them were escaped, so no element and no attribute was created.
+fn assert_no_injected_markup(html: &str, where_: &str) {
+    for needle in [
+        "<img",
+        "<script",
+        "<iframe",
+        // The payload's own `</math>`, which is what escapes the element.
+        "</math><",
+        // An event handler only exists once a raw `=` follows it in attribute
+        // position; escaped text carries `onerror=alert(1)&gt;` instead.
+        "onerror=alert(1)>",
+    ] {
+        assert!(
+            !html.contains(needle),
+            "{where_} carries {needle:?} from the equation source:\n{html}"
+        );
+    }
+}
+
+#[test]
+fn operatorname_markup_injection_never_reaches_the_body() {
+    let document = document_with_equation_block(OPERATORNAME_XSS);
+    // Reachability, not self-XSS: a document carrying this passes validation,
+    // so it arrives through import, collaboration or a shared repository.
+    assert!(document.validate().is_ok(), "{:?}", document.validate());
+
+    let rendering = render_document(&document, []);
+    assert_no_injected_markup(&rendering.html, "the document body");
+    // Degraded, loudly: the source is shown escaped and the failure is
+    // reported rather than silently dropped.
+    assert!(
+        rendering.html.contains("equation-error"),
+        "{}",
+        rendering.html
+    );
+    assert!(
+        rendering
+            .html
+            .contains("&lt;/math&gt;&lt;img/src=x/onerror=alert(1)&gt;"),
+        "{}",
+        rendering.html
+    );
+    assert_eq!(rendering.warnings.len(), 1, "{:?}", rendering.warnings);
+    assert_eq!(rendering.warnings[0].code, WARNING_EQUATION_UNSAFE_MARKUP);
+    assert!(rendering.warnings[0].validate().is_ok());
+    // The rest of the document still renders.
+    assert!(rendering.html.contains("before"), "{}", rendering.html);
+}
+
+#[test]
+fn operatorname_markup_injection_never_reaches_a_fragment_or_an_export() {
+    let document = document_with_equation_block(OPERATORNAME_XSS);
+    let body = render_document_body(&document, []);
+    assert_no_injected_markup(&body.html, "the body rendering");
+    for fragment in &body.fragments {
+        assert_no_injected_markup(&fragment.html, "a body fragment");
+    }
+    // `render_document_body` slices the same string, so a fragment that
+    // carried the payload would reach `editor.ts`'s `template.innerHTML`.
+    assert!(
+        body.fragments
+            .iter()
+            .any(|fragment| fragment.html.contains("equation-error")),
+        "{:?}",
+        body.fragments.iter().map(|f| &f.html).collect::<Vec<_>>()
+    );
+    assert_no_injected_markup(
+        &render_standalone_html(&document, []).html,
+        "the HTML export",
+    );
+}
+
+#[test]
+fn operatorname_markup_injection_never_reaches_an_inline_equation_or_a_footnote() {
+    let inline = document_with_inline_equation(OPERATORNAME_XSS);
+    assert_no_injected_markup(&render_document(&inline, []).html, "an inline equation");
+
+    let mut document = document_with(&["body"]);
+    let footnote_id = StableId::parse("footnote-1").expect("valid id");
+    document.blocks[0].content.push(Inline::FootnoteRef {
+        id: StableId::parse("inline-footnote-ref").expect("valid id"),
+        footnote_id: footnote_id.clone(),
+    });
+    document.footnotes.push(opendoc_core::Footnote {
+        id: footnote_id,
+        revision: 0,
+        body: vec![Inline::Equation {
+            id: StableId::parse("inline-equation-2").expect("valid id"),
+            equation: latex_equation("equation-inline-2", OPERATORNAME_XSS),
+        }],
+        deleted: false,
+    });
+    let rendering = render_footnotes(&document, []);
+    assert_no_injected_markup(&rendering.html, "a footnote");
+    assert_eq!(rendering.warnings.len(), 1, "{:?}", rendering.warnings);
+    assert_eq!(rendering.warnings[0].code, WARNING_EQUATION_UNSAFE_MARKUP);
 }

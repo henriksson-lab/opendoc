@@ -1,15 +1,21 @@
 //! The document root and the validation walk over its block tree.
 
-use crate::annotation::{CommentThread, Suggestion};
-use crate::block::{Block, BlockKind, Footnote};
+use crate::annotation::{
+    CommentActivityEntry, CommentHistoryEntry, CommentThread, Suggestion,
+    MAX_COMMENT_ACTIVITY_ENTRIES,
+};
+use crate::block::{Block, BlockKind, Footnote, TextScope};
+use crate::bookmark::Bookmark;
 use crate::citation::CitationDatabase;
 use crate::ids::validate_stable_id;
 use crate::ids::{DocumentUuid, HashRef, StableId};
 use crate::inline::{Equation, Inline, Mark, MarkKind};
+use crate::list::ListProperties;
 use crate::page::{validate_furniture_payload, HeaderFooterSlot, PageSetup};
 use crate::table::validate_table_geometry;
 use crate::warning::{ModelError, ModelWarning};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -32,9 +38,52 @@ pub struct Document {
     /// Blocks repeated at the bottom of every page. See [`Document::header`].
     #[serde(default)]
     pub footer: Vec<Block>,
+    /// Optional first-page header override. `None` inherits [`Self::header`],
+    /// while `Some(vec![])` explicitly suppresses it on page one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_page_header: Option<Vec<Block>>,
+    /// Optional first-page footer override. See [`Self::first_page_header`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_page_footer: Option<Vec<Block>>,
+    /// Optional even-page header override. `None` inherits [`Self::header`],
+    /// while `Some(vec![])` explicitly suppresses it on even pages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub even_page_header: Option<Vec<Block>>,
+    /// Optional even-page footer override. See [`Self::even_page_header`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub even_page_footer: Option<Vec<Block>>,
+    /// Numbering settings keyed by list-run identity.  This is deliberately
+    /// document-level rather than an item field: a restart applies to the
+    /// wrapper, even when a later edit changes which item is first.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub list_properties: BTreeMap<StableId, ListProperties>,
+    /// Durable named block targets used by links and generated navigation.
+    /// Tombstones are retained so an old replica cannot resurrect a deleted
+    /// bookmark during collaboration.
+    #[serde(default)]
+    pub bookmarks: Vec<Bookmark>,
     pub blocks: Vec<Block>,
     pub footnotes: Vec<Footnote>,
+    /// The note records whose references are endnotes rather than footnotes.
+    ///
+    /// Notes deliberately stay in the one stable-id namespace: citations can
+    /// live in either sort of note, and a reference has the same atomic shape.
+    /// Placement belongs here, however, because it is document layout state,
+    /// not an accidental spelling convention on the note id.  An absent id is
+    /// a footnote, which also keeps old saved documents source-compatible.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub endnote_ids: BTreeSet<StableId>,
     pub comments: Vec<CommentThread>,
+    /// Append-only evidence for edits and per-comment tombstones.  Keeping it
+    /// at the document root avoids turning every live comment into a growing
+    /// rendering payload while remaining part of saved, signed source state.
+    #[serde(default)]
+    pub comment_history: Vec<CommentHistoryEntry>,
+    /// Bounded, append-only collaboration-session activity. Unlike
+    /// `comment_history`, this covers thread and action transitions and keeps
+    /// the causal operation id needed to deduplicate replay.
+    #[serde(default)]
+    pub comment_activity: Vec<CommentActivityEntry>,
     pub suggestions: Vec<Suggestion>,
     pub citation_database: CitationDatabase,
     pub warnings: Vec<ModelWarning>,
@@ -50,19 +99,52 @@ impl Document {
             page_setup: PageSetup::default(),
             header: Vec::new(),
             footer: Vec::new(),
+            first_page_header: None,
+            first_page_footer: None,
+            even_page_header: None,
+            even_page_footer: None,
+            list_properties: BTreeMap::new(),
+            bookmarks: Vec::new(),
             blocks: Vec::new(),
             footnotes: Vec::new(),
+            endnote_ids: BTreeSet::new(),
             comments: Vec::new(),
+            comment_history: Vec::new(),
+            comment_activity: Vec::new(),
             suggestions: Vec::new(),
             citation_database: CitationDatabase::default(),
             warnings: Vec::new(),
         }
     }
 
+    /// The document degraded to plain text: what a `.txt` export carries.
+    ///
+    /// Content that is not text becomes its conventional textual stand-in —
+    /// an image its alt text, an equation the LaTeX it is written in. See
+    /// [`TextScope::PlainText`].
+    ///
+    /// **This is not what to count words with.** A stand-in is text a reader
+    /// never sees, so counting it reports a document whose prose is `one two`
+    /// as nine words. [`Self::counted_text`] is the projection for that.
     pub fn visible_text(&self) -> String {
+        self.text(TextScope::PlainText)
+    }
+
+    /// The text a reader reads off the page: what the word and character
+    /// counts count. See [`TextScope::Page`].
+    ///
+    /// One walk serves both scopes, so the two projections cannot drift into
+    /// disagreeing about what a table cell, a covered cell or a page-number
+    /// field contributes — only about the handful of things they are
+    /// deliberately answering differently.
+    pub fn counted_text(&self) -> String {
+        self.text(TextScope::Page)
+    }
+
+    fn text(&self, scope: TextScope) -> String {
         let mut out = String::new();
         for block in &self.blocks {
-            block.push_visible_text(&self.citation_database, &mut out);
+            block.push_visible_text(&self.citation_database, scope, &mut out);
             if !out.ends_with('\n') {
                 out.push('\n');
             }
@@ -75,6 +157,10 @@ impl Document {
         match slot {
             HeaderFooterSlot::Header => &self.header,
             HeaderFooterSlot::Footer => &self.footer,
+            HeaderFooterSlot::FirstPageHeader => self.first_page_header.as_deref().unwrap_or(&[]),
+            HeaderFooterSlot::FirstPageFooter => self.first_page_footer.as_deref().unwrap_or(&[]),
+            HeaderFooterSlot::EvenPageHeader => self.even_page_header.as_deref().unwrap_or(&[]),
+            HeaderFooterSlot::EvenPageFooter => self.even_page_footer.as_deref().unwrap_or(&[]),
         }
     }
 
@@ -83,7 +169,61 @@ impl Document {
         match slot {
             HeaderFooterSlot::Header => &mut self.header,
             HeaderFooterSlot::Footer => &mut self.footer,
+            HeaderFooterSlot::FirstPageHeader => self.first_page_header.get_or_insert_default(),
+            HeaderFooterSlot::FirstPageFooter => self.first_page_footer.get_or_insert_default(),
+            HeaderFooterSlot::EvenPageHeader => self.even_page_header.get_or_insert_default(),
+            HeaderFooterSlot::EvenPageFooter => self.even_page_footer.get_or_insert_default(),
         }
+    }
+
+    /// Furniture that should appear on `page_index` (zero based). A missing
+    /// first- or even-page override inherits its ordinary slot; an explicit
+    /// empty override intentionally renders nothing.
+    pub fn furniture_for_page(&self, slot: HeaderFooterSlot, page_index: usize) -> &[Block] {
+        match (slot.base_slot(), page_index == 0, page_index % 2 == 1) {
+            (HeaderFooterSlot::Header, true, _) => {
+                self.first_page_header.as_deref().unwrap_or(&self.header)
+            }
+            (HeaderFooterSlot::Footer, true, _) => {
+                self.first_page_footer.as_deref().unwrap_or(&self.footer)
+            }
+            (HeaderFooterSlot::Header, false, true) => {
+                self.even_page_header.as_deref().unwrap_or(&self.header)
+            }
+            (HeaderFooterSlot::Footer, false, true) => {
+                self.even_page_footer.as_deref().unwrap_or(&self.footer)
+            }
+            (HeaderFooterSlot::Header, false, false) => &self.header,
+            (HeaderFooterSlot::Footer, false, false) => &self.footer,
+            _ => unreachable!("base_slot only returns an ordinary furniture slot"),
+        }
+    }
+
+    /// Whether a first-page slot is explicitly present, including an empty
+    /// override that suppresses inherited furniture. Ordinary slots are
+    /// always present.
+    pub const fn has_furniture_override(&self, slot: HeaderFooterSlot) -> bool {
+        match slot {
+            HeaderFooterSlot::FirstPageHeader => self.first_page_header.is_some(),
+            HeaderFooterSlot::FirstPageFooter => self.first_page_footer.is_some(),
+            HeaderFooterSlot::EvenPageHeader => self.even_page_header.is_some(),
+            HeaderFooterSlot::EvenPageFooter => self.even_page_footer.is_some(),
+            HeaderFooterSlot::Header | HeaderFooterSlot::Footer => true,
+        }
+    }
+
+    /// Removes a first/even-page override so that slot inherits ordinary
+    /// furniture again. Returns `false` for ordinary slots, which cannot
+    /// inherit from another document-level slot.
+    pub fn clear_furniture_override(&mut self, slot: HeaderFooterSlot) -> bool {
+        match slot {
+            HeaderFooterSlot::FirstPageHeader => self.first_page_header = None,
+            HeaderFooterSlot::FirstPageFooter => self.first_page_footer = None,
+            HeaderFooterSlot::EvenPageHeader => self.even_page_header = None,
+            HeaderFooterSlot::EvenPageFooter => self.even_page_footer = None,
+            HeaderFooterSlot::Header | HeaderFooterSlot::Footer => return false,
+        }
+        true
     }
 
     pub fn validate(&self) -> Result<(), ModelError> {
@@ -115,15 +255,31 @@ impl Document {
             }
         }
         self.page_setup.validate()?;
+        for (list_id, properties) in &self.list_properties {
+            validate_stable_id("list properties id", list_id)?;
+            properties.validate()?;
+        }
+        let mut bookmark_ids = BTreeSet::new();
+        let mut live_bookmark_names = BTreeSet::new();
+        for bookmark in &self.bookmarks {
+            bookmark.validate()?;
+            if !bookmark_ids.insert(bookmark.id.clone()) {
+                return Err(ModelError::InvalidDocument("duplicate bookmark id"));
+            }
+            if !bookmark.deleted && !live_bookmark_names.insert(bookmark.name.clone()) {
+                return Err(ModelError::InvalidDocument("duplicate live bookmark name"));
+            }
+        }
         // Body, header and footer share one block/inline id space: a block id
         // is the document's addressing unit, so a header block that reused a
         // body block's id would make every id-keyed operation ambiguous.
         let mut block_ids = BTreeSet::new();
         let mut inline_ids = BTreeSet::new();
-        validate_blocks(&self.blocks, &mut block_ids, &mut inline_ids)?;
+        let mut cell_ids = BTreeSet::new();
+        validate_blocks(&self.blocks, &mut block_ids, &mut inline_ids, &mut cell_ids)?;
         for slot in HeaderFooterSlot::ALL {
             let furniture = self.furniture(slot);
-            validate_blocks(furniture, &mut block_ids, &mut inline_ids)?;
+            validate_blocks(furniture, &mut block_ids, &mut inline_ids, &mut cell_ids)?;
             validate_furniture_payload(furniture)?;
         }
         let mut comment_thread_ids = BTreeSet::new();
@@ -132,6 +288,89 @@ impl Document {
                 return Err(ModelError::InvalidDocument("duplicate comment thread id"));
             }
             comment.validate()?;
+        }
+        let mut comment_history_operation_ids = BTreeSet::new();
+        for entry in &self.comment_history {
+            entry.validate()?;
+            // `at_ms` is the merge operation sequence number, and `actor`
+            // is its actor.  Together they are the lossless operation id for
+            // this older, compact provenance format.  Duplicating one would
+            // make the append-only review record lie about a single action
+            // occurring more than once.
+            if !comment_history_operation_ids.insert((entry.actor.clone(), entry.at_ms)) {
+                return Err(ModelError::InvalidDocument(
+                    "duplicate comment history operation id",
+                ));
+            }
+            let Some(thread) = self
+                .comments
+                .iter()
+                .find(|thread| thread.id == entry.thread_id)
+            else {
+                return Err(ModelError::InvalidDocument(
+                    "comment history references missing thread",
+                ));
+            };
+            if thread
+                .comments
+                .iter()
+                .all(|comment| comment.id != entry.comment_id)
+            {
+                return Err(ModelError::InvalidDocument(
+                    "comment history references missing comment",
+                ));
+            }
+        }
+        if self.comment_activity.len() > MAX_COMMENT_ACTIVITY_ENTRIES {
+            return Err(ModelError::InvalidDocument(
+                "comment activity exceeds its deterministic capacity",
+            ));
+        }
+        let mut comment_activity_operation_ids = BTreeSet::new();
+        let mut prior_activity_key = None;
+        for entry in &self.comment_activity {
+            entry.validate()?;
+            if !comment_activity_operation_ids
+                .insert((entry.operation_actor.clone(), entry.operation_seq))
+            {
+                return Err(ModelError::InvalidDocument(
+                    "duplicate comment activity operation id",
+                ));
+            }
+            let key = (
+                entry.at_ms,
+                entry.operation_actor.clone(),
+                entry.operation_seq,
+            );
+            if prior_activity_key
+                .as_ref()
+                .is_some_and(|prior| prior > &key)
+            {
+                return Err(ModelError::InvalidDocument(
+                    "comment activity is not in canonical order",
+                ));
+            }
+            prior_activity_key = Some(key);
+            let Some(thread) = self
+                .comments
+                .iter()
+                .find(|thread| thread.id == entry.thread_id)
+            else {
+                return Err(ModelError::InvalidDocument(
+                    "comment activity references missing thread",
+                ));
+            };
+            if let Some(comment_id) = &entry.comment_id {
+                if thread
+                    .comments
+                    .iter()
+                    .all(|comment| comment.id != *comment_id)
+                {
+                    return Err(ModelError::InvalidDocument(
+                        "comment activity references missing comment",
+                    ));
+                }
+            }
         }
         let mut suggestion_ids = BTreeSet::new();
         for suggestion in &self.suggestions {
@@ -153,6 +392,11 @@ impl Document {
             .filter(|footnote| !footnote.deleted)
             .map(|footnote| footnote.id.clone())
             .collect::<BTreeSet<_>>();
+        if !self.endnote_ids.is_subset(&footnote_ids) {
+            return Err(ModelError::InvalidDocument(
+                "endnote placement references a missing note",
+            ));
+        }
         for footnote_id in footnote_reference_ids(&self.blocks) {
             if !live_footnotes.contains(&footnote_id) {
                 return Err(ModelError::InvalidDocument(
@@ -171,13 +415,15 @@ impl Document {
 pub(crate) fn validate_block_tree(blocks: &[Block]) -> Result<(), ModelError> {
     let mut block_ids = BTreeSet::new();
     let mut inline_ids = BTreeSet::new();
-    validate_blocks(blocks, &mut block_ids, &mut inline_ids)
+    let mut cell_ids = BTreeSet::new();
+    validate_blocks(blocks, &mut block_ids, &mut inline_ids, &mut cell_ids)
 }
 
 pub(crate) fn validate_blocks(
     blocks: &[Block],
     block_ids: &mut BTreeSet<StableId>,
     inline_ids: &mut BTreeSet<StableId>,
+    cell_ids: &mut BTreeSet<StableId>,
 ) -> Result<(), ModelError> {
     for block in blocks {
         validate_stable_id("block id", &block.id)?;
@@ -192,7 +438,13 @@ pub(crate) fn validate_blocks(
             }
             validate_inline(inline)?;
         }
-        if let BlockKind::Table { columns, rows } = &block.kind {
+        if let BlockKind::Table {
+            columns,
+            properties,
+            rows,
+        } = &block.kind
+        {
+            properties.validate()?;
             if rows.is_empty() {
                 return Err(ModelError::InvalidDocument("table has no rows"));
             }
@@ -208,7 +460,6 @@ pub(crate) fn validate_blocks(
                 if row.cells.is_empty() {
                     return Err(ModelError::InvalidDocument("table row has no cells"));
                 }
-                let mut cell_ids = BTreeSet::new();
                 for cell in &row.cells {
                     validate_stable_id("table cell id", &cell.id)?;
                     if !cell_ids.insert(cell.id.clone()) {
@@ -218,12 +469,31 @@ pub(crate) fn validate_blocks(
                         return Err(ModelError::InvalidDocument("table cell has no blocks"));
                     }
                     cell.properties.validate()?;
-                    validate_blocks(&cell.blocks, block_ids, inline_ids)?;
+                    validate_blocks(&cell.blocks, block_ids, inline_ids, cell_ids)?;
                 }
             }
             validate_table_geometry(columns, rows)?;
         }
         validate_block_payload(block)?;
+        if let BlockKind::Image {
+            layout:
+                crate::image::ImageLayout {
+                    positioned:
+                        Some(crate::image::PositionedImage {
+                            anchor: crate::image::PositionedImageAnchor::Block(anchor),
+                            ..
+                        }),
+                    ..
+                },
+            ..
+        } = &block.kind
+        {
+            if anchor == &block.id {
+                return Err(ModelError::InvalidDocument(
+                    "positioned image cannot anchor to itself",
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -247,6 +517,27 @@ pub(crate) fn validate_block_payload(block: &Block) -> Result<(), ModelError> {
                 .map_err(|_| ModelError::InvalidDocument("image blob hash is invalid"))?;
             layout.validate()
         }
+        BlockKind::TableOfContents { max_level } if !(1..=6).contains(max_level) => Err(
+            ModelError::InvalidDocument("table of contents max level is outside 1..=6"),
+        ),
+        BlockKind::TableOfContents { .. } if !block.content.is_empty() => Err(
+            ModelError::InvalidDocument("table of contents cannot contain inline content"),
+        ),
+        BlockKind::TableOfContents { .. } if !block.properties.is_empty() => Err(
+            ModelError::InvalidDocument("table of contents cannot contain block properties"),
+        ),
+        BlockKind::Bibliography if !block.content.is_empty() => Err(ModelError::InvalidDocument(
+            "bibliography cannot contain inline content",
+        )),
+        BlockKind::Bibliography if !block.properties.is_empty() => Err(
+            ModelError::InvalidDocument("bibliography cannot contain block properties"),
+        ),
+        BlockKind::HorizontalRule if !block.content.is_empty() => Err(ModelError::InvalidDocument(
+            "horizontal rule cannot contain inline content",
+        )),
+        BlockKind::HorizontalRule if !block.properties.is_empty() => Err(
+            ModelError::InvalidDocument("horizontal rule cannot contain block properties"),
+        ),
         _ => Ok(()),
     }
 }
@@ -264,6 +555,81 @@ pub(crate) fn validate_inline(inline: &Inline) -> Result<(), ModelError> {
         Inline::Mention { label, .. } if label.trim().is_empty() => {
             Err(ModelError::InvalidDocument("mention label is empty"))
         }
+        Inline::GooglePersonChip {
+            label,
+            email,
+            person_id,
+            ..
+        } => {
+            if label.trim().is_empty() || email.trim().is_empty() {
+                return Err(ModelError::InvalidDocument(
+                    "Google person chip label or email is empty",
+                ));
+            }
+            if person_id.as_deref().is_some_and(|id| id.trim().is_empty()) {
+                return Err(ModelError::InvalidDocument(
+                    "Google person chip id is empty",
+                ));
+            }
+            Ok(())
+        }
+        Inline::GoogleRichLinkChip {
+            label,
+            href,
+            rich_link_id,
+            mime_type,
+            ..
+        } => {
+            if label.trim().is_empty() || href.trim().is_empty() {
+                return Err(ModelError::InvalidDocument(
+                    "Google rich link chip label or href is empty",
+                ));
+            }
+            if rich_link_id
+                .as_deref()
+                .is_some_and(|id| id.trim().is_empty())
+                || mime_type
+                    .as_deref()
+                    .is_some_and(|mime| mime.trim().is_empty())
+            {
+                return Err(ModelError::InvalidDocument(
+                    "Google rich link chip metadata is empty",
+                ));
+            }
+            Ok(())
+        }
+        Inline::Dropdown {
+            options,
+            selected_option_id,
+            ..
+        } => {
+            if options.is_empty() {
+                return Err(ModelError::InvalidDocument("dropdown has no options"));
+            }
+            let mut ids = BTreeSet::new();
+            for option in options {
+                if option.id.trim().is_empty() || option.id.trim() != option.id {
+                    return Err(ModelError::InvalidDocument(
+                        "dropdown option id is empty or non-canonical",
+                    ));
+                }
+                if option.label.trim().is_empty() || option.label.trim() != option.label {
+                    return Err(ModelError::InvalidDocument(
+                        "dropdown option label is empty or non-canonical",
+                    ));
+                }
+                if !ids.insert(&option.id) {
+                    return Err(ModelError::InvalidDocument("duplicate dropdown option id"));
+                }
+            }
+            if !ids.contains(selected_option_id) {
+                return Err(ModelError::InvalidDocument(
+                    "dropdown selected option is absent",
+                ));
+            }
+            Ok(())
+        }
+        Inline::DateChip { date, .. } => validate_date_chip(date),
         Inline::Equation { equation, .. } => validate_equation(equation),
         Inline::Citation { citation_id, .. } => validate_stable_id("citation id", citation_id),
         Inline::FootnoteRef { footnote_id, .. } => {
@@ -284,11 +650,59 @@ pub(crate) fn inline_sequence_is_empty_source_text(inlines: &[Inline]) -> bool {
     inlines.iter().all(|inline| match inline {
         Inline::Text { text, .. } | Inline::Link { text, .. } => text.trim().is_empty(),
         Inline::Mention { .. }
+        | Inline::GooglePersonChip { .. }
+        | Inline::GoogleRichLinkChip { .. }
+        | Inline::Dropdown { .. }
+        | Inline::DateChip { .. }
         | Inline::Equation { .. }
         | Inline::Citation { .. }
         | Inline::FootnoteRef { .. }
         | Inline::PageNumber { .. } => false,
     })
+}
+
+/// Validate the deliberately small calendar-date wire type used by date
+/// chips. Locale strings and timestamps have no portable calendar-day
+/// semantics, so they are intentionally not accepted here.
+fn validate_date_chip(date: &str) -> Result<(), ModelError> {
+    let bytes = date.as_bytes();
+    if bytes.len() != 10
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || !bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| matches!(index, 4 | 7) || byte.is_ascii_digit())
+    {
+        return Err(ModelError::InvalidDocument("date chip must be YYYY-MM-DD"));
+    }
+    let number = |range: std::ops::Range<usize>| {
+        std::str::from_utf8(&bytes[range])
+            .ok()
+            .and_then(|part| part.parse::<u32>().ok())
+    };
+    let (Some(year), Some(month), Some(day)) = (number(0..4), number(5..7), number(8..10)) else {
+        return Err(ModelError::InvalidDocument("date chip must be YYYY-MM-DD"));
+    };
+    if year == 0 || !(1..=12).contains(&month) {
+        return Err(ModelError::InvalidDocument(
+            "date chip has an invalid calendar date",
+        ));
+    }
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => unreachable!(),
+    };
+    if !(1..=days).contains(&day) {
+        return Err(ModelError::InvalidDocument(
+            "date chip has an invalid calendar date",
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_equation(equation: &Equation) -> Result<(), ModelError> {
@@ -326,6 +740,61 @@ pub(crate) fn validate_marks(marks: &[Mark]) -> Result<(), ModelError> {
     Ok(())
 }
 
+pub(crate) fn validate_mark_removal(
+    kind: &MarkKind,
+    value: Option<&str>,
+) -> Result<(), ModelError> {
+    let value_bearing = matches!(
+        kind,
+        MarkKind::Color | MarkKind::Background | MarkKind::Font | MarkKind::Size
+    );
+    match (value, value_bearing) {
+        (Some(value), true) if value.trim().is_empty() => {
+            Err(ModelError::InvalidDocument("mark removal value is empty"))
+        }
+        (Some(_), false) => Err(ModelError::InvalidDocument(
+            "boolean mark removal has value",
+        )),
+        // No value means remove every value of a value-bearing mark, exactly
+        // like the ordinary RemoveMark operation.
+        _ => Ok(()),
+    }
+}
+
+/// Validates the compare-and-set payload of a tracked value-mark replacement.
+/// Replacements deliberately do not apply to boolean marks: their absence is
+/// not an old *value* and they already have unambiguous add/remove proposals.
+pub(crate) fn validate_mark_replacement(
+    kind: &MarkKind,
+    expected_value: &str,
+    value: &str,
+) -> Result<(), ModelError> {
+    if !matches!(
+        kind,
+        MarkKind::Color | MarkKind::Background | MarkKind::Font | MarkKind::Size
+    ) {
+        return Err(ModelError::InvalidDocument(
+            "format replacement kind is not value-bearing",
+        ));
+    }
+    if expected_value.trim().is_empty() || expected_value.trim() != expected_value {
+        return Err(ModelError::InvalidDocument(
+            "format replacement expected value is empty or has surrounding whitespace",
+        ));
+    }
+    if value.trim().is_empty() || value.trim() != value {
+        return Err(ModelError::InvalidDocument(
+            "format replacement value is empty or has surrounding whitespace",
+        ));
+    }
+    if expected_value == value {
+        return Err(ModelError::InvalidDocument(
+            "format replacement value equals expected value",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn inline_stable_id(inline: &Inline) -> &StableId {
     match inline {
         Inline::Text { id, .. }
@@ -333,6 +802,10 @@ pub(crate) fn inline_stable_id(inline: &Inline) -> &StableId {
         | Inline::Citation { id, .. }
         | Inline::FootnoteRef { id, .. }
         | Inline::Mention { id, .. }
+        | Inline::GooglePersonChip { id, .. }
+        | Inline::GoogleRichLinkChip { id, .. }
+        | Inline::Dropdown { id, .. }
+        | Inline::DateChip { id, .. }
         | Inline::Equation { id, .. }
         | Inline::PageNumber { id, .. } => id,
     }

@@ -104,6 +104,28 @@ pub(crate) fn inline_payload_valid_for_merge(
             });
             false
         }
+        Inline::GooglePersonChip {
+            id, label, email, ..
+        } if label.trim().is_empty() || email.trim().is_empty() => {
+            warnings.push(ModelWarning {
+                code: "invalid-google-person-chip".to_string(),
+                message: format!(
+                    "{owner} ignored Google person chip with empty label or email on inline {id}"
+                ),
+            });
+            false
+        }
+        Inline::GoogleRichLinkChip {
+            id, label, href, ..
+        } if label.trim().is_empty() || href.trim().is_empty() => {
+            warnings.push(ModelWarning {
+                code: "invalid-google-rich-link-chip".to_string(),
+                message: format!(
+                    "{owner} ignored Google rich link chip with empty label or href on inline {id}"
+                ),
+            });
+            false
+        }
         Inline::Equation { id, equation } if equation.source.trim().is_empty() => {
             warnings.push(ModelWarning {
                 code: "invalid-inline-equation-source".to_string(),
@@ -132,6 +154,10 @@ pub(crate) fn inline_sequence_is_empty_source_text(inlines: &[Inline]) -> bool {
     inlines.iter().all(|inline| match inline {
         Inline::Text { text, .. } | Inline::Link { text, .. } => text.trim().is_empty(),
         Inline::Mention { .. }
+        | Inline::GooglePersonChip { .. }
+        | Inline::GoogleRichLinkChip { .. }
+        | Inline::Dropdown { .. }
+        | Inline::DateChip { .. }
         | Inline::Equation { .. }
         | Inline::Citation { .. }
         | Inline::FootnoteRef { .. }
@@ -142,7 +168,15 @@ pub(crate) fn inline_sequence_is_empty_source_text(inlines: &[Inline]) -> bool {
 pub(crate) fn suggestion_insert_content_is_empty(suggestion: &Suggestion) -> bool {
     match &suggestion.kind {
         SuggestionKind::Insert { content, .. } => inline_sequence_is_empty_source_text(content),
-        SuggestionKind::Delete { .. } | SuggestionKind::Format { .. } => false,
+        SuggestionKind::Delete { .. }
+        | SuggestionKind::Format { .. }
+        | SuggestionKind::FormatRemove { .. }
+        | SuggestionKind::FormatReplace { .. }
+        | SuggestionKind::LinkChange { .. }
+        | SuggestionKind::BlockDelete { .. }
+        | SuggestionKind::BlockInsert { .. }
+        | SuggestionKind::BlockReplace { .. }
+        | SuggestionKind::ParagraphStyleChange { .. } => false,
     }
 }
 

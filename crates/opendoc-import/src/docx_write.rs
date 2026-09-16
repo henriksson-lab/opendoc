@@ -18,27 +18,29 @@
 //!   WordprocessingML cannot (or can only approximate) produces a
 //!   [`ModelWarning`] naming it, exactly as the reader does in the other
 //!   direction.
+//! * **A table is written as WordprocessingML's own grid.** `w:gridCol` takes
+//!   the column widths unchanged, a column span becomes `w:gridSpan`, a row
+//!   span becomes `w:vMerge` restart plus a continuation cell per covered
+//!   row, and `w:shd`/`w:tcBorders`/`w:tcMar`/`w:vAlign` carry the cell
+//!   properties — so the reader in `docx.rs` reads back the grid that was
+//!   written, merges and styling included (ADR 0013). The one thing the
+//!   format has nowhere for is the *content* of a covered cell, which the
+//!   model retains, so exporting one warns.
 
-use crate::ImportError;
+use crate::xml_write::{is_writable_xml_char, Xml};
+use crate::{ExportImage, ImportError};
 use opendoc_core::{
-    Alignment, Block, BlockKind, BlockProperties, Document, Footnote, HeaderFooterSlot, Inline,
-    LineSpacing, ListKind, Mark, MarkKind, ModelWarning, PageNumberField, PageOrientation,
-    StableId, TextDirection,
+    Alignment, Block, BlockKind, BlockProperties, BorderStyle, Document, Footnote,
+    HeaderFooterSlot, ImageLayout, ImagePlacement, Inline, Length, LineSpacing, ListKind,
+    ListProperties, Mark, MarkKind, ModelWarning, OrderedListFormat, PageNumberField,
+    PageOrientation, PositionedImageAnchor, PositionedImageLayer, StableId, TableCell,
+    TableCellProperties, TableColumn, TableRow, TextDirection, VerticalAlignment,
 };
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{Cursor, Write};
 
 // ---------------------------------------------------------------------------
 // Public payloads
 // ---------------------------------------------------------------------------
-
-/// The bytes behind a [`BlockKind::Image`], supplied by the caller because the
-/// model stores only the content hash.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DocxImage {
-    pub media_type: String,
-    pub bytes: Vec<u8>,
-}
 
 pub(crate) struct DocxExport {
     pub(crate) bytes: Vec<u8>,
@@ -58,21 +60,30 @@ const DROPPED_MARK: &str = "docx-export-dropped-mark";
 const DROPPED_MARK_VALUE: &str = "docx-export-dropped-mark-value";
 const CITATION_AS_TEXT: &str = "docx-export-citation-as-text";
 const MENTION_AS_TEXT: &str = "docx-export-mention-as-text";
+const DROPDOWN_AS_TEXT: &str = "docx-export-dropdown-as-text";
 const EQUATION_AS_SOURCE: &str = "docx-export-equation-as-source";
 const DROPPED_EQUATION_CONTENT: &str = "docx-export-dropped-equation-content";
 const MISSING_IMAGE_BLOB: &str = "docx-export-missing-image-blob";
 const UNSUPPORTED_IMAGE_MEDIA_TYPE: &str = "docx-export-unsupported-image-media-type";
 const UNKNOWN_IMAGE_SIZE: &str = "docx-export-unknown-image-size";
+const POSITIONED_IMAGE_AS_INLINE: &str = "docx-export-positioned-image-as-inline";
+const IMAGE_DOUBLE_BORDER_AS_SOLID: &str = "docx-export-image-double-border-as-solid";
+const IMAGE_CAPTION_WITHOUT_IMAGE: &str = "docx-export-image-caption-without-image";
+const IMAGE_EFFECTS_UNREPRESENTABLE: &str = "docx-export-image-effects-unrepresentable";
 const DROPPED_CONTROL_CHARACTER: &str = "docx-export-dropped-control-character";
 const DROPPED_COMMENTS: &str = "docx-export-dropped-comments";
 const DROPPED_SUGGESTIONS: &str = "docx-export-dropped-suggestions";
 const DROPPED_CITATION_DATABASE: &str = "docx-export-dropped-citation-database";
 const DROPPED_DOI: &str = "docx-export-dropped-doi";
 const DROPPED_FOOTNOTE_STATE: &str = "docx-export-dropped-footnote-state";
+const UNPLACED_BOOKMARKS: &str = "docx-export-unplaced-bookmarks";
 const NESTED_FOOTNOTE_REFERENCE: &str = "docx-export-nested-footnote-reference";
 const MISSING_FOOTNOTE: &str = "docx-export-missing-footnote";
 const CLAMPED_HEADING_LEVEL: &str = "docx-export-clamped-heading-level";
 const PAGE_NUMBER_PLACEHOLDER: &str = "docx-export-page-number-placeholder";
+const DROPPED_COVERED_CELL_CONTENT: &str = "docx-export-dropped-covered-cell-content";
+const APPROXIMATED_CELL_BORDER: &str = "docx-export-approximated-cell-border";
+const DROPPED_TABLE_ROW_HEADER: &str = "docx-export-dropped-table-row-header";
 
 // ---------------------------------------------------------------------------
 // Namespaces and content types
@@ -97,10 +108,14 @@ const REL_NUMBERING: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering";
 const REL_FOOTNOTES: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes";
+const REL_ENDNOTES: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/endnotes";
 const REL_HEADER: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/header";
 const REL_FOOTER: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer";
+const REL_SETTINGS: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings";
 const REL_IMAGE: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image";
 const REL_HYPERLINK: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink";
@@ -112,8 +127,12 @@ const CT_NUMBERING: &str =
     "application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml";
 const CT_FOOTNOTES: &str =
     "application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml";
+const CT_ENDNOTES: &str =
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml";
 const CT_HEADER: &str = "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml";
 const CT_FOOTER: &str = "application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml";
+const CT_SETTINGS: &str =
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml";
 const CT_CORE_PROPERTIES: &str = "application/vnd.openxmlformats-package.core-properties+xml";
 const CT_RELATIONSHIPS: &str = "application/vnd.openxmlformats-package.relationships+xml";
 
@@ -133,121 +152,12 @@ const EMU_PER_INCH: i64 = 914_400;
 const MAX_IMAGE_WIDTH_EMU: i64 = EMU_PER_INCH * 13 / 2;
 
 // ---------------------------------------------------------------------------
-// XML writing
-// ---------------------------------------------------------------------------
-
-/// A minimal, correctly escaping XML serializer.
-///
-/// WordprocessingML is written by position: element order inside `w:pPr`,
-/// `w:rPr` and `w:tblPr` is fixed by the schema and Word rejects a package
-/// that gets it wrong. Building the text directly keeps that order visible in
-/// the code that writes it.
-struct Xml {
-    out: String,
-}
-
-impl Xml {
-    fn part() -> Self {
-        Self {
-            out: String::from("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\r\n"),
-        }
-    }
-
-    fn fragment() -> Self {
-        Self { out: String::new() }
-    }
-
-    fn open(&mut self, name: &str, attrs: &[(&str, &str)]) {
-        self.out.push('<');
-        self.out.push_str(name);
-        self.push_attrs(attrs);
-        self.out.push('>');
-    }
-
-    fn empty(&mut self, name: &str, attrs: &[(&str, &str)]) {
-        self.out.push('<');
-        self.out.push_str(name);
-        self.push_attrs(attrs);
-        self.out.push_str("/>");
-    }
-
-    fn close(&mut self, name: &str) {
-        self.out.push_str("</");
-        self.out.push_str(name);
-        self.out.push('>');
-    }
-
-    fn text(&mut self, value: &str) {
-        escape_into(&mut self.out, value, false);
-    }
-
-    fn text_element(&mut self, name: &str, attrs: &[(&str, &str)], value: &str) {
-        self.open(name, attrs);
-        self.text(value);
-        self.close(name);
-    }
-
-    fn raw(&mut self, fragment: &str) {
-        self.out.push_str(fragment);
-    }
-
-    fn push_attrs(&mut self, attrs: &[(&str, &str)]) {
-        for (name, value) in attrs {
-            self.out.push(' ');
-            self.out.push_str(name);
-            self.out.push_str("=\"");
-            escape_into(&mut self.out, value, true);
-            self.out.push('"');
-        }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.out.is_empty()
-    }
-
-    fn into_bytes(self) -> Vec<u8> {
-        self.out.into_bytes()
-    }
-
-    fn into_string(self) -> String {
-        self.out
-    }
-}
-
-fn escape_into(out: &mut String, value: &str, attribute: bool) {
-    for ch in value.chars() {
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' if attribute => out.push_str("&quot;"),
-            '\t' if attribute => out.push_str("&#9;"),
-            '\n' if attribute => out.push_str("&#10;"),
-            '\r' => out.push_str("&#13;"),
-            _ => out.push(ch),
-        }
-    }
-}
-
-/// XML 1.0 forbids most C0 controls outright — a document holding one cannot
-/// be written at all, so the character is removed and named rather than
-/// producing a package no reader will open.
-fn is_writable_xml_char(ch: char) -> bool {
-    match ch {
-        '\t' | '\n' | '\r' => true,
-        ch if (ch as u32) < 0x20 => false,
-        '\u{fffe}' | '\u{ffff}' => false,
-        ch => !('\u{fdd0}'..='\u{fdef}').contains(&ch),
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
 pub(crate) fn export_docx_bytes(
     document: &Document,
-    images: &BTreeMap<String, DocxImage>,
+    images: &BTreeMap<String, ExportImage>,
 ) -> Result<DocxExport, ImportError> {
     document
         .validate()
@@ -268,29 +178,41 @@ fn dedupe(warnings: &mut Vec<ModelWarning>) {
 // Exporter
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum ListFlavour {
-    Bullet,
-    Ordered,
+    Bullet(opendoc_core::BulletListMarker),
+    Ordered(OrderedListFormat),
     Unchecked,
     Checked,
 }
 
 impl ListFlavour {
-    fn of(kind: ListKind) -> Self {
+    fn of(
+        kind: ListKind,
+        format: OrderedListFormat,
+        bullet_marker: opendoc_core::BulletListMarker,
+    ) -> Self {
         match kind {
-            ListKind::Bullet => ListFlavour::Bullet,
-            ListKind::Ordered => ListFlavour::Ordered,
+            ListKind::Bullet => ListFlavour::Bullet(bullet_marker),
+            ListKind::Ordered => ListFlavour::Ordered(format),
             ListKind::Checklist { checked: false } => ListFlavour::Unchecked,
             ListKind::Checklist { checked: true } => ListFlavour::Checked,
         }
     }
 
     /// `w:numFmt` plus the `w:lvlText` used at every level.
-    fn level_format(self) -> (&'static str, Option<&'static str>) {
+    fn level_format(&self) -> (&'static str, Option<&str>) {
         match self {
-            ListFlavour::Bullet => ("bullet", Some("\u{2022}")),
-            ListFlavour::Ordered => ("decimal", None),
+            ListFlavour::Bullet(marker) => (
+                "bullet",
+                Some(match marker {
+                    opendoc_core::BulletListMarker::Disc => "\u{2022}",
+                    opendoc_core::BulletListMarker::Circle => "\u{25e6}",
+                    opendoc_core::BulletListMarker::Square => "\u{25a0}",
+                    opendoc_core::BulletListMarker::Custom(glyph) => glyph,
+                }),
+            ),
+            ListFlavour::Ordered(format) => (format.docx_name(), None),
             ListFlavour::Unchecked => ("bullet", Some("\u{2610}")),
             ListFlavour::Checked => ("bullet", Some("\u{2612}")),
         }
@@ -305,7 +227,7 @@ struct Rel {
 }
 
 struct Exporter<'a> {
-    images: &'a BTreeMap<String, DocxImage>,
+    images: &'a BTreeMap<String, ExportImage>,
     warnings: Vec<ModelWarning>,
     rels: Vec<Rel>,
     media: Vec<(String, Vec<u8>)>,
@@ -313,13 +235,46 @@ struct Exporter<'a> {
     image_parts: BTreeMap<String, String>,
     lists: BTreeMap<(StableId, ListFlavour), u32>,
     list_flavours: BTreeMap<StableId, BTreeSet<ListFlavour>>,
+    list_properties: BTreeMap<StableId, ListProperties>,
     footnote_ids: BTreeMap<StableId, u32>,
+    endnote_ids: BTreeMap<StableId, u32>,
+    bookmark_ranges: BTreeMap<StableId, Vec<(StableId, u32, String)>>,
+    emitted_bookmarks: BTreeSet<StableId>,
     next_rel: u32,
     next_doc_pr: u32,
+    next_bookmark: u32,
+}
+
+/// The relationships used by a document-wide set of Word header/footer
+/// variants. Keeping this together prevents the section serializer from
+/// growing a positional argument for every new, independently optional slot.
+#[derive(Clone, Copy, Default)]
+struct FurnitureReferences<'a> {
+    header: Option<&'a str>,
+    footer: Option<&'a str>,
+    first_page_header: Option<&'a str>,
+    first_page_footer: Option<&'a str>,
+    even_page_header: Option<&'a str>,
+    even_page_footer: Option<&'a str>,
+}
+
+/// The optional package parts that need content-type overrides.
+#[derive(Clone, Copy, Default)]
+struct ContentTypeParts {
+    lists: bool,
+    footnotes: bool,
+    endnotes: bool,
+    header: bool,
+    footer: bool,
+    first_page_header: bool,
+    first_page_footer: bool,
+    even_page_header: bool,
+    even_page_footer: bool,
+    settings: bool,
 }
 
 impl<'a> Exporter<'a> {
-    fn new(images: &'a BTreeMap<String, DocxImage>) -> Self {
+    fn new(images: &'a BTreeMap<String, ExportImage>) -> Self {
         Self {
             images,
             warnings: Vec::new(),
@@ -329,9 +284,14 @@ impl<'a> Exporter<'a> {
             image_parts: BTreeMap::new(),
             lists: BTreeMap::new(),
             list_flavours: BTreeMap::new(),
+            list_properties: BTreeMap::new(),
             footnote_ids: BTreeMap::new(),
+            endnote_ids: BTreeMap::new(),
+            bookmark_ranges: BTreeMap::new(),
+            emitted_bookmarks: BTreeSet::new(),
             next_rel: 0,
             next_doc_pr: 0,
+            next_bookmark: 0,
         }
     }
 
@@ -348,9 +308,20 @@ impl<'a> Exporter<'a> {
 
     fn run(&mut self, document: &Document) -> Result<Vec<u8>, ImportError> {
         self.report_unrepresentable_document_parts(document);
-        for (index, footnote) in document.footnotes.iter().enumerate() {
-            self.footnote_ids
-                .insert(footnote.id.clone(), index as u32 + 1);
+        self.install_bookmark_ranges(document);
+        self.list_properties = document.list_properties.clone();
+        let mut next_footnote_id = 1;
+        let mut next_endnote_id = 1;
+        for footnote in &document.footnotes {
+            if document.endnote_ids.contains(&footnote.id) {
+                self.endnote_ids
+                    .insert(footnote.id.clone(), next_endnote_id);
+                next_endnote_id += 1;
+            } else {
+                self.footnote_ids
+                    .insert(footnote.id.clone(), next_footnote_id);
+                next_footnote_id += 1;
+            }
         }
 
         // The body is written first so that relationships, numbering
@@ -359,16 +330,27 @@ impl<'a> Exporter<'a> {
         let mut body = self.write_body(document);
         let header = self.write_furniture(document, HeaderFooterSlot::Header);
         let footer = self.write_furniture(document, HeaderFooterSlot::Footer);
-        body.push_str(&self.section_properties(
-            document,
-            header.as_ref().map(|(id, _)| id.as_str()),
-            footer.as_ref().map(|(id, _)| id.as_str()),
-        ));
+        let first_page_header = self.write_furniture(document, HeaderFooterSlot::FirstPageHeader);
+        let first_page_footer = self.write_furniture(document, HeaderFooterSlot::FirstPageFooter);
+        let even_page_header = self.write_furniture(document, HeaderFooterSlot::EvenPageHeader);
+        let even_page_footer = self.write_furniture(document, HeaderFooterSlot::EvenPageFooter);
+        let furniture = FurnitureReferences {
+            header: header.as_ref().map(|(id, _)| id.as_str()),
+            footer: footer.as_ref().map(|(id, _)| id.as_str()),
+            first_page_header: first_page_header.as_ref().map(|(id, _)| id.as_str()),
+            first_page_footer: first_page_footer.as_ref().map(|(id, _)| id.as_str()),
+            even_page_header: even_page_header.as_ref().map(|(id, _)| id.as_str()),
+            even_page_footer: even_page_footer.as_ref().map(|(id, _)| id.as_str()),
+        };
+        body.push_str(&self.section_properties(document, furniture));
         let footnotes = self.write_footnotes(document);
+        let endnotes = self.write_endnotes(document);
+        self.report_unplaced_bookmarks(document);
 
         let mut parts: Vec<(String, Vec<u8>)> = Vec::new();
         let has_lists = !self.lists.is_empty();
         let has_footnotes = footnotes.is_some();
+        let has_endnotes = endnotes.is_some();
 
         self.add_rel(REL_STYLES, "styles.xml", false);
         if has_lists {
@@ -377,10 +359,27 @@ impl<'a> Exporter<'a> {
         if has_footnotes {
             self.add_rel(REL_FOOTNOTES, "footnotes.xml", false);
         }
+        if has_endnotes {
+            self.add_rel(REL_ENDNOTES, "endnotes.xml", false);
+        }
+        if even_page_header.is_some() || even_page_footer.is_some() {
+            self.add_rel(REL_SETTINGS, "settings.xml", false);
+        }
 
         parts.push((
             "[Content_Types].xml".to_string(),
-            self.content_types(has_lists, has_footnotes, header.is_some(), footer.is_some()),
+            self.content_types(ContentTypeParts {
+                lists: has_lists,
+                footnotes: has_footnotes,
+                endnotes: has_endnotes,
+                header: header.is_some(),
+                footer: footer.is_some(),
+                first_page_header: first_page_header.is_some(),
+                first_page_footer: first_page_footer.is_some(),
+                even_page_header: even_page_header.is_some(),
+                even_page_footer: even_page_footer.is_some(),
+                settings: even_page_header.is_some() || even_page_footer.is_some(),
+            }),
         ));
         parts.push(("_rels/.rels".to_string(), root_rels()));
         parts.push(("docProps/core.xml".to_string(), core_properties(document)));
@@ -390,17 +389,35 @@ impl<'a> Exporter<'a> {
             self.document_rels(),
         ));
         parts.push(("word/styles.xml".to_string(), styles_part(document)));
+        if even_page_header.is_some() || even_page_footer.is_some() {
+            parts.push(("word/settings.xml".to_string(), settings_part(true)));
+        }
         if has_lists {
             parts.push(("word/numbering.xml".to_string(), self.numbering_part()));
         }
         if let Some(footnotes) = footnotes {
             parts.push(("word/footnotes.xml".to_string(), footnotes));
         }
+        if let Some(endnotes) = endnotes {
+            parts.push(("word/endnotes.xml".to_string(), endnotes));
+        }
         if let Some((_, bytes)) = header {
             parts.push(("word/header1.xml".to_string(), bytes));
         }
         if let Some((_, bytes)) = footer {
             parts.push(("word/footer1.xml".to_string(), bytes));
+        }
+        if let Some((_, bytes)) = first_page_header {
+            parts.push(("word/header2.xml".to_string(), bytes));
+        }
+        if let Some((_, bytes)) = first_page_footer {
+            parts.push(("word/footer2.xml".to_string(), bytes));
+        }
+        if let Some((_, bytes)) = even_page_header {
+            parts.push(("word/header3.xml".to_string(), bytes));
+        }
+        if let Some((_, bytes)) = even_page_footer {
+            parts.push(("word/footer3.xml".to_string(), bytes));
         }
         for (path, bytes) in std::mem::take(&mut self.media) {
             parts.push((path, bytes));
@@ -443,6 +460,44 @@ impl<'a> Exporter<'a> {
                 "the citation database was dropped; citations are written as their rendered text",
             );
         }
+        // Which CSL styles OpenDoc bundles is a product decision, so a
+        // document formatted by the fallback renderer says so here too.
+        for warning in opendoc_citations::citation_support_warnings(&document.citation_database) {
+            self.warnings.push(warning);
+        }
+    }
+
+    fn install_bookmark_ranges(&mut self, document: &Document) {
+        let mut bookmarks: Vec<_> = document
+            .bookmarks
+            .iter()
+            .filter(|bookmark| !bookmark.deleted)
+            .collect();
+        bookmarks.sort_by(|left, right| left.id.cmp(&right.id));
+        for bookmark in bookmarks {
+            self.next_bookmark += 1;
+            self.bookmark_ranges
+                .entry(bookmark.block_id.clone())
+                .or_default()
+                .push((
+                    bookmark.id.clone(),
+                    self.next_bookmark,
+                    bookmark.name.clone(),
+                ));
+        }
+    }
+
+    fn report_unplaced_bookmarks(&mut self, document: &Document) {
+        let unplaced = document
+            .bookmarks
+            .iter()
+            .filter(|bookmark| !bookmark.deleted && !self.emitted_bookmarks.contains(&bookmark.id))
+            .count();
+        if unplaced > 0 {
+            self.warn(UNPLACED_BOOKMARKS, format!(
+                "{unplaced} OpenDoc bookmark(s) target a non-text block and could not be represented as DOCX inline bookmark ranges"
+            ));
+        }
     }
 
     fn add_rel(&mut self, rel_type: &'static str, target: &str, external: bool) -> String {
@@ -473,6 +528,12 @@ impl<'a> Exporter<'a> {
     fn write_block(&mut self, xml: &mut Xml, document: &Document, block: &Block) {
         match &block.kind {
             BlockKind::Paragraph => self.write_text_paragraph(xml, document, block, None, None),
+            BlockKind::Title => {
+                self.write_text_paragraph(xml, document, block, Some("Title"), None)
+            }
+            BlockKind::Subtitle => {
+                self.write_text_paragraph(xml, document, block, Some("Subtitle"), None)
+            }
             BlockKind::Heading { level } => {
                 let clamped = (*level).clamp(1, 6);
                 if clamped != *level {
@@ -489,7 +550,17 @@ impl<'a> Exporter<'a> {
                 level,
                 kind,
             } => {
-                let num_id = self.list_num_id(list_id, *kind);
+                let format = document
+                    .list_properties
+                    .get(list_id)
+                    .map(|properties| properties.format_for(*level))
+                    .unwrap_or_else(|| OrderedListFormat::inherited_at(*level));
+                let bullet_marker = document
+                    .list_properties
+                    .get(list_id)
+                    .map(|properties| properties.bullet_marker_for(*level))
+                    .unwrap_or_else(|| opendoc_core::BulletListMarker::inherited_at(*level));
+                let num_id = self.list_num_id(list_id, *kind, format, bullet_marker);
                 self.write_text_paragraph(
                     xml,
                     document,
@@ -498,9 +569,13 @@ impl<'a> Exporter<'a> {
                     Some((num_id, (*level).min(8))),
                 );
             }
-            BlockKind::Table { rows, .. } => {
+            BlockKind::Table {
+                columns,
+                properties,
+                rows,
+            } => {
                 self.reject_block_properties(block, "table");
-                self.write_table(xml, document, rows);
+                self.write_table(xml, document, columns, properties, rows);
             }
             BlockKind::EquationBlock { equation } => {
                 if !block.content.is_empty() {
@@ -523,10 +598,68 @@ impl<'a> Exporter<'a> {
             BlockKind::Image {
                 blob_hash,
                 alt_text,
-                ..
+                layout,
             } => {
-                self.reject_block_properties(block, "image");
-                self.write_image_paragraph(xml, blob_hash, alt_text);
+                self.write_image_paragraph(xml, blob_hash, alt_text, layout, &block.properties);
+            }
+            BlockKind::HorizontalRule => {
+                // Word has no `<hr>` block: its native equivalent is a
+                // paragraph bottom border.  The empty paragraph is only the
+                // carrier; the OpenDoc rule itself remains content-free.
+                xml.open("w:p", &[]);
+                xml.open("w:pPr", &[]);
+                xml.open("w:pBdr", &[]);
+                xml.empty(
+                    "w:bottom",
+                    &[
+                        ("w:val", "single"),
+                        ("w:sz", "6"),
+                        ("w:space", "1"),
+                        ("w:color", "6B7280"),
+                    ],
+                );
+                xml.close("w:pBdr");
+                xml.close("w:pPr");
+                xml.close("w:p");
+            }
+            BlockKind::TableOfContents { max_level } => {
+                // A field is deliberately preferable to cached entry text:
+                // Word recomputes heading labels and page numbers after its
+                // own edits, while OpenDoc's source block remains derived on
+                // the next import/render. `\\h` gives Word hyperlinks and
+                // `\\z` suppresses those link decorations in web layout.
+                let instruction = format!(" TOC \\o \"1-{max_level}\" \\h \\z \\u ");
+                xml.open("w:p", &[]);
+                xml.open("w:fldSimple", &[("w:instr", &instruction)]);
+                xml.open("w:r", &[]);
+                xml.open("w:t", &[]);
+                xml.text("Table of contents");
+                xml.close("w:t");
+                xml.close("w:r");
+                xml.close("w:fldSimple");
+                xml.close("w:p");
+            }
+            BlockKind::Bibliography => {
+                // Word's BIBLIOGRAPHY field has no portable source-record
+                // payload. Emit the current deterministic projection rather
+                // than a field that would silently turn empty in Word.
+                self.warn(
+                    "docx-export-bibliography-as-static-text",
+                    "the generated bibliography was exported as current formatted paragraphs because DOCX bibliography fields require an external source-record store",
+                );
+                for text in std::iter::once("Bibliography".to_string()).chain(
+                    opendoc_citations::render_cited_bibliography(&document.citation_database)
+                        .into_iter()
+                        .map(|entry| entry.text),
+                ) {
+                    xml.open("w:p", &[]);
+                    xml.open("w:r", &[]);
+                    xml.open("w:t", &[]);
+                    xml.text(&text);
+                    xml.close("w:t");
+                    xml.close("w:r");
+                    xml.close("w:p");
+                }
             }
             BlockKind::PageBreak => {
                 self.reject_block_properties(block, "page break");
@@ -567,10 +700,36 @@ impl<'a> Exporter<'a> {
     ) {
         xml.open("w:p", &[]);
         self.write_paragraph_properties(xml, style, num, &block.properties);
+        self.write_bookmark_starts(xml, &block.id);
         for inline in &block.content {
             self.write_inline(xml, document, inline);
         }
+        self.write_bookmark_ends(xml, &block.id);
         xml.close("w:p");
+    }
+
+    /// OpenDoc bookmarks identify an entire stable block.  A Word bookmark is
+    /// an inline range, so use a zero-width range at the beginning of the
+    /// corresponding paragraph rather than inventing a character offset.
+    fn write_bookmark_starts(&mut self, xml: &mut Xml, block_id: &StableId) {
+        let Some(ranges) = self.bookmark_ranges.get(block_id).cloned() else {
+            return;
+        };
+        for (bookmark_id, number, name) in ranges {
+            self.emitted_bookmarks.insert(bookmark_id);
+            let number = number.to_string();
+            xml.empty("w:bookmarkStart", &[("w:id", &number), ("w:name", &name)]);
+        }
+    }
+
+    fn write_bookmark_ends(&mut self, xml: &mut Xml, block_id: &StableId) {
+        let Some(ranges) = self.bookmark_ranges.get(block_id) else {
+            return;
+        };
+        for (_, number, _) in ranges {
+            let number = number.to_string();
+            xml.empty("w:bookmarkEnd", &[("w:id", &number)]);
+        }
     }
 
     /// `w:pPr` children are a fixed sequence in the schema: `pStyle`, `numPr`,
@@ -604,6 +763,49 @@ impl<'a> Exporter<'a> {
                 TextDirection::LeftToRight => "0",
             };
             xml.empty("w:bidi", &[("w:val", value)]);
+        }
+        if let Some(keep_with_next) = properties.keep_with_next {
+            // An explicit false is meaningful: it cancels a style's
+            // `keepNext`, whereas omitting the element inherits that style.
+            xml.empty(
+                "w:keepNext",
+                &[("w:val", if keep_with_next { "1" } else { "0" })],
+            );
+        }
+        if let Some(border) = properties.border {
+            xml.open("w:pBdr", &[]);
+            for edge in ["w:top", "w:left", "w:bottom", "w:right"] {
+                if border.style() == BorderStyle::None {
+                    xml.empty(edge, &[("w:val", "nil")]);
+                } else {
+                    let value = match border.style() {
+                        BorderStyle::Solid => "single",
+                        BorderStyle::Dashed => "dashed",
+                        BorderStyle::Dotted => "dotted",
+                        BorderStyle::Double => "double",
+                        BorderStyle::None => unreachable!(),
+                    };
+                    let size = self.border_eighths(border.width());
+                    let color = border.color().as_hex();
+                    xml.empty(
+                        edge,
+                        &[
+                            ("w:val", value),
+                            ("w:sz", &size),
+                            ("w:space", "0"),
+                            ("w:color", &color[1..]),
+                        ],
+                    );
+                }
+            }
+            xml.close("w:pBdr");
+        }
+        if let Some(background) = properties.background {
+            let fill = background.as_hex().trim_start_matches('#').to_string();
+            xml.empty(
+                "w:shd",
+                &[("w:val", "clear"), ("w:color", "auto"), ("w:fill", &fill)],
+            );
         }
         write_attribute_element(xml, "w:spacing", &spacing);
         write_attribute_element(xml, "w:ind", &indent);
@@ -662,8 +864,27 @@ impl<'a> Exporter<'a> {
         attrs
     }
 
-    fn list_num_id(&mut self, list_id: &StableId, kind: ListKind) -> u32 {
-        let flavour = ListFlavour::of(kind);
+    fn list_num_id(
+        &mut self,
+        list_id: &StableId,
+        kind: ListKind,
+        format: OrderedListFormat,
+        bullet_marker: opendoc_core::BulletListMarker,
+    ) -> u32 {
+        // A Word numbering instance contains a definition for every nesting
+        // level.  Ordered counter style is therefore a level property of one
+        // instance, not part of its identity.  Keying it by `format` splits a
+        // perfectly ordinary decimal / lower-alpha nested list into separate
+        // `numId`s and loses its run identity on import.
+        let flavour = match kind {
+            ListKind::Ordered => ListFlavour::Ordered(OrderedListFormat::Decimal),
+            // A Word numbering instance owns definitions for every nesting
+            // level. Bullet glyph is likewise a level property, so it must
+            // not split one run into separate numIds merely because level 1
+            // inherits a hollow circle while level 0 inherits a disc.
+            ListKind::Bullet => ListFlavour::Bullet(opendoc_core::BulletListMarker::Disc),
+            _ => ListFlavour::of(kind, format, bullet_marker),
+        };
         if matches!(kind, ListKind::Checklist { .. }) {
             self.warn(
                 CHECKLIST_AS_BULLET,
@@ -671,7 +892,7 @@ impl<'a> Exporter<'a> {
             );
         }
         let flavours = self.list_flavours.entry(list_id.clone()).or_default();
-        flavours.insert(flavour);
+        flavours.insert(flavour.clone());
         if flavours.len() > 1 {
             self.warn(
                 SPLIT_MIXED_LIST,
@@ -729,31 +950,63 @@ impl<'a> Exporter<'a> {
                 let rendered = self.sanitize(&rendered, "citation");
                 self.write_run(xml, &rendered, &[]);
             }
-            Inline::FootnoteRef { footnote_id, .. } => match self.footnote_ids.get(footnote_id) {
-                Some(id) => {
-                    let id = id.to_string();
-                    xml.open("w:r", &[]);
-                    xml.open("w:rPr", &[]);
-                    xml.empty("w:rStyle", &[("w:val", "FootnoteReference")]);
-                    xml.close("w:rPr");
-                    xml.empty("w:footnoteReference", &[("w:id", &id)]);
-                    xml.close("w:r");
-                }
-                None => self.warn(
-                    MISSING_FOOTNOTE,
-                    format!(
-                        "footnote reference to {} was dropped: the document has no such footnote",
-                        footnote_id.as_str()
-                    ),
-                ),
-            },
-            Inline::Mention { label, .. } => {
+            Inline::FootnoteRef { footnote_id, .. } => {
+                let (id, reference) = if let Some(id) = self.footnote_ids.get(footnote_id) {
+                    (id, "w:footnoteReference")
+                } else if let Some(id) = self.endnote_ids.get(footnote_id) {
+                    (id, "w:endnoteReference")
+                } else {
+                    self.warn(
+                        MISSING_FOOTNOTE,
+                        format!(
+                            "footnote reference to {} was dropped: the document has no such footnote",
+                            footnote_id.as_str()
+                        ),
+                    );
+                    return;
+                };
+                let id = id.to_string();
+                xml.open("w:r", &[]);
+                xml.open("w:rPr", &[]);
+                xml.empty("w:rStyle", &[("w:val", "FootnoteReference")]);
+                xml.close("w:rPr");
+                xml.empty(reference, &[("w:id", &id)]);
+                xml.close("w:r");
+            }
+            Inline::Mention { label, .. }
+            | Inline::GooglePersonChip { label, .. }
+            | Inline::GoogleRichLinkChip { label, .. } => {
                 self.warn(
                     MENTION_AS_TEXT,
                     "mentions were written as plain text; WordprocessingML has no mention and they re-import as text",
                 );
                 let label = self.sanitize(label, "mention");
                 self.write_run(xml, &label, &[]);
+            }
+            Inline::Dropdown {
+                options,
+                selected_option_id,
+                ..
+            } => {
+                self.warn(
+                    DROPDOWN_AS_TEXT,
+                    "dropdowns were written as their selected text; WordprocessingML has no portable inline dropdown",
+                );
+                if let Some(option) = options
+                    .iter()
+                    .find(|option| option.id == *selected_option_id)
+                {
+                    let label = self.sanitize(&option.label, "dropdown option");
+                    self.write_run(xml, &label, &[]);
+                }
+            }
+            Inline::DateChip { date, .. } => {
+                self.warn(
+                    "date-chip-as-text",
+                    "date chips were written as ISO calendar text; WordprocessingML has no portable date chip",
+                );
+                let date = self.sanitize(date, "date chip");
+                self.write_run(xml, &date, &[]);
             }
             Inline::Equation { equation, .. } => {
                 self.warn(
@@ -901,37 +1154,76 @@ impl<'a> Exporter<'a> {
 
     // -- tables ------------------------------------------------------------
 
-    fn write_table(&mut self, xml: &mut Xml, document: &Document, rows: &[opendoc_core::TableRow]) {
-        let columns = rows
+    /// A table as WordprocessingML's own grid.
+    ///
+    /// The model's grid is rectangular and a merged cell is a span on the
+    /// cell it starts at (ADR 0013); WordprocessingML says the same thing
+    /// with `w:gridSpan` across a row and `w:vMerge` down a column, so the
+    /// mapping is exact in both directions and the reader in `docx.rs` reads
+    /// back what is written here. The one thing that does not survive is the
+    /// *content* of a covered cell, which the model retains and
+    /// WordprocessingML has nowhere to put — so it is named rather than
+    /// dropped in silence.
+    ///
+    /// # No `w:tblBorders`
+    ///
+    /// This used to write a `single sz=4 color=auto` grid on **every** table,
+    /// whatever the document said, to materialise the editor's own `.doc-table
+    /// td` hairline. It made the export lie twice over. A table a producer
+    /// wrote as borderless came back bordered — round-tripping the
+    /// LibreOffice fixture through LibreOffice turned `fo:border="none"` into
+    /// `0.5pt solid #000000` — and a cell that said `BorderStyle::None` on
+    /// only one edge got the invented line back on the other three.
+    ///
+    /// The model has no table-level border, so there is nothing here to
+    /// write: every border the document states is on a cell and is written by
+    /// [`Self::write_cell_properties`], and an edge nothing states is written
+    /// as nothing, which is what WordprocessingML reads as *no border*. That
+    /// makes the writer the exact inverse of the reader, which resolves a
+    /// `w:tblBorders` onto the cells on the way in (see `crate::docx::table`).
+    ///
+    /// The cost is stated rather than hidden: a table nobody has set a border
+    /// on exports without one, while the editor still draws its grey
+    /// gridlines on screen. Those gridlines are a view default — the same
+    /// thing Word draws for a borderless table — and not a property of the
+    /// document, so the export cannot carry them and does not claim to. A
+    /// user who wants lines in Word sets them, with `set_table_cell_border`.
+    fn write_table(
+        &mut self,
+        xml: &mut Xml,
+        document: &Document,
+        columns: &[TableColumn],
+        properties: &opendoc_core::TableProperties,
+        rows: &[opendoc_core::TableRow],
+    ) {
+        if rows
             .iter()
-            .map(|row| row.cells.len())
-            .max()
-            .unwrap_or(1)
-            .max(1);
-        let width = 9360 / columns as i64;
-        xml.open("w:tbl", &[]);
-        xml.open("w:tblPr", &[]);
-        xml.empty("w:tblW", &[("w:w", "0"), ("w:type", "auto")]);
-        xml.open("w:tblBorders", &[]);
-        for edge in [
-            "w:top",
-            "w:left",
-            "w:bottom",
-            "w:right",
-            "w:insideH",
-            "w:insideV",
-        ] {
-            xml.empty(
-                edge,
-                &[
-                    ("w:val", "single"),
-                    ("w:sz", "4"),
-                    ("w:space", "0"),
-                    ("w:color", "auto"),
-                ],
+            .flat_map(|row| &row.cells)
+            .any(|cell| cell.properties.row_header.is_some())
+        {
+            self.warn(
+                DROPPED_TABLE_ROW_HEADER,
+                "WordprocessingML has no semantic per-cell row-header role; explicit OpenDoc row-header state was not exported",
             );
         }
-        xml.close("w:tblBorders");
+        let widths = column_widths(columns, rows);
+        let fixed = columns.iter().any(|column| column.width.is_some());
+        let total: i64 = widths.iter().sum();
+        xml.open("w:tbl", &[]);
+        xml.open("w:tblPr", &[]);
+        if fixed {
+            xml.empty("w:tblW", &[("w:w", &total.to_string()), ("w:type", "dxa")]);
+        } else {
+            xml.empty("w:tblW", &[("w:w", "0"), ("w:type", "auto")]);
+        }
+        // The model's *auto* has no `w:gridCol` spelling — the schema wants a
+        // number for every column — so the layout mode is what carries the
+        // difference: an autofit table's grid is a cached measurement, and
+        // the reader treats it as auto for exactly that reason.
+        xml.empty(
+            "w:tblLayout",
+            &[("w:type", if fixed { "fixed" } else { "autofit" })],
+        );
         xml.empty(
             "w:tblLook",
             &[
@@ -944,46 +1236,323 @@ impl<'a> Exporter<'a> {
                 ("w:noVBand", "1"),
             ],
         );
+        if let Some(alignment) = properties.alignment {
+            let value = match alignment {
+                opendoc_core::TableAlignment::Start => "left",
+                opendoc_core::TableAlignment::Center => "center",
+                opendoc_core::TableAlignment::End => "right",
+            };
+            xml.empty("w:jc", &[("w:val", value)]);
+        }
+        if let Some(border) = properties.border {
+            xml.open("w:tblBorders", &[]);
+            for edge in [
+                "w:top",
+                "w:left",
+                "w:bottom",
+                "w:right",
+                "w:insideH",
+                "w:insideV",
+            ] {
+                if border.style() == BorderStyle::None {
+                    xml.empty(edge, &[("w:val", "nil")]);
+                } else {
+                    let value = match border.style() {
+                        BorderStyle::Solid => "single",
+                        BorderStyle::Dashed => "dashed",
+                        BorderStyle::Dotted => "dotted",
+                        BorderStyle::Double => "double",
+                        BorderStyle::None => unreachable!("handled above"),
+                    };
+                    xml.empty(
+                        edge,
+                        &[
+                            ("w:val", value),
+                            ("w:sz", &self.border_eighths(border.width())),
+                            ("w:space", "0"),
+                            ("w:color", &border.color().as_hex()[1..]),
+                        ],
+                    );
+                }
+            }
+            xml.close("w:tblBorders");
+        }
         xml.close("w:tblPr");
         xml.open("w:tblGrid", &[]);
-        for _ in 0..columns {
+        for width in &widths {
             xml.empty("w:gridCol", &[("w:w", &width.to_string())]);
         }
         xml.close("w:tblGrid");
-        for row in rows {
+
+        let coverage = cell_coverage(rows);
+        for (row_index, row) in rows.iter().enumerate() {
             xml.open("w:tr", &[]);
-            if row.cells.is_empty() {
-                self.write_cell(xml, document, &[], width);
+            if row.height.is_some() || row.header {
+                xml.open("w:trPr", &[]);
+                if let Some(height) = row.height {
+                    xml.empty(
+                        "w:trHeight",
+                        &[
+                            ("w:val", &height.twips().to_string()),
+                            ("w:hRule", "atLeast"),
+                        ],
+                    );
+                }
+                if row.header {
+                    xml.empty("w:tblHeader", &[]);
+                }
+                xml.close("w:trPr");
             }
-            for cell in &row.cells {
-                self.write_cell(xml, document, &cell.blocks, width);
+            if row.cells.is_empty() {
+                self.write_cell(
+                    xml,
+                    document,
+                    &TableCell::empty(),
+                    CellPlacement {
+                        width: widths.first().copied().unwrap_or(0),
+                        grid_span: 1,
+                        vertical_merge: None,
+                        content: true,
+                    },
+                );
+            }
+            let mut column_index = 0usize;
+            while column_index < row.cells.len() {
+                let cell = &row.cells[column_index];
+                let (grid_span, vertical_merge, content) =
+                    match coverage.get(&(row_index, column_index)) {
+                        None => {
+                            let span = cell.span;
+                            let merge = (span.rows() > 1).then_some("restart");
+                            (span.columns() as usize, merge, true)
+                        }
+                        // The left edge of a rectangle that started higher up:
+                        // this is the row's continuation cell, and it consumes
+                        // as many grid columns as the rectangle is wide.
+                        Some(origin) if origin.column == column_index => {
+                            (origin.columns, Some("continue"), false)
+                        }
+                        // Swallowed by a `w:gridSpan` already written: no
+                        // `w:tc` at all, so this cell's content has nowhere to
+                        // go either.
+                        Some(_) => {
+                            self.report_covered_cell_content(cell);
+                            column_index += 1;
+                            continue;
+                        }
+                    };
+                if !content {
+                    self.report_covered_cell_content(cell);
+                }
+                let width: i64 = widths
+                    .iter()
+                    .skip(column_index)
+                    .take(grid_span)
+                    .copied()
+                    .sum();
+                self.write_cell(
+                    xml,
+                    document,
+                    cell,
+                    CellPlacement {
+                        width,
+                        grid_span,
+                        vertical_merge,
+                        content,
+                    },
+                );
+                column_index += grid_span.max(1);
             }
             xml.close("w:tr");
         }
         xml.close("w:tbl");
     }
 
-    fn write_cell(&mut self, xml: &mut Xml, document: &Document, blocks: &[Block], width: i64) {
+    /// A covered cell's blocks are retained by the model and invisible to
+    /// every reader; WordprocessingML has no place for them at all, so
+    /// exporting one is a loss the export has to name (ADR 0010).
+    fn report_covered_cell_content(&mut self, cell: &opendoc_core::TableCell) {
+        let has_content = cell.blocks.iter().any(|block| {
+            !matches!(block.kind, BlockKind::Paragraph)
+                || block.content.iter().any(|inline| match inline {
+                    Inline::Text { text, .. } => !text.is_empty(),
+                    _ => true,
+                })
+        });
+        if has_content {
+            self.warn(
+                DROPPED_COVERED_CELL_CONTENT,
+                "content held by a cell underneath a merged cell was dropped: WordprocessingML keeps no content in a covered cell",
+            );
+        }
+    }
+
+    fn write_cell(
+        &mut self,
+        xml: &mut Xml,
+        document: &Document,
+        cell: &opendoc_core::TableCell,
+        placement: CellPlacement,
+    ) {
+        let CellPlacement {
+            width,
+            grid_span,
+            vertical_merge,
+            content,
+        } = placement;
         xml.open("w:tc", &[]);
+        // WordprocessingML fixes the order of `w:tcPr`'s children and Word
+        // refuses a package that reorders them: width, span, merge, borders,
+        // shading, margins, vertical alignment.
         xml.open("w:tcPr", &[]);
         xml.empty("w:tcW", &[("w:w", &width.to_string()), ("w:type", "dxa")]);
+        if grid_span > 1 {
+            xml.empty("w:gridSpan", &[("w:val", &grid_span.to_string())]);
+        }
+        if let Some(merge) = vertical_merge {
+            xml.empty("w:vMerge", &[("w:val", merge)]);
+        }
+        self.write_cell_properties(xml, &cell.properties);
         xml.close("w:tcPr");
         let mut ends_with_paragraph = false;
-        for block in blocks {
-            ends_with_paragraph = !matches!(block.kind, BlockKind::Table { .. });
-            self.write_block(xml, document, block);
+        if content {
+            for block in &cell.blocks {
+                ends_with_paragraph = !matches!(block.kind, BlockKind::Table { .. });
+                self.write_block(xml, document, block);
+            }
         }
         // A table cell must end with a paragraph; Word treats a cell whose
         // last child is a table as corrupt.
-        if blocks.is_empty() || !ends_with_paragraph {
+        if !content || cell.blocks.is_empty() || !ends_with_paragraph {
             xml.empty("w:p", &[]);
         }
         xml.close("w:tc");
     }
 
+    fn write_cell_properties(&mut self, xml: &mut Xml, properties: &TableCellProperties) {
+        let borders = [
+            ("w:top", properties.border_top),
+            ("w:left", properties.border_start),
+            ("w:bottom", properties.border_bottom),
+            ("w:right", properties.border_end),
+        ];
+        if borders.iter().any(|(_, border)| border.is_some()) {
+            xml.open("w:tcBorders", &[]);
+            for (name, border) in borders {
+                let Some(border) = border else {
+                    continue;
+                };
+                if border.style() == BorderStyle::None {
+                    xml.empty(name, &[("w:val", "nil")]);
+                    continue;
+                }
+                xml.empty(
+                    name,
+                    &[
+                        (
+                            "w:val",
+                            match border.style() {
+                                BorderStyle::Solid => "single",
+                                BorderStyle::Dashed => "dashed",
+                                BorderStyle::Dotted => "dotted",
+                                BorderStyle::Double => "double",
+                                BorderStyle::None => unreachable!("handled above"),
+                            },
+                        ),
+                        ("w:sz", &self.border_eighths(border.width())),
+                        ("w:space", "0"),
+                        ("w:color", &border.color().as_hex()[1..]),
+                    ],
+                );
+            }
+            xml.close("w:tcBorders");
+        }
+        if let Some(background) = properties.background {
+            xml.empty(
+                "w:shd",
+                &[
+                    ("w:val", "clear"),
+                    ("w:color", "auto"),
+                    ("w:fill", &background.as_hex()[1..]),
+                ],
+            );
+        }
+        let margins = [
+            ("w:top", properties.padding_top),
+            ("w:left", properties.padding_start),
+            ("w:bottom", properties.padding_bottom),
+            ("w:right", properties.padding_end),
+        ];
+        if margins.iter().any(|(_, padding)| padding.is_some()) {
+            xml.open("w:tcMar", &[]);
+            for (name, padding) in margins {
+                let Some(padding) = padding else {
+                    continue;
+                };
+                xml.empty(
+                    name,
+                    &[("w:w", &padding.twips().to_string()), ("w:type", "dxa")],
+                );
+            }
+            xml.close("w:tcMar");
+        }
+        if let Some(alignment) = properties.vertical_alignment {
+            xml.empty(
+                "w:vAlign",
+                &[(
+                    "w:val",
+                    match alignment {
+                        VerticalAlignment::Top => "top",
+                        VerticalAlignment::Middle => "center",
+                        VerticalAlignment::Bottom => "bottom",
+                    },
+                )],
+            );
+        }
+    }
+
+    /// `w:sz` counts eighths of a point and the model counts twips: one
+    /// eighth is exactly 2.5 twips, so an odd number of twips cannot be
+    /// stated and is rounded — the only inexact step in the table mapping,
+    /// and it says so.
+    fn border_eighths(&mut self, width: Length) -> String {
+        let twips = width.twips();
+        if (twips * 8) % 20 != 0 {
+            self.warn(
+                APPROXIMATED_CELL_BORDER,
+                format!(
+                    "a {}-twip cell border was rounded to the nearest eighth of a point, which is the finest thickness WordprocessingML states",
+                    twips
+                ),
+            );
+        }
+        (((twips * 8) as f64 / 20.0).round() as i64).to_string()
+    }
+
     // -- images ------------------------------------------------------------
 
-    fn write_image_paragraph(&mut self, xml: &mut Xml, blob_hash: &str, alt_text: &str) {
+    fn write_image_paragraph(
+        &mut self,
+        xml: &mut Xml,
+        blob_hash: &str,
+        alt_text: &str,
+        layout: &ImageLayout,
+        properties: &BlockProperties,
+    ) {
+        // Word's margin-relative, no-wrap anchor maps exactly to the model's
+        // page-content tuple. A stable block target does not: it would require
+        // moving this block into another paragraph and would fabricate a
+        // relationship on re-import, so retain the explicit in-flow fallback.
+        let positioned = layout
+            .positioned
+            .as_ref()
+            .filter(|positioned| matches!(positioned.anchor, PositionedImageAnchor::PageContent));
+        if layout.positioned.is_some() && positioned.is_none() {
+            self.warn(
+                POSITIONED_IMAGE_AS_INLINE,
+                "a block-anchored OpenDoc image was exported as an in-flow DOCX image; its target anchor, offsets and layer are not mapped",
+            );
+        }
         let alt = self.sanitize(alt_text, "image alt text");
         let Some(image) = self.images.get(blob_hash) else {
             self.warn(
@@ -993,8 +1562,11 @@ impl<'a> Exporter<'a> {
                 ),
             );
             xml.open("w:p", &[]);
+            self.write_paragraph_properties(xml, None, None, properties);
             self.write_run(xml, &alt, &[]);
             xml.close("w:p");
+            self.write_image_effects_fallback(layout);
+            self.write_image_caption_without_image(xml, layout);
             return;
         };
         let Some(extension) = image_extension(&image.media_type, &image.bytes) else {
@@ -1006,11 +1578,14 @@ impl<'a> Exporter<'a> {
                 ),
             );
             xml.open("w:p", &[]);
+            self.write_paragraph_properties(xml, None, None, properties);
             self.write_run(xml, &alt, &[]);
             xml.close("w:p");
+            self.write_image_effects_fallback(layout);
+            self.write_image_caption_without_image(xml, layout);
             return;
         };
-        let (width_emu, height_emu, known) = image_extent(&image.bytes);
+        let (intrinsic_width, intrinsic_height, known) = image_extent(&image.bytes);
         if !known {
             self.warn(
                 UNKNOWN_IMAGE_SIZE,
@@ -1036,36 +1611,141 @@ impl<'a> Exporter<'a> {
         };
         self.next_doc_pr += 1;
         let doc_pr = self.next_doc_pr.to_string();
+        // Word uses EMUs (635 per twip).  When just one axis is set, retain
+        // the intrinsic aspect ratio, as the editor's side-resize handle does.
+        let requested_width = layout.width.map(|value| i64::from(value.twips()) * 635);
+        let requested_height = layout.height.map(|value| i64::from(value.twips()) * 635);
+        let width_emu = requested_width.unwrap_or_else(|| {
+            requested_height
+                .map(|height| (height * intrinsic_width / intrinsic_height).max(1))
+                .unwrap_or(intrinsic_width)
+        });
+        let height_emu = requested_height.unwrap_or_else(|| {
+            requested_width
+                .map(|width| (width * intrinsic_height / intrinsic_width).max(1))
+                .unwrap_or(intrinsic_height)
+        });
         let width = width_emu.to_string();
         let height = height_emu.to_string();
         let name = format!("Image {doc_pr}");
-        let descr = if alt.trim().is_empty() {
-            name.clone()
-        } else {
-            alt
-        };
+        // DrawingML requires a nonvisual object name, but that generated
+        // bookkeeping name is not alternative text.  Emit `descr` only when
+        // the model actually has accessible text; otherwise a later import
+        // would falsely claim that "Image N" came from the source author.
+        let description = (!alt.trim().is_empty()).then_some(alt.as_str());
 
         xml.open("w:p", &[]);
+        self.write_paragraph_properties(xml, None, None, properties);
         xml.open("w:r", &[]);
         xml.open("w:drawing", &[]);
-        xml.open(
-            "wp:inline",
-            &[
-                ("distT", "0"),
-                ("distB", "0"),
-                ("distL", "0"),
-                ("distR", "0"),
-            ],
-        );
+        let wrapped = positioned.is_none()
+            && matches!(
+                layout.effective_placement(),
+                ImagePlacement::WrapStart | ImagePlacement::WrapEnd
+            );
+        if wrapped || positioned.is_some() {
+            let clearance = layout.wrap_clearance.unwrap_or_default();
+            let behind_doc = match positioned.map(|positioned| positioned.layer) {
+                Some(PositionedImageLayer::BehindText) => "1",
+                Some(PositionedImageLayer::InFrontOfText) | None => "0",
+            };
+            xml.open(
+                "wp:anchor",
+                &[
+                    (
+                        "distT",
+                        &(i64::from(clearance.top.twips()) * 635).to_string(),
+                    ),
+                    (
+                        "distB",
+                        &(i64::from(clearance.bottom.twips()) * 635).to_string(),
+                    ),
+                    (
+                        "distL",
+                        &(i64::from(clearance.start.twips()) * 635).to_string(),
+                    ),
+                    (
+                        "distR",
+                        &(i64::from(clearance.end.twips()) * 635).to_string(),
+                    ),
+                    ("simplePos", "0"),
+                    ("relativeHeight", "0"),
+                    ("behindDoc", behind_doc),
+                    ("locked", "0"),
+                    ("layoutInCell", "1"),
+                    ("allowOverlap", "1"),
+                ],
+            );
+            xml.empty("wp:simplePos", &[("x", "0"), ("y", "0")]);
+            let horizontal_relative_from = if positioned.is_some() {
+                "margin"
+            } else {
+                "column"
+            };
+            xml.open(
+                "wp:positionH",
+                &[("relativeFrom", horizontal_relative_from)],
+            );
+            if let Some(positioned) = positioned {
+                xml.text_element(
+                    "wp:posOffset",
+                    &[],
+                    &(i64::from(positioned.horizontal_offset.twips()) * 635).to_string(),
+                );
+            } else {
+                xml.text_element(
+                    "wp:align",
+                    &[],
+                    match layout.effective_placement() {
+                        ImagePlacement::WrapStart => "left",
+                        ImagePlacement::WrapEnd => "right",
+                        ImagePlacement::Block => {
+                            unreachable!("only wrapped placements use anchors")
+                        }
+                    },
+                );
+            }
+            xml.close("wp:positionH");
+            let vertical_relative_from = if positioned.is_some() {
+                "margin"
+            } else {
+                "paragraph"
+            };
+            xml.open("wp:positionV", &[("relativeFrom", vertical_relative_from)]);
+            let vertical_offset = positioned
+                .map(|positioned| (i64::from(positioned.vertical_offset.twips()) * 635).to_string())
+                .unwrap_or_else(|| "0".to_string());
+            xml.text_element("wp:posOffset", &[], &vertical_offset);
+            xml.close("wp:positionV");
+        } else {
+            xml.open(
+                "wp:inline",
+                &[
+                    ("distT", "0"),
+                    ("distB", "0"),
+                    ("distL", "0"),
+                    ("distR", "0"),
+                ],
+            );
+        }
         xml.empty("wp:extent", &[("cx", &width), ("cy", &height)]);
         xml.empty(
             "wp:effectExtent",
             &[("l", "0"), ("t", "0"), ("r", "0"), ("b", "0")],
         );
-        xml.empty(
-            "wp:docPr",
-            &[("id", &doc_pr), ("name", &name), ("descr", &descr)],
-        );
+        // `wp:wrapSquare` precedes docPr in CT_Anchor.  Keeping it here is
+        // not cosmetic: Word rejects otherwise well-formed XML with children
+        // in the wrong schema order.
+        if wrapped {
+            xml.empty("wp:wrapSquare", &[("wrapText", "bothSides")]);
+        } else if positioned.is_some() {
+            xml.empty("wp:wrapNone", &[]);
+        }
+        let mut doc_pr_attributes = vec![("id", doc_pr.as_str()), ("name", name.as_str())];
+        if let Some(description) = description {
+            doc_pr_attributes.push(("descr", description));
+        }
+        xml.empty("wp:docPr", &doc_pr_attributes);
         xml.open("wp:cNvGraphicFramePr", &[]);
         xml.empty(
             "a:graphicFrameLocks",
@@ -1082,87 +1762,255 @@ impl<'a> Exporter<'a> {
         );
         xml.open("pic:pic", &[("xmlns:pic", NS_PIC)]);
         xml.open("pic:nvPicPr", &[]);
-        xml.empty(
-            "pic:cNvPr",
-            &[("id", "0"), ("name", &name), ("descr", &descr)],
-        );
+        let mut picture_properties = vec![("id", "0"), ("name", name.as_str())];
+        if let Some(description) = description {
+            picture_properties.push(("descr", description));
+        }
+        xml.empty("pic:cNvPr", &picture_properties);
         xml.open("pic:cNvPicPr", &[]);
         xml.empty("a:picLocks", &[("noChangeAspect", "1")]);
         xml.close("pic:cNvPicPr");
         xml.close("pic:nvPicPr");
         xml.open("pic:blipFill", &[]);
-        xml.empty("a:blip", &[("r:embed", &rel_id)]);
+        xml.open("a:blip", &[("r:embed", &rel_id)]);
+        if let Some(opacity) = layout.opacity_percent {
+            xml.empty(
+                "a:alphaModFix",
+                &[("amt", &(u32::from(opacity) * 1_000).to_string())],
+            );
+        }
+        xml.close("a:blip");
+        if let Some(crop) = layout.crop.filter(|crop| !crop.is_empty()) {
+            xml.empty(
+                "a:srcRect",
+                &[
+                    ("l", &(u32::from(crop.left_percent) * 1_000).to_string()),
+                    ("t", &(u32::from(crop.top_percent) * 1_000).to_string()),
+                    ("r", &(u32::from(crop.right_percent) * 1_000).to_string()),
+                    ("b", &(u32::from(crop.bottom_percent) * 1_000).to_string()),
+                ],
+            );
+        }
         xml.open("a:stretch", &[]);
         xml.empty("a:fillRect", &[]);
         xml.close("a:stretch");
         xml.close("pic:blipFill");
         xml.open("pic:spPr", &[]);
-        xml.open("a:xfrm", &[]);
+        let rotation = layout
+            .rotation_degrees
+            .filter(|degrees| *degrees != 0)
+            .map(|degrees| (i32::from(degrees) * 60_000).to_string());
+        let transform_attributes = rotation
+            .as_deref()
+            .map(|rotation| vec![("rot", rotation)])
+            .unwrap_or_default();
+        xml.open("a:xfrm", &transform_attributes);
         xml.empty("a:off", &[("x", "0"), ("y", "0")]);
         xml.empty("a:ext", &[("cx", &width), ("cy", &height)]);
         xml.close("a:xfrm");
         xml.open("a:prstGeom", &[("prst", "rect")]);
         xml.empty("a:avLst", &[]);
         xml.close("a:prstGeom");
+        if let Some(border) = layout.border {
+            if border.style() != BorderStyle::None {
+                let width = (i64::from(border.width().twips()) * 635).to_string();
+                xml.open("a:ln", &[("w", &width)]);
+                xml.open("a:solidFill", &[]);
+                xml.empty("a:srgbClr", &[("val", &border.color().as_hex()[1..])]);
+                xml.close("a:solidFill");
+                let dash = match border.style() {
+                    BorderStyle::Solid => "solid",
+                    BorderStyle::Dashed => "dash",
+                    BorderStyle::Dotted => "dot",
+                    BorderStyle::Double => {
+                        self.warn(
+                            IMAGE_DOUBLE_BORDER_AS_SOLID,
+                            "an image's double border was exported as a solid DrawingML outline because the supported DOCX image-border subset has no double-stroke form",
+                        );
+                        "solid"
+                    }
+                    BorderStyle::None => unreachable!("handled above"),
+                };
+                xml.empty("a:prstDash", &[("val", dash)]);
+                xml.close("a:ln");
+            }
+        }
         xml.close("pic:spPr");
         xml.close("pic:pic");
         xml.close("a:graphicData");
         xml.close("a:graphic");
-        xml.close("wp:inline");
+        if wrapped || positioned.is_some() {
+            xml.close("wp:anchor");
+        } else {
+            xml.close("wp:inline");
+        }
         xml.close("w:drawing");
         xml.close("w:r");
         xml.close("w:p");
+        if let Some(caption) = layout.caption.as_deref() {
+            // Word's native caption is a following paragraph marked with the
+            // built-in Caption style.  The adjacency is intentional: on
+            // import we associate this exact simple shape back with the
+            // preceding image rather than exposing it as unrelated prose.
+            xml.open("w:p", &[]);
+            xml.open("w:pPr", &[]);
+            xml.empty("w:pStyle", &[("w:val", "Caption")]);
+            xml.close("w:pPr");
+            let caption = self.sanitize(caption, "image caption");
+            self.write_run(xml, &caption, &[]);
+            xml.close("w:p");
+        }
+    }
+
+    /// A caption remains meaningful text even when the image bytes cannot be
+    /// packaged. Keep it as Word's native following-caption shape, but name
+    /// the lost attachment rather than pretending the fallback prose is an
+    /// image that an importer could reattach it to.
+    fn write_image_caption_without_image(&mut self, xml: &mut Xml, layout: &ImageLayout) {
+        let Some(caption) = layout.caption.as_deref() else {
+            return;
+        };
+        self.warn(
+            IMAGE_CAPTION_WITHOUT_IMAGE,
+            "an image caption was written as a Caption paragraph, but its image was unavailable and could not be exported",
+        );
+        xml.open("w:p", &[]);
+        xml.open("w:pPr", &[]);
+        xml.empty("w:pStyle", &[("w:val", "Caption")]);
+        xml.close("w:pPr");
+        let caption = self.sanitize(caption, "image caption");
+        self.write_run(xml, &caption, &[]);
+        xml.close("w:p");
+    }
+
+    /// The fallback has prose but no DrawingML object, so its visual image
+    /// effects cannot be emitted. Keep this distinct from the missing-asset
+    /// warning, which explains the absent bytes but not the lost authored
+    /// presentation.
+    fn write_image_effects_fallback(&mut self, layout: &ImageLayout) {
+        let mut effects = Vec::new();
+        if layout
+            .rotation_degrees
+            .is_some_and(|rotation| rotation != 0)
+        {
+            effects.push("rotation");
+        }
+        // An explicit 100% alpha is a source value but not a presentation
+        // effect. The text fallback has not lost anything visible in that
+        // case, so do not turn a no-op into a misleading loss warning.
+        if layout.opacity_percent.is_some_and(|opacity| opacity < 100) {
+            effects.push("opacity");
+        }
+        // `CellBorder::none()` deliberately clears a line; unlike a drawn
+        // outline it has no image-level visual effect to report as lost.
+        if layout
+            .border
+            .is_some_and(|border| border.style() != BorderStyle::None)
+        {
+            effects.push("border");
+        }
+        if !effects.is_empty() {
+            self.warn(
+                IMAGE_EFFECTS_UNREPRESENTABLE,
+                format!(
+                    "an image could not be exported because its picture bytes were unavailable; its {} were not represented in the text fallback",
+                    effects.join(", "),
+                ),
+            );
+        }
     }
 
     // -- footnotes ---------------------------------------------------------
 
     fn write_footnotes(&mut self, document: &Document) -> Option<Vec<u8>> {
-        if document.footnotes.is_empty() {
+        self.write_notes(document, false)
+    }
+
+    fn write_endnotes(&mut self, document: &Document) -> Option<Vec<u8>> {
+        self.write_notes(document, true)
+    }
+
+    fn write_notes(&mut self, document: &Document, endnote: bool) -> Option<Vec<u8>> {
+        let notes: Vec<Footnote> = document
+            .footnotes
+            .iter()
+            .filter(|note| document.endnote_ids.contains(&note.id) == endnote)
+            .cloned()
+            .collect();
+        if notes.is_empty() {
             return None;
         }
+        let (root, note, reference, separator, continuation_separator) = if endnote {
+            (
+                "w:endnotes",
+                "w:endnote",
+                "w:endnoteRef",
+                "w:separator",
+                "w:continuationSeparator",
+            )
+        } else {
+            (
+                "w:footnotes",
+                "w:footnote",
+                "w:footnoteRef",
+                "w:separator",
+                "w:continuationSeparator",
+            )
+        };
         let mut xml = Xml::part();
         xml.open(
-            "w:footnotes",
+            root,
             &[("xmlns:w", NS_W), ("xmlns:r", NS_R), ("xmlns:m", NS_M)],
         );
         for (kind, id) in [("separator", "-1"), ("continuationSeparator", "0")] {
-            xml.open("w:footnote", &[("w:type", kind), ("w:id", id)]);
+            xml.open(note, &[("w:type", kind), ("w:id", id)]);
             xml.open("w:p", &[]);
             xml.open("w:r", &[]);
             xml.empty(
                 if kind == "separator" {
-                    "w:separator"
+                    separator
                 } else {
-                    "w:continuationSeparator"
+                    continuation_separator
                 },
                 &[],
             );
             xml.close("w:r");
             xml.close("w:p");
-            xml.close("w:footnote");
+            xml.close(note);
         }
-        let footnotes = document.footnotes.clone();
-        for footnote in &footnotes {
-            self.write_footnote(&mut xml, document, footnote);
+        for footnote in &notes {
+            self.write_note(&mut xml, document, footnote, endnote, note, reference);
         }
-        xml.close("w:footnotes");
+        xml.close(root);
         Some(xml.into_bytes())
     }
 
-    fn write_footnote(&mut self, xml: &mut Xml, document: &Document, footnote: &Footnote) {
+    fn write_note(
+        &mut self,
+        xml: &mut Xml,
+        document: &Document,
+        footnote: &Footnote,
+        endnote: bool,
+        note_element: &str,
+        reference_element: &str,
+    ) {
         if footnote.deleted || footnote.revision != 1 {
             self.warn(
                 DROPPED_FOOTNOTE_STATE,
                 "a footnote's deletion flag and revision number were dropped: WordprocessingML footnotes carry neither",
             );
         }
-        let id = self
-            .footnote_ids
+        let ids = if endnote {
+            &self.endnote_ids
+        } else {
+            &self.footnote_ids
+        };
+        let id = ids
             .get(&footnote.id)
             .copied()
             .unwrap_or_default()
             .to_string();
-        xml.open("w:footnote", &[("w:id", &id)]);
+        xml.open(note_element, &[("w:id", &id)]);
         xml.open("w:p", &[]);
         xml.open("w:pPr", &[]);
         xml.empty("w:pStyle", &[("w:val", "FootnoteText")]);
@@ -1171,7 +2019,7 @@ impl<'a> Exporter<'a> {
         xml.open("w:rPr", &[]);
         xml.empty("w:rStyle", &[("w:val", "FootnoteReference")]);
         xml.close("w:rPr");
-        xml.empty("w:footnoteRef", &[]);
+        xml.empty(reference_element, &[]);
         xml.close("w:r");
         for inline in &footnote.body {
             if matches!(inline, Inline::FootnoteRef { .. }) {
@@ -1184,7 +2032,7 @@ impl<'a> Exporter<'a> {
             self.write_inline(xml, document, inline);
         }
         xml.close("w:p");
-        xml.close("w:footnote");
+        xml.close(note_element);
     }
 
     // -- page furniture and section properties -----------------------------
@@ -1197,12 +2045,20 @@ impl<'a> Exporter<'a> {
         slot: HeaderFooterSlot,
     ) -> Option<(String, Vec<u8>)> {
         let blocks = document.furniture(slot);
-        if blocks.is_empty() {
+        // A missing variant inherits ordinary furniture, but an explicitly
+        // present empty variant deliberately suppresses it. Word represents
+        // that distinction with an empty referenced header/footer part, so
+        // do not collapse `Some(vec![])` to no relationship.
+        if blocks.is_empty() && !document.has_furniture_override(slot) {
             return None;
         }
         let (root, target, rel_type) = match slot {
             HeaderFooterSlot::Header => ("w:hdr", "header1.xml", REL_HEADER),
             HeaderFooterSlot::Footer => ("w:ftr", "footer1.xml", REL_FOOTER),
+            HeaderFooterSlot::FirstPageHeader => ("w:hdr", "header2.xml", REL_HEADER),
+            HeaderFooterSlot::FirstPageFooter => ("w:ftr", "footer2.xml", REL_FOOTER),
+            HeaderFooterSlot::EvenPageHeader => ("w:hdr", "header3.xml", REL_HEADER),
+            HeaderFooterSlot::EvenPageFooter => ("w:ftr", "footer3.xml", REL_FOOTER),
         };
         let mut body = Xml::fragment();
         for block in blocks {
@@ -1240,23 +2096,43 @@ impl<'a> Exporter<'a> {
     fn section_properties(
         &mut self,
         document: &Document,
-        header: Option<&str>,
-        footer: Option<&str>,
+        furniture: FurnitureReferences<'_>,
     ) -> String {
         let setup = &document.page_setup;
         let mut xml = Xml::fragment();
         xml.open("w:sectPr", &[]);
-        if let Some(header) = header {
+        if let Some(header) = furniture.header {
             xml.empty(
                 "w:headerReference",
                 &[("w:type", "default"), ("r:id", header)],
             );
         }
-        if let Some(footer) = footer {
+        if let Some(footer) = furniture.footer {
             xml.empty(
                 "w:footerReference",
                 &[("w:type", "default"), ("r:id", footer)],
             );
+        }
+        if let Some(header) = furniture.first_page_header {
+            xml.empty(
+                "w:headerReference",
+                &[("w:type", "first"), ("r:id", header)],
+            );
+        }
+        if let Some(footer) = furniture.first_page_footer {
+            xml.empty(
+                "w:footerReference",
+                &[("w:type", "first"), ("r:id", footer)],
+            );
+        }
+        if let Some(header) = furniture.even_page_header {
+            xml.empty("w:headerReference", &[("w:type", "even"), ("r:id", header)]);
+        }
+        if let Some(footer) = furniture.even_page_footer {
+            xml.empty("w:footerReference", &[("w:type", "even"), ("r:id", footer)]);
+        }
+        if furniture.first_page_header.is_some() || furniture.first_page_footer.is_some() {
+            xml.empty("w:titlePg", &[]);
         }
         let width = setup.width.twips().to_string();
         let height = setup.height.twips().to_string();
@@ -1291,13 +2167,7 @@ impl<'a> Exporter<'a> {
 
     // -- package parts -----------------------------------------------------
 
-    fn content_types(
-        &self,
-        has_lists: bool,
-        has_footnotes: bool,
-        has_header: bool,
-        has_footer: bool,
-    ) -> Vec<u8> {
+    fn content_types(&self, parts: ContentTypeParts) -> Vec<u8> {
         let mut xml = Xml::part();
         xml.open("Types", &[("xmlns", NS_CONTENT_TYPES)]);
         xml.empty(
@@ -1319,17 +2189,35 @@ impl<'a> Exporter<'a> {
             ("/word/styles.xml", CT_STYLES),
             ("/docProps/core.xml", CT_CORE_PROPERTIES),
         ];
-        if has_lists {
+        if parts.lists {
             overrides.push(("/word/numbering.xml", CT_NUMBERING));
         }
-        if has_footnotes {
+        if parts.footnotes {
             overrides.push(("/word/footnotes.xml", CT_FOOTNOTES));
         }
-        if has_header {
+        if parts.endnotes {
+            overrides.push(("/word/endnotes.xml", CT_ENDNOTES));
+        }
+        if parts.header {
             overrides.push(("/word/header1.xml", CT_HEADER));
         }
-        if has_footer {
+        if parts.footer {
             overrides.push(("/word/footer1.xml", CT_FOOTER));
+        }
+        if parts.first_page_header {
+            overrides.push(("/word/header2.xml", CT_HEADER));
+        }
+        if parts.first_page_footer {
+            overrides.push(("/word/footer2.xml", CT_FOOTER));
+        }
+        if parts.even_page_header {
+            overrides.push(("/word/header3.xml", CT_HEADER));
+        }
+        if parts.even_page_footer {
+            overrides.push(("/word/footer3.xml", CT_FOOTER));
+        }
+        if parts.settings {
+            overrides.push(("/word/settings.xml", CT_SETTINGS));
         }
         overrides.sort_unstable();
         for (part, content_type) in overrides {
@@ -1363,19 +2251,42 @@ impl<'a> Exporter<'a> {
     fn numbering_part(&self) -> Vec<u8> {
         let mut xml = Xml::part();
         xml.open("w:numbering", &[("xmlns:w", NS_W), ("xmlns:r", NS_R)]);
-        let mut definitions: Vec<(u32, ListFlavour)> = self
+        let mut definitions: Vec<(u32, &StableId, ListFlavour)> = self
             .lists
             .iter()
-            .map(|((_, flavour), num_id)| (*num_id, *flavour))
+            .map(|((list_id, flavour), num_id)| (*num_id, list_id, flavour.clone()))
             .collect();
         definitions.sort_unstable();
-        for (num_id, flavour) in &definitions {
-            let (format, bullet) = flavour.level_format();
+        for (num_id, list_id, flavour) in &definitions {
             xml.open("w:abstractNum", &[("w:abstractNumId", &num_id.to_string())]);
             xml.empty("w:multiLevelType", &[("w:val", "hybridMultilevel")]);
             for level in 0..9u8 {
+                let level_flavour = match flavour {
+                    ListFlavour::Ordered(_) => ListFlavour::Ordered(
+                        self.list_properties
+                            .get(*list_id)
+                            .map(|properties| properties.format_for(level))
+                            .unwrap_or_else(|| OrderedListFormat::inherited_at(level)),
+                    ),
+                    ListFlavour::Bullet(_) => ListFlavour::Bullet(
+                        self.list_properties
+                            .get(*list_id)
+                            .map(|properties| properties.bullet_marker_for(level))
+                            .unwrap_or_else(|| opendoc_core::BulletListMarker::inherited_at(level)),
+                    ),
+                    other => other.clone(),
+                };
+                let (format, bullet) = level_flavour.level_format();
                 xml.open("w:lvl", &[("w:ilvl", &level.to_string())]);
-                xml.empty("w:start", &[("w:val", "1")]);
+                let start = matches!(flavour, ListFlavour::Ordered(_))
+                    .then(|| {
+                        self.list_properties
+                            .get(*list_id)
+                            .map(|properties| properties.start_for(level))
+                            .unwrap_or(1)
+                    })
+                    .unwrap_or(1);
+                xml.empty("w:start", &[("w:val", &start.to_string())]);
                 xml.empty("w:numFmt", &[("w:val", format)]);
                 let text = match bullet {
                     Some(bullet) => bullet.to_string(),
@@ -1408,7 +2319,7 @@ impl<'a> Exporter<'a> {
             }
             xml.close("w:abstractNum");
         }
-        for (num_id, _) in &definitions {
+        for (num_id, _, _) in &definitions {
             xml.open("w:num", &[("w:numId", &num_id.to_string())]);
             xml.empty("w:abstractNumId", &[("w:val", &num_id.to_string())]);
             xml.close("w:num");
@@ -1541,6 +2452,92 @@ fn split_run_text(text: &str) -> Vec<RunPiece<'_>> {
     pieces
 }
 
+/// The nominal text column of a Letter page at OpenDoc's default margins:
+/// what an auto-width column shares out, and what a table with no widths at
+/// all has always been given.
+const DEFAULT_TABLE_WIDTH_TWIPS: i64 = 9360;
+
+/// One `w:gridCol` width per column, in twips.
+///
+/// A column the model sized is written exactly — both formats count twips, so
+/// there is no conversion and no rounding. An *auto* column has no
+/// WordprocessingML spelling, so it is given an equal share of whatever the
+/// sized columns leave; `w:tblLayout` is what tells the reader that share was
+/// invented here rather than authored.
+fn column_widths(columns: &[TableColumn], rows: &[TableRow]) -> Vec<i64> {
+    let count = columns
+        .len()
+        .max(rows.iter().map(|row| row.cells.len()).max().unwrap_or(0))
+        .max(1);
+    let explicit: i64 = columns
+        .iter()
+        .filter_map(|column| column.width)
+        .map(|width| i64::from(width.twips()))
+        .sum();
+    let auto_count = count.saturating_sub(columns.iter().filter(|c| c.width.is_some()).count());
+    let auto_width = if auto_count == 0 {
+        0
+    } else {
+        ((DEFAULT_TABLE_WIDTH_TWIPS - explicit).max(0) / auto_count as i64)
+            .max(i64::from(TableColumn::MIN_WIDTH_TWIPS))
+    };
+    (0..count)
+        .map(
+            |index| match columns.get(index).and_then(|column| column.width) {
+                Some(width) => i64::from(width.twips()),
+                None => auto_width,
+            },
+        )
+        .collect()
+}
+
+/// Where one `w:tc` sits in the grid: how wide it is, how many grid columns
+/// it swallows, whether it continues a merge from the row above, and whether
+/// it is the cell that carries the content.
+#[derive(Clone, Copy)]
+struct CellPlacement {
+    width: i64,
+    grid_span: usize,
+    vertical_merge: Option<&'static str>,
+    content: bool,
+}
+
+/// Where a merged cell starts, for every grid position it covers.
+///
+/// Derived from the spans exactly as [`opendoc_core::table_covered_positions`]
+/// is, but keeping the origin's column and width: writing a row needs to know
+/// whether a covered position is the *left edge* of the rectangle — which
+/// becomes a `w:vMerge` continuation cell — or a position a `w:gridSpan` has
+/// already swallowed, which becomes nothing at all.
+#[derive(Clone, Copy)]
+struct MergeOrigin {
+    column: usize,
+    columns: usize,
+}
+
+fn cell_coverage(rows: &[TableRow]) -> BTreeMap<(usize, usize), MergeOrigin> {
+    let mut coverage = BTreeMap::new();
+    for (row_index, row) in rows.iter().enumerate() {
+        for (column_index, cell) in row.cells.iter().enumerate() {
+            if cell.span.is_single() {
+                continue;
+            }
+            let origin = MergeOrigin {
+                column: column_index,
+                columns: cell.span.columns() as usize,
+            };
+            for covered_row in row_index..row_index + cell.span.rows() as usize {
+                for covered_column in column_index..column_index + origin.columns {
+                    if (covered_row, covered_column) != (row_index, column_index) {
+                        coverage.insert((covered_row, covered_column), origin);
+                    }
+                }
+            }
+        }
+    }
+    coverage
+}
+
 fn hex_value(value: Option<&str>) -> Option<String> {
     let value = value?.trim().trim_start_matches('#');
     if value.len() == 6 && value.chars().all(|ch| ch.is_ascii_hexdigit()) {
@@ -1610,6 +2607,20 @@ fn document_part(body: &str) -> Vec<u8> {
     xml.raw(body);
     xml.close("w:body");
     xml.close("w:document");
+    xml.into_bytes()
+}
+
+/// Word only applies `w:type="even"` header/footer references when this
+/// document setting is present.  Emit it exactly when an OpenDoc even-page
+/// override exists; omitting it would serialize a named variant that Word
+/// silently never displays.
+fn settings_part(even_and_odd_headers: bool) -> Vec<u8> {
+    let mut xml = Xml::part();
+    xml.open("w:settings", &[("xmlns:w", NS_W)]);
+    if even_and_odd_headers {
+        xml.empty("w:evenAndOddHeaders", &[]);
+    }
+    xml.close("w:settings");
     xml.into_bytes()
 }
 
@@ -1693,6 +2704,24 @@ fn styles_part(document: &Document) -> Vec<u8> {
     xml.empty("w:qFormat", &[]);
     xml.close("w:style");
 
+    for (id, name, size, color) in [
+        ("Title", "Title", "52", None),
+        ("Subtitle", "Subtitle", "30", Some("666666")),
+    ] {
+        xml.open("w:style", &[("w:type", "paragraph"), ("w:styleId", id)]);
+        xml.empty("w:name", &[("w:val", name)]);
+        xml.empty("w:basedOn", &[("w:val", "Normal")]);
+        xml.empty("w:qFormat", &[]);
+        xml.open("w:rPr", &[]);
+        xml.empty("w:sz", &[("w:val", size)]);
+        xml.empty("w:szCs", &[("w:val", size)]);
+        if let Some(color) = color {
+            xml.empty("w:color", &[("w:val", color)]);
+        }
+        xml.close("w:rPr");
+        xml.close("w:style");
+    }
+
     for level in 1..=6u8 {
         let id = format!("Heading{level}");
         let size = HEADING_SIZES_HALF_POINTS[usize::from(level) - 1].to_string();
@@ -1701,7 +2730,6 @@ fn styles_part(document: &Document) -> Vec<u8> {
         xml.empty("w:basedOn", &[("w:val", "Normal")]);
         xml.empty("w:qFormat", &[]);
         xml.open("w:pPr", &[]);
-        xml.empty("w:keepNext", &[]);
         xml.empty("w:outlineLvl", &[("w:val", &(level - 1).to_string())]);
         xml.close("w:pPr");
         xml.open("w:rPr", &[]);
@@ -1766,7 +2794,16 @@ fn styles_part(document: &Document) -> Vec<u8> {
 // ---------------------------------------------------------------------------
 
 fn image_extension(media_type: &str, bytes: &[u8]) -> Option<&'static str> {
-    let by_media_type = match media_type.trim().to_ascii_lowercase().as_str() {
+    // MIME tokens are case-insensitive and parameters describe the source
+    // representation, not the file kind a package part must declare.  Keep
+    // the original declaration on the blob; this is only the package-name
+    // projection, matching raw-image save and PDF export.
+    let essence = media_type
+        .split_once(';')
+        .map_or(media_type, |(essence, _)| essence)
+        .trim()
+        .to_ascii_lowercase();
+    let by_media_type = match essence.as_str() {
         "image/png" => Some("png"),
         "image/jpeg" | "image/jpg" => Some("jpeg"),
         "image/gif" => Some("gif"),
@@ -1872,22 +2909,130 @@ fn jpeg_pixels(bytes: &[u8]) -> Option<(u32, u32)> {
 // ---------------------------------------------------------------------------
 
 fn zip_parts(parts: &[(String, Vec<u8>)]) -> Result<Vec<u8>, ImportError> {
-    let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
-    // `SimpleFileOptions::default()` stamps 1980-01-01 because the `time`
-    // feature is off, so the writer never reads a clock — the same export runs
-    // byte-for-byte identically, and nothing traps on wasm32.
-    let options = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated);
-    for (name, bytes) in parts {
-        writer
-            .start_file(name.as_str(), options)
-            .map_err(|err| ImportError::InvalidDocument(format!("DOCX part {name}: {err}")))?;
-        writer
-            .write_all(bytes)
-            .map_err(|err| ImportError::InvalidDocument(format!("DOCX part {name}: {err}")))?;
+    // `zip::ZipWriter` stores its selected Rust deflater inline. Its state is
+    // large enough to overflow an ordinary 2 MiB test-thread stack merely by
+    // starting the next DOCX part, even though all package data is already
+    // owned by this Vec. DOCX permits ZIP's `stored` method, so write the
+    // small deterministic subset we need directly: local headers, bytes, a
+    // central directory and the end record. This keeps packages portable and
+    // makes the in-memory writer stack-bounded on native and wasm builds.
+    const LOCAL_FILE_HEADER: u32 = 0x0403_4b50;
+    const CENTRAL_DIRECTORY_HEADER: u32 = 0x0201_4b50;
+    const END_OF_CENTRAL_DIRECTORY: u32 = 0x0605_4b50;
+    const VERSION_NEEDED: u16 = 20;
+    const UTF8_NAMES: u16 = 1 << 11;
+    // DOS date values encode the day as one-based, so zero is invalid rather
+    // than 1980-01-01. Keep the same fixed stamp zip's writer chose.
+    const DOS_EPOCH_DATE: u16 = 0x0021;
+
+    struct Entry<'a> {
+        name: &'a [u8],
+        crc32: u32,
+        size: u32,
+        local_offset: u32,
     }
-    let cursor = writer
-        .finish()
-        .map_err(|err| ImportError::InvalidDocument(format!("DOCX package: {err}")))?;
-    Ok(cursor.into_inner())
+
+    let mut package = Vec::new();
+    let mut entries = Vec::with_capacity(parts.len());
+    let mut names = BTreeSet::new();
+    for (name, bytes) in parts {
+        let name_bytes = name.as_bytes();
+        if name_bytes.is_empty()
+            || u16::try_from(name_bytes.len()).is_err()
+            || !names.insert(name.as_str())
+        {
+            return Err(ImportError::InvalidDocument(format!(
+                "DOCX part {name:?} has an invalid or duplicate ZIP path"
+            )));
+        }
+        let size = u32::try_from(bytes.len()).map_err(|_| {
+            ImportError::InvalidDocument(format!("DOCX part {name} exceeds ZIP's 4 GiB limit"))
+        })?;
+        let local_offset = u32::try_from(package.len()).map_err(|_| {
+            ImportError::InvalidDocument("DOCX package exceeds ZIP's 4 GiB limit".to_string())
+        })?;
+        push_zip_u32(&mut package, LOCAL_FILE_HEADER);
+        push_zip_u16(&mut package, VERSION_NEEDED);
+        push_zip_u16(&mut package, UTF8_NAMES);
+        push_zip_u16(&mut package, 0); // stored; no deflater or data descriptor
+        push_zip_u16(&mut package, 0); // 00:00, deterministic
+        push_zip_u16(&mut package, DOS_EPOCH_DATE);
+        push_zip_u32(&mut package, zip_crc32(bytes));
+        push_zip_u32(&mut package, size);
+        push_zip_u32(&mut package, size);
+        push_zip_u16(&mut package, name_bytes.len() as u16);
+        push_zip_u16(&mut package, 0);
+        package.extend_from_slice(name_bytes);
+        package.extend_from_slice(bytes);
+        entries.push(Entry {
+            name: name_bytes,
+            crc32: zip_crc32(bytes),
+            size,
+            local_offset,
+        });
+    }
+
+    let central_offset = u32::try_from(package.len()).map_err(|_| {
+        ImportError::InvalidDocument("DOCX package exceeds ZIP's 4 GiB limit".to_string())
+    })?;
+    for entry in &entries {
+        push_zip_u32(&mut package, CENTRAL_DIRECTORY_HEADER);
+        push_zip_u16(&mut package, VERSION_NEEDED);
+        push_zip_u16(&mut package, VERSION_NEEDED);
+        push_zip_u16(&mut package, UTF8_NAMES);
+        push_zip_u16(&mut package, 0);
+        push_zip_u16(&mut package, 0);
+        push_zip_u16(&mut package, DOS_EPOCH_DATE);
+        push_zip_u32(&mut package, entry.crc32);
+        push_zip_u32(&mut package, entry.size);
+        push_zip_u32(&mut package, entry.size);
+        push_zip_u16(&mut package, entry.name.len() as u16);
+        push_zip_u16(&mut package, 0);
+        push_zip_u16(&mut package, 0);
+        push_zip_u16(&mut package, 0);
+        push_zip_u16(&mut package, 0);
+        push_zip_u32(&mut package, 0);
+        push_zip_u32(&mut package, entry.local_offset);
+        package.extend_from_slice(entry.name);
+    }
+    let central_size = u32::try_from(package.len())
+        .ok()
+        .and_then(|end| end.checked_sub(central_offset))
+        .ok_or_else(|| {
+            ImportError::InvalidDocument("DOCX package exceeds ZIP's 4 GiB limit".to_string())
+        })?;
+    let count = u16::try_from(entries.len()).map_err(|_| {
+        ImportError::InvalidDocument("DOCX package has more than 65,535 parts".to_string())
+    })?;
+    push_zip_u32(&mut package, END_OF_CENTRAL_DIRECTORY);
+    push_zip_u16(&mut package, 0);
+    push_zip_u16(&mut package, 0);
+    push_zip_u16(&mut package, count);
+    push_zip_u16(&mut package, count);
+    push_zip_u32(&mut package, central_size);
+    push_zip_u32(&mut package, central_offset);
+    push_zip_u16(&mut package, 0);
+    Ok(package)
+}
+
+fn push_zip_u16(output: &mut Vec<u8>, value: u16) {
+    output.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_zip_u32(output: &mut Vec<u8>, value: u32) {
+    output.extend_from_slice(&value.to_le_bytes());
+}
+
+/// ZIP's standard IEEE CRC-32. The package writer handles only bounded,
+/// caller-owned part bytes; a direct table-free implementation keeps that
+/// boundary dependency-free and avoids a second compression/runtime backend.
+fn zip_crc32(bytes: &[u8]) -> u32 {
+    let mut crc = !0u32;
+    for &byte in bytes {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            crc = (crc >> 1) ^ (0xedb8_8320 & u32::wrapping_neg(crc & 1));
+        }
+    }
+    !crc
 }

@@ -23,6 +23,122 @@ pub(crate) enum MarkRangeResult {
     Missing,
 }
 
+/// The outcome of a value-mark compare-and-set over a whole-inline range.
+/// Unlike ordinary range formatting, a replacement never degrades to one
+/// surviving endpoint: each named inline must still have exactly the value
+/// the proposer reviewed before any inline is changed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MarkReplaceRangeResult {
+    Applied,
+    Missing,
+    Changed,
+}
+
+pub(crate) fn replace_mark_range_if_expected(
+    document: &mut Document,
+    range: &opendoc_core::TextRange,
+    kind: &MarkKind,
+    expected_value: &str,
+    value: &str,
+) -> MarkReplaceRangeResult {
+    let ids = editable_inline_ids(&document.blocks);
+    let (Some(start), Some(end)) = (
+        ids.iter().position(|id| id == &range.start),
+        ids.iter().position(|id| id == &range.end),
+    ) else {
+        return MarkReplaceRangeResult::Missing;
+    };
+    let ids = &ids[start.min(end)..=start.max(end)];
+    if ids
+        .iter()
+        .any(|id| !inline_has_exact_mark_value(&document.blocks, id, kind, expected_value))
+    {
+        return MarkReplaceRangeResult::Changed;
+    }
+    for id in ids {
+        let replaced =
+            replace_mark_value_in_blocks(&mut document.blocks, id, kind, expected_value, value);
+        debug_assert!(replaced);
+    }
+    MarkReplaceRangeResult::Applied
+}
+
+fn inline_has_exact_mark_value(
+    blocks: &[Block],
+    target: &StableId,
+    kind: &MarkKind,
+    expected_value: &str,
+) -> bool {
+    for block in blocks {
+        for inline in &block.content {
+            let marks = match inline {
+                Inline::Text { id, marks, .. } | Inline::Link { id, marks, .. } if id == target => {
+                    marks
+                }
+                _ => continue,
+            };
+            let matching = marks
+                .iter()
+                .filter(|mark| &mark.kind == kind)
+                .collect::<Vec<_>>();
+            return matches!(matching.as_slice(), [mark] if mark.value.as_deref() == Some(expected_value));
+        }
+        if let BlockKind::Table { rows, .. } = &block.kind {
+            for row in rows {
+                for cell in &row.cells {
+                    if inline_has_exact_mark_value(&cell.blocks, target, kind, expected_value) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+fn replace_mark_value_in_blocks(
+    blocks: &mut [Block],
+    target: &StableId,
+    kind: &MarkKind,
+    expected_value: &str,
+    value: &str,
+) -> bool {
+    for block in blocks {
+        for inline in &mut block.content {
+            let marks = match inline {
+                Inline::Text { id, marks, .. } | Inline::Link { id, marks, .. } if id == target => {
+                    marks
+                }
+                _ => continue,
+            };
+            if let Some(mark) = marks
+                .iter_mut()
+                .find(|mark| &mark.kind == kind && mark.value.as_deref() == Some(expected_value))
+            {
+                mark.value = Some(value.to_string());
+                return true;
+            }
+            return false;
+        }
+        if let BlockKind::Table { rows, .. } = &mut block.kind {
+            for row in rows {
+                for cell in &mut row.cells {
+                    if replace_mark_value_in_blocks(
+                        &mut cell.blocks,
+                        target,
+                        kind,
+                        expected_value,
+                        value,
+                    ) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
 pub(crate) fn add_mark_range(
     document: &mut Document,
     range: &opendoc_core::TextRange,
@@ -45,6 +161,33 @@ pub(crate) fn add_mark_range(
     let last = start_index.max(end_index);
     for id in &ids[first..=last] {
         add_mark(document, id, mark.clone());
+    }
+    MarkRangeResult::Applied
+}
+
+pub(crate) fn remove_mark_range(
+    document: &mut Document,
+    range: &opendoc_core::TextRange,
+    kind: &MarkKind,
+    value: Option<&str>,
+) -> MarkRangeResult {
+    let ids = editable_inline_ids(&document.blocks);
+    let Some(start_index) = ids.iter().position(|id| id == &range.start) else {
+        return if ids.iter().any(|id| id == &range.end) {
+            remove_mark(document, &range.end, kind, value);
+            MarkRangeResult::Degraded
+        } else {
+            MarkRangeResult::Missing
+        };
+    };
+    let Some(end_index) = ids.iter().position(|id| id == &range.end) else {
+        remove_mark(document, &range.start, kind, value);
+        return MarkRangeResult::Degraded;
+    };
+    let first = start_index.min(end_index);
+    let last = start_index.max(end_index);
+    for id in &ids[first..=last] {
+        remove_mark(document, id, kind, value);
     }
     MarkRangeResult::Applied
 }

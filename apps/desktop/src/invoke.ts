@@ -5,17 +5,48 @@
 import type { CommandArgs, CommandResult, DesktopCommandName } from "./commands";
 import type {
   AppCommandResult,
-  OpenDocPermissionGrant,
-  OpenDocPresencePeer,
   OpenDocRuntimeConfig,
   OpenDocRuntimeMode,
 } from "./types";
 
 type TauriInvoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
 
+/**
+ * What `storage_ready` reported about durable storage in this runtime.
+ *
+ * `persistent: false` means this tab's work is in memory only — no IndexedDB
+ * at all, or another tab owns it (`notOwner` says which). Rust decides and
+ * describes; the only thing this file does with the answer is keep it and let
+ * the shell say it out loud, because a report nobody reads is the same as no
+ * report (ADR 0008 §5).
+ */
+export type StorageReport = {
+  persistent: boolean;
+  entries?: number;
+  recoverySessions?: number;
+  notOwner?: string;
+  error?: string;
+};
+
+let storageReportValue: StorageReport | null = null;
+
+/** The last `storage_ready` report, or `null` before the core has booted. */
+export function storageReport(): StorageReport | null {
+  return storageReportValue;
+}
+
 declare global {
   interface Window {
     __OPENDOC_RUNTIME__?: OpenDocRuntimeConfig;
+    /**
+     * Durable-storage state, reachable without a dialog so a browser-level
+     * test can drive two real tabs. `collab.ts` publishes its own hook for the
+     * same reason.
+     */
+    __OPENDOC_STORAGE__?: {
+      report: () => StorageReport | null;
+      status: () => unknown;
+    };
     __TAURI__?: {
       core?: { invoke?: TauriInvoke };
       event?: { listen?: (name: string, handler: (event: { payload: unknown }) => void) => Promise<() => void> };
@@ -36,6 +67,26 @@ type WasmModule = {
    */
   storage_ready?: () => Promise<unknown>;
   storage_status?: () => unknown;
+  /**
+   * The collaboration driver (crates/opendoc-wasm/src/collab.rs). Optional for
+   * the same reason storage is: a preloaded module in the jsdom smoke test
+   * must still typecheck, and a build without these is a build with no
+   * collaboration rather than a broken one.
+   */
+  collab_begin?: (documentUuid: string, displayName: string) => string;
+  collab_frame?: (frame: string) => string;
+  collab_closed?: (code: string, message: string) => string;
+  collab_outbox?: () => string;
+  collab_cursor?: (anchor: string) => void;
+  collab_selection_anchor?: (anchor: string) => void;
+  /**
+   * This user's caret as `EditorSelection` JSON, so the core can rebase it
+   * when a collaborator's work arrives. Not the presence anchor above: this
+   * one never leaves the browser.
+   */
+  collab_selection?: (selection: string) => void;
+  collab_leave?: () => string;
+  collab_status?: () => string;
 };
 
 let wasmModule: WasmModule | null = null;
@@ -68,10 +119,16 @@ async function loadWasm(): Promise<WasmModule> {
       // command can read from it. A runtime without IndexedDB resolves too,
       // reporting that it is not persistent.
       try {
-        await module.storage_ready?.();
+        const report = await module.storage_ready?.();
+        storageReportValue = (report as StorageReport | undefined) ?? { persistent: false };
       } catch (error) {
         console.warn("OpenDoc storage is unavailable; this session is not persistent", error);
+        storageReportValue = { persistent: false, error: String(error) };
       }
+      window.__OPENDOC_STORAGE__ = {
+        report: storageReport,
+        status: () => module.storage_status?.() ?? null,
+      };
       wasmModule = module;
       return module;
     })();
@@ -196,6 +253,24 @@ export async function openFile(extensions: string[]): Promise<PickedFile | null>
   });
 }
 
+/**
+ * Downloads a URL and returns it in the same shape `openFile` does.
+ *
+ * Native only, and deliberately so: fetching is network IO with policy
+ * attached — scheme, redirects, a size cap, and refusing to reach addresses on
+ * the user's own machine or LAN — none of which is document semantics and none
+ * of which a page can enforce for itself. The shell owns it beside the file
+ * dialogs; `null` means this runtime cannot do it at all, which is the browser
+ * build's honest answer rather than a half-working one.
+ */
+export async function fetchUrlFile(url: string, maxBytes?: number): Promise<PickedFile | null> {
+  const native = tauriInvoke();
+  if (!native) {
+    return null;
+  }
+  return native<PickedFile>("fetch_url_base64", { url, maxBytes });
+}
+
 /** Save bytes/text: native dialog in Tauri, a download in browsers. */
 export async function saveFile(options: {
   defaultName: string;
@@ -249,6 +324,97 @@ export async function closeWindow(): Promise<void> {
   }
 }
 
+// ---- Collaboration transport -------------------------------------------
+//
+// Two runtimes, two places the socket lives, one shape above them
+// (docs/adr/0018):
+//
+// * **Browser.** `opendoc-service`'s Rust client is built on tokio and must
+//   stay out of the WebAssembly graph, so the page owns the socket and hands
+//   every frame to the Rust driver below. These are that driver's exports —
+//   opaque strings in, a status DTO out. Nothing here reads a frame.
+// * **Tauri.** The native shell owns the socket with the service crate's own
+//   client, so the page never sees a frame at all: it asks the shell to
+//   connect and listens for the status it pushes back.
+//
+// `collab.ts` is the only caller, and it picks by `isTauri()`.
+
+/** The Rust collaboration driver, in the browser build. `null` in Tauri. */
+export type CollabCore = {
+  begin(documentUuid: string, displayName: string): string;
+  frame(text: string): string;
+  closed(code: string, message: string): string;
+  outbox(): string[];
+  cursor(anchor: string): void;
+  selectionAnchor(anchor: string): void;
+  /**
+   * Hands the core this user's caret, as `EditorSelection` JSON or `"null"`.
+   *
+   * The presence anchor (`cursor`) is what other people see; this is what
+   * `apply_remote_operations` rebases so that a collaborator typing in front
+   * of the caret moves it along with the text. The moved caret comes back as
+   * `selection` in the next status, and a caller that shows a caret has to
+   * apply it — see `CollabStatus::selection` in `opendoc-wasm/src/collab.rs`.
+   */
+  selection(json: string): void;
+  leave(): string;
+  status(): string;
+};
+
+export async function collabCore(): Promise<CollabCore | null> {
+  if (isTauri()) {
+    return null;
+  }
+  const module = await loadWasm();
+  if (!module.collab_begin || !module.collab_frame || !module.collab_outbox) {
+    return null;
+  }
+  return {
+    begin: (documentUuid, displayName) => module.collab_begin!(documentUuid, displayName),
+    frame: (text) => module.collab_frame!(text),
+    closed: (code, message) => module.collab_closed?.(code, message) ?? "{}",
+    outbox: () => JSON.parse(module.collab_outbox!()) as string[],
+    cursor: (anchor) => module.collab_cursor?.(anchor),
+    selectionAnchor: (anchor) => module.collab_selection_anchor?.(anchor),
+    selection: (json) => module.collab_selection?.(json),
+    leave: () => module.collab_leave?.() ?? "{}",
+    status: () => module.collab_status?.() ?? "{}",
+  };
+}
+
+/**
+ * A native-only shell command. `null` means this runtime is not Tauri, which
+ * is an answer and not a failure.
+ */
+export async function nativeCommand<T>(
+  command: string,
+  args: Record<string, unknown> = {},
+): Promise<T | null> {
+  const native = tauriInvoke();
+  if (!native) {
+    return null;
+  }
+  return native<T>(command, args);
+}
+
+/**
+ * Subscribes to a native shell event. Returns the unsubscribe function, or
+ * `null` outside Tauri.
+ *
+ * Bound once by the caller and never on a re-runnable path: a listener
+ * attached per render is the bug this frontend has had four times.
+ */
+export async function onNativeEvent(
+  name: string,
+  handler: (payload: unknown) => void,
+): Promise<(() => void) | null> {
+  const listen = window.__TAURI__?.event?.listen;
+  if (!listen) {
+    return null;
+  }
+  return listen(name, (event) => handler(event.payload));
+}
+
 export async function onCloseRequested(handler: () => void): Promise<void> {
   const listen = window.__TAURI__?.event?.listen;
   if (listen) {
@@ -258,11 +424,18 @@ export async function onCloseRequested(handler: () => void): Promise<void> {
 
 // ---- Runtime mode --------------------------------------------------------
 
+/**
+ * What the host says about itself: capabilities, and a display name for the
+ * local user.
+ *
+ * Not permissions and not presence. In a service runtime those are the
+ * service's answers, delivered over the collaboration transport to the Rust
+ * core; a page that could declare them here would be declaring its own access,
+ * which is exactly the shape `authorize_runtime_command` no longer has.
+ */
 export type RuntimeConfig = {
   mode: OpenDocRuntimeMode;
   subject: string | null;
-  presence: OpenDocPresencePeer[];
-  permissions: OpenDocPermissionGrant[];
   storageBackends: string[] | null;
   signingEnabled: boolean | null;
 };
@@ -274,8 +447,6 @@ export function runtimeConfig(): RuntimeConfig {
   return {
     mode,
     subject: configured?.subject ?? null,
-    presence: configured?.presence ?? [],
-    permissions: configured?.permissions ?? [],
     storageBackends: configured?.storageBackends ?? null,
     signingEnabled: configured?.signingEnabled ?? null,
   };

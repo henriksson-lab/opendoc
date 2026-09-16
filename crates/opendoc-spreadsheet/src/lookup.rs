@@ -13,11 +13,32 @@ fn lookup_key(ev: &mut Evaluator<'_>, expr: &Expr) -> Result<FormulaValue, Formu
     }
 }
 
+/// The `*`, `?` and `~` a text key may carry into an exact-match lookup.
+fn wildcard_pattern(key: &FormulaValue) -> Option<String> {
+    let FormulaValue::Text(text) = key else {
+        return None;
+    };
+    text.bytes()
+        .any(|byte| matches!(byte, b'*' | b'?' | b'~'))
+        .then(|| text.to_ascii_lowercase())
+}
+
 /// Finds the position of `key` in `values` using Google Sheets match modes:
 /// `0` exact, `1` largest value <= key, `-1` smallest value >= key.
 fn match_position(key: &FormulaValue, values: &[FormulaValue], mode: i32) -> Option<usize> {
     match mode {
-        0 => values.iter().position(|value| values_match(key, value)),
+        // Exact match takes wildcards, the same ones COUNTIF/SUMIF and
+        // XLOOKUP's match mode 2 already accept: `=MATCH("a*", A1:A9, 0)`
+        // finds the first entry starting with "a". Only mode 0 does — a
+        // sorted search has no meaning for a pattern.
+        0 => match wildcard_pattern(key) {
+            Some(pattern) => values.iter().position(|value| {
+                value.to_text().is_ok_and(|text| {
+                    wildcard_text_matches(text.to_ascii_lowercase().as_bytes(), pattern.as_bytes())
+                })
+            }),
+            None => values.iter().position(|value| values_match(key, value)),
+        },
         1 => {
             let mut best = None;
             for (index, value) in values.iter().enumerate() {

@@ -13,9 +13,20 @@
     "allow-pick-open-path",
     "allow-pick-save-path",
     "allow-read-file-base64",
+    "allow-fetch-url-base64",
     "allow-write-file-base64",
     "allow-write-file-text",
     "allow-close-window",
-    "allow-set-window-title"
+    "allow-set-window-title",
+    "allow-collab-connect",
+    "allow-collab-disconnect",
+    "allow-collab-cursor",
+    "allow-collab-selection",
+    "allow-collab-selection-anchor",
+    "allow-collab-status",
+    "allow-collab-list-grants",
+    "allow-collab-list-grant-audit",
+    "allow-collab-set-grant",
+    "allow-collab-share-link"
   ]
 }

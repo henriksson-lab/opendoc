@@ -19,17 +19,63 @@ use crate::*;
 /// no attribute is written at all, which is what leaves the image at its
 /// intrinsic size.
 pub(crate) fn image_size_css(layout: &ImageLayout) -> String {
-    if layout.width.is_none() && layout.height.is_none() {
+    if layout.width.is_none()
+        && layout.height.is_none()
+        && layout.rotation_degrees.is_none()
+        && layout.opacity_percent.is_none()
+        && layout.crop.is_none()
+        && layout.border.is_none()
+    {
         return String::new();
     }
     let axis = |length: Option<opendoc_core::Length>| match length {
         Some(length) => twips_to_css_pt(length.twips()),
         None => "auto".to_string(),
     };
+    let mut css = String::new();
+    if layout.width.is_some() || layout.height.is_some() {
+        css.push_str(&format!(
+            "width: {}; height: {};",
+            axis(layout.width),
+            axis(layout.height)
+        ));
+    }
+    if let Some(rotation) = layout.rotation_degrees {
+        css.push_str(&format!("transform: rotate({rotation}deg);"));
+    }
+    if let Some(opacity) = layout.opacity_percent {
+        css.push_str(&format!("opacity: {};", f32::from(opacity) / 100.0));
+    }
+    if let Some(crop) = layout.crop {
+        css.push_str(&format!(
+            "clip-path: inset({}% {}% {}% {}%);",
+            crop.top_percent, crop.right_percent, crop.bottom_percent, crop.left_percent
+        ));
+    }
+    if let Some(border) = layout.border {
+        css.push_str(&format!(
+            "box-sizing: border-box; border: {} {} {};",
+            twips_to_css_pt(border.width().twips()),
+            border.style().as_str(),
+            border.color().as_hex()
+        ));
+    }
+    format!(" style=\"{css}\"")
+}
+
+/// The authored logical clearance belongs on the float's figure, while image
+/// pixels retain their own size/effect style. CSS custom properties keep the
+/// stylesheet responsible for physical side selection.
+pub(crate) fn image_wrap_clearance_css(layout: &ImageLayout) -> String {
+    let Some(clearance) = layout.wrap_clearance else {
+        return String::new();
+    };
     format!(
-        " style=\"width: {}; height: {};\"",
-        axis(layout.width),
-        axis(layout.height)
+        "--doc-image-clearance-top: {}; --doc-image-clearance-end: {}; --doc-image-clearance-bottom: {}; --doc-image-clearance-start: {};",
+        twips_to_css_pt(clearance.top.twips()),
+        twips_to_css_pt(clearance.end.twips()),
+        twips_to_css_pt(clearance.bottom.twips()),
+        twips_to_css_pt(clearance.start.twips()),
     )
 }
 
@@ -181,13 +227,50 @@ pub(crate) fn block_property_css(properties: &BlockProperties) -> String {
         }
     }
     if let Some(length) = properties.space_before {
-        let _ = write!(css, "margin-top:{};", twips_to_css_pt(length.twips()));
+        // Logical, like the indents above, and for a second reason as well.
+        //
+        // The model means "space before this block in flow order", which is
+        // what `margin-block-start` says and what `margin-top` only happens
+        // to say in a horizontal writing mode. It also keeps this projection
+        // out of the one property the *frontend* owns: pagination pushes a
+        // page-opening block down the physical page with an inline
+        // `margin-top`, and because the two are different CSSOM properties
+        // the placement can be written and cleared without ever destroying
+        // the document's own spacing. A physical projection here shared a
+        // property with the placement, so applying a layout silently deleted
+        // every space-before in the document.
+        let _ = write!(
+            css,
+            "margin-block-start:{};",
+            twips_to_css_pt(length.twips())
+        );
     }
     if let Some(length) = properties.space_after {
-        let _ = write!(css, "margin-bottom:{};", twips_to_css_pt(length.twips()));
+        let _ = write!(css, "margin-block-end:{};", twips_to_css_pt(length.twips()));
     }
     if let Some(direction) = properties.direction {
         let _ = write!(css, "direction:{};", direction.as_str());
+    }
+    if let Some(background) = properties.background {
+        let _ = write!(css, "background-color:{};", background.as_hex());
+    }
+    if let Some(border) = properties.border {
+        if border.style() == opendoc_core::BorderStyle::None {
+            css.push_str("border:none;");
+        } else {
+            let _ = write!(
+                css,
+                "box-sizing:border-box;border:{} {} {};",
+                twips_to_css_pt(border.width().twips()),
+                border.style().as_str(),
+                border.color().as_hex()
+            );
+        }
+    }
+    if properties.keep_with_next == Some(true) {
+        // Mirrors the paper layout rule. `avoid-page` leaves the browser free
+        // to break an over-tall pair rather than create an impossible flow.
+        css.push_str("break-after:avoid-page;");
     }
     css
 }
@@ -195,11 +278,16 @@ pub(crate) fn block_property_css(properties: &BlockProperties) -> String {
 pub(crate) fn block_kind_label(kind: &BlockKind) -> &'static str {
     match kind {
         BlockKind::Paragraph => "paragraph",
+        BlockKind::Title => "title",
+        BlockKind::Subtitle => "subtitle",
         BlockKind::Heading { .. } => "heading",
         BlockKind::ListItem { .. } => "list-item",
         BlockKind::Table { .. } => "table",
         BlockKind::EquationBlock { .. } => "equation-block",
         BlockKind::Image { .. } => "image",
+        BlockKind::HorizontalRule => "horizontal-rule",
+        BlockKind::TableOfContents { .. } => "table-of-contents",
+        BlockKind::Bibliography => "bibliography",
         BlockKind::PageBreak => "page-break",
     }
 }

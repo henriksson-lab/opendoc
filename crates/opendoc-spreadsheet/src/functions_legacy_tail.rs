@@ -350,8 +350,10 @@ pub fn erf_approx(value: f64) -> f64 {
 }
 
 pub fn geometric_mean(values: Vec<f64>) -> Result<f64, String> {
+    // No numbers is a domain problem, not a type problem: every
+    // spreadsheet answers #NUM! here.
     if values.is_empty() {
-        return Err("#VALUE!".to_string());
+        return Err("#NUM!".to_string());
     }
     if values
         .iter()
@@ -369,8 +371,10 @@ pub fn geometric_mean(values: Vec<f64>) -> Result<f64, String> {
 }
 
 pub fn harmonic_mean(values: Vec<f64>) -> Result<f64, String> {
+    // No numbers is a domain problem, not a type problem: every
+    // spreadsheet answers #NUM! here.
     if values.is_empty() {
-        return Err("#VALUE!".to_string());
+        return Err("#NUM!".to_string());
     }
     if values
         .iter()

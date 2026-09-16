@@ -1,6 +1,6 @@
 //! The converter: WordprocessingML body into the canonical document model.
 
-use crate::docx::package::{media_name, DocxParts};
+use crate::docx::package::{media_name, DocxParts, Relationship};
 use crate::docx::props::{
     overlay_para_props, parse_para_props, parse_run_props, toggle_value, RunProps,
 };
@@ -10,39 +10,353 @@ use crate::docx::revisions::{
 };
 use crate::docx::section::{
     furniture_references, page_number_field, parse_page_setup,
-    section_has_unrepresentable_properties,
+    section_has_unrepresentable_properties, section_starts_new_page,
 };
 use crate::docx::styles::{parse_num_pr, HeadingStyle};
-use crate::docx::util::{collect_wrapped, parse_iso_datetime_ms};
+use crate::docx::table::plan_table;
+use crate::docx::util::parse_iso_datetime_ms;
 use crate::docx::warnings::{
-    DroppedCounter, COMMENT_ANCHOR_DEGRADED, DROPPED_ALT_CHUNK, DROPPED_CELL_SPAN, DROPPED_DRAWING,
-    DROPPED_FORMAT_CHANGE, DROPPED_FURNITURE_CONTENT, DROPPED_HEADER_FOOTER, DROPPED_NESTED_IMAGE,
-    DROPPED_NESTED_REVISION, DROPPED_PARAGRAPH_CHANGE, DROPPED_RUN_PROPERTY,
-    DROPPED_SECTION_PROPERTIES, DROPPED_TEXT_BOX, EMPTY_COMMENT, EMPTY_FOOTNOTE,
-    ENDNOTES_AS_FOOTNOTES, INVALID_PAGE_SETUP, MISSING_FOOTNOTE, MISSING_IMAGE_BLOB, NESTED_TABLE,
-    SPLIT_INLINE_IMAGE, SPLIT_PAGE_BREAK, TITLE_STYLE_AS_HEADING, UNKNOWN_LIST_DEFINITION,
+    DroppedCounter, COMMENT_ANCHOR_DEGRADED, DROPPED_ALT_CHUNK, DROPPED_BOOKMARK_DUPLICATE,
+    DROPPED_BOOKMARK_NAME, DROPPED_BOOKMARK_RANGE, DROPPED_DRAWING, DROPPED_FORMAT_CHANGE,
+    DROPPED_FURNITURE_CONTENT, DROPPED_HEADER_FOOTER, DROPPED_IMAGE_BORDER, DROPPED_IMAGE_CROP,
+    DROPPED_IMAGE_OPACITY, DROPPED_NESTED_IMAGE, DROPPED_NESTED_REVISION, DROPPED_PARAGRAPH_CHANGE,
+    DROPPED_POSITIONED_IMAGE, DROPPED_RUN_PROPERTY, DROPPED_SECTION_PROPERTIES, DROPPED_TEXT_BOX,
+    EMPTY_COMMENT, EMPTY_FOOTNOTE, INVALID_PAGE_SETUP, MISSING_FOOTNOTE, MISSING_IMAGE_BLOB,
+    NESTED_TABLE, SPLIT_INLINE_IMAGE, SPLIT_PAGE_BREAK, TABLE_MERGE_REPAIRED, TABLE_NESTING_LIMIT,
+    UNKNOWN_LIST_DEFINITION,
 };
 use crate::docx::DocxImport;
 use crate::xml::XmlElement;
 use crate::ImportError;
 use opendoc_core::{
-    Anchor, Block, BlockKind, BlockProperties, Comment, CommentThread, Document, Equation,
-    EquationSourceFormat, Footnote, Inline, ListKind, Mark, ModelWarning, StableId, Suggestion,
-    SuggestionKind, SuggestionState, TableCell, TableRow, TextRange,
+    validate_table_geometry, Anchor, BibliographyReference, Block, BlockKind, BlockProperties,
+    Bookmark, BorderStyle, CellBorder, CellSpan, CitationGroup, CitationItem, CitationPlacement,
+    CitationSource, CitationSourceFormat, CitationSummary, Color, Comment, CommentThread, Document,
+    Equation, EquationSourceFormat, Footnote, HeaderFooterSlot, ImageCrop, ImageLayout,
+    ImagePlacement, Inline, Length, ListKind, ListProperties, Mark, ModelWarning,
+    OrderedListFormat, PositionedImage, PositionedImageAnchor, PositionedImageLayer, StableId,
+    Suggestion, SuggestionKind, SuggestionState, TableCell, TableColumn, TableRow, TextRange,
 };
 use std::collections::{BTreeMap, BTreeSet};
+
+/// How deeply tables may nest before the structure is flattened.
+///
+/// `crate::xml::MAX_XML_DEPTH` already bounds the recursion here — a deeper
+/// tree does not exist — so this is a *model* limit, not a safety one: a table
+/// nested sixteen deep is not a table anyone reads, and every level costs a
+/// `TableCell` walk in layout, render, merge and export.
+const MAX_TABLE_DEPTH: usize = 16;
+
+/// A DOCX bookmark that has already been proven to be a whole-paragraph
+/// range.  OpenDoc deliberately does not have character-position bookmarks;
+/// this is the one Word shape whose target has an unambiguous stable-block
+/// projection (and is the shape our DOCX writer produces).
+#[derive(Clone, Debug)]
+struct ParagraphBookmark {
+    name: String,
+}
 
 pub(super) struct Converter<'a> {
     parts: &'a DocxParts,
     warnings: Vec<ModelWarning>,
     dropped: DroppedCounter,
     list_ids: BTreeMap<String, StableId>,
+    /// Concrete levels that actually occurred in the body for each Word
+    /// numbering instance. Abstract definitions commonly declare all nine
+    /// levels; importing those unused defaults would create source state the
+    /// document never expressed.
+    list_levels: BTreeMap<String, BTreeSet<u8>>,
     note_ids: BTreeMap<(bool, String), StableId>,
     footnotes: Vec<Footnote>,
+    endnote_ids: BTreeSet<StableId>,
     comment_ranges: BTreeMap<String, CommentRange>,
     open_comment_ranges: Vec<String>,
     suggestions: Vec<Suggestion>,
     block_ids: BTreeSet<StableId>,
+    bookmarks: Vec<Bookmark>,
+    bookmark_names: BTreeSet<String>,
+    /// Relationship identifiers are local to a Word part.  While walking a
+    /// header or footer this names its owning main-document relationship so
+    /// drawings and hyperlinks resolve in that part rather than in the body.
+    active_furniture: Option<String>,
+}
+
+/// Read Word's `wp:extent` in EMUs into the canonical twip geometry. A public
+/// Google Doc is downloaded as DOCX, so preserving this size here also keeps
+/// its imported images from unexpectedly expanding to the column width.
+///
+/// DOCX permits non-integral twips; round to the nearest representable twip.
+/// A malformed or impractically small/large extent is treated as unspecified,
+/// just as an absent extent is, rather than making the entire document fail
+/// validation because of one drawing.
+fn docx_image_layout(element: &XmlElement) -> (ImageLayout, bool, bool, bool) {
+    const EMUS_PER_TWIP: i64 = 635;
+    let dimension = |name: &str| {
+        let extent = element.find_descendant("extent")?;
+        let emus = extent.attr(name)?.trim().parse::<i64>().ok()?;
+        let twips = emus.checked_add(EMUS_PER_TWIP / 2)? / EMUS_PER_TWIP;
+        let twips = i32::try_from(twips).ok()?;
+        let length = Length::from_twips(twips).ok()?;
+        (ImageLayout::MIN_TWIPS..=ImageLayout::MAX_TWIPS)
+            .contains(&length.twips())
+            .then_some(length)
+    };
+    let mut layout = ImageLayout {
+        width: dimension("cx"),
+        height: dimension("cy"),
+        ..ImageLayout::default()
+    };
+    // DrawingML stores clockwise rotation in 1/60,000ths of a degree. A
+    // complete turn is visual identity, so keep the canonical source absent
+    // rather than writing a needless 360 into a document that stated none.
+    layout.rotation_degrees = element
+        .find_descendant("xfrm")
+        .and_then(|transform| transform.attr("rot"))
+        .and_then(|raw| raw.trim().parse::<i32>().ok())
+        .and_then(drawingml_rotation_degrees);
+    // DrawingML `srcRect` uses thousandths of a percent. The model's whole
+    // percentages are intentional: they are what the desktop UI can edit
+    // precisely, so round imported fractions to its nearest honest value.
+    let (crop, malformed_crop) = match element.find_descendant("srcRect") {
+        None => (None, false),
+        Some(source_rect) => {
+            let edge = |name: &str| {
+                source_rect
+                    .attr(name)
+                    .unwrap_or("0")
+                    .trim()
+                    .parse::<u32>()
+                    .ok()
+                    .and_then(|value| u8::try_from((value + 500) / 1_000).ok())
+            };
+            match (edge("l"), edge("t"), edge("r"), edge("b")) {
+                (
+                    Some(left_percent),
+                    Some(top_percent),
+                    Some(right_percent),
+                    Some(bottom_percent),
+                ) => {
+                    let crop = ImageCrop {
+                        left_percent,
+                        top_percent,
+                        right_percent,
+                        bottom_percent,
+                    };
+                    if crop.is_empty() {
+                        // An empty `srcRect` is the source's explicit identity
+                        // crop. Canonicalising it to absence loses no appearance.
+                        (None, false)
+                    } else if crop.validate().is_ok() {
+                        (Some(crop), false)
+                    } else {
+                        (None, true)
+                    }
+                }
+                _ => (None, true),
+            }
+        }
+    };
+    layout.crop = crop;
+    // `a:alphaModFix@amt` is opacity in thousandths of a percent. The model
+    // intentionally exposes whole percentages, so retain the nearest model
+    // value rather than dropping an explicit DrawingML transparency effect.
+    // Values outside the schema's 0..=100000 range are malformed and remain
+    // absent, just like an invalid extent or crop above.
+    let (opacity, malformed_opacity) = match element.find_descendant("alphaModFix") {
+        Some(alpha) => match alpha
+            .attr("amt")
+            .and_then(|raw| raw.trim().parse::<u32>().ok())
+            .filter(|amount| *amount <= 100_000)
+        {
+            Some(amount) => (u8::try_from((amount + 500) / 1_000).ok(), false),
+            None => (None, true),
+        },
+        None => (None, false),
+    };
+    layout.opacity_percent = opacity;
+    // `a:ln` is the DrawingML picture outline.  Preserve precisely the
+    // solid/dash/dot + sRGB subset our writer produces; gradient/pattern
+    // fills and other dash presets have no truthful CellBorder equivalent.
+    let (border, malformed_border) = docx_image_border(element);
+    layout.border = border;
+    // A square-wrapped anchor aligned to a column edge is exactly the
+    // block-level wrap model OpenDoc has. Other anchor geometry remains
+    // intentionally unmodelled rather than being mistaken for this subset.
+    layout.placement = element.find_descendant("anchor").and_then(|anchor| {
+        anchor.child("wrapSquare")?;
+        let horizontal = anchor.child("positionH")?;
+        (horizontal.attr("relativeFrom") == Some("column"))
+            .then(|| horizontal.child("align"))
+            .flatten()
+            .and_then(|align| match align.text().trim() {
+                "left" => Some(ImagePlacement::WrapStart),
+                "right" => Some(ImagePlacement::WrapEnd),
+                _ => None,
+            })
+    });
+    layout.positioned = docx_page_content_position(element);
+    (layout, malformed_opacity, malformed_crop, malformed_border)
+}
+
+/// Converts DrawingML's 1/60,000-degree rotation to the model's whole degree
+/// with signed nearest-value rounding. Integer division truncates toward zero,
+/// which used to turn a 0.999-degree source rotation into an absent effect.
+/// A complete turn is visual identity in either sign and is deliberately
+/// canonicalised to absence.
+fn drawingml_rotation_degrees(units: i32) -> Option<i16> {
+    const UNITS_PER_DEGREE: i64 = 60_000;
+    let units = i64::from(units);
+    let rounded = if units >= 0 {
+        (units + UNITS_PER_DEGREE / 2) / UNITS_PER_DEGREE
+    } else {
+        (units - UNITS_PER_DEGREE / 2) / UNITS_PER_DEGREE
+    };
+    let degrees = i16::try_from(rounded).ok()?;
+    (degrees != 0 && degrees.unsigned_abs() != 360 && (-360..=360).contains(&degrees))
+        .then_some(degrees)
+}
+
+/// Read the exact DrawingML picture-outline subset the writer emits.  A
+/// visible outline that falls outside it must be named: silently treating a
+/// gradient, themed, or unsupported dash line as no border loses authored
+/// presentation just as surely as malformed crop does.
+fn docx_image_border(element: &XmlElement) -> (Option<CellBorder>, bool) {
+    const EMUS_PER_TWIP: i64 = 635;
+    let Some(line) = element
+        .find_descendant("spPr")
+        .and_then(|properties| properties.child("ln"))
+    else {
+        return (None, false);
+    };
+    // An explicit no-fill line is visually identical to an absent outline.
+    if line.child("noFill").is_some() {
+        return (None, false);
+    }
+    let Some(emus) = line
+        .attr("w")
+        .and_then(|value| value.trim().parse::<i64>().ok())
+    else {
+        return (None, true);
+    };
+    let rounded = if emus >= 0 {
+        match emus.checked_add(EMUS_PER_TWIP / 2) {
+            Some(value) => value,
+            None => return (None, true),
+        }
+    } else {
+        match emus.checked_sub(EMUS_PER_TWIP / 2) {
+            Some(value) => value,
+            None => return (None, true),
+        }
+    } / EMUS_PER_TWIP;
+    let Some(width) = i32::try_from(rounded)
+        .ok()
+        .and_then(|twips| Length::from_twips(twips).ok())
+    else {
+        return (None, true);
+    };
+    let Some(color) = line
+        .find_descendant("srgbClr")
+        .and_then(|source| source.attr("val"))
+        .map(str::trim)
+        .filter(|value| value.len() == 6)
+        .and_then(|value| Color::parse(&format!("#{value}")).ok())
+    else {
+        return (None, true);
+    };
+    let style = match line
+        .child("prstDash")
+        .and_then(|dash| dash.attr("val"))
+        .unwrap_or("solid")
+    {
+        "solid" => BorderStyle::Solid,
+        "dash" => BorderStyle::Dashed,
+        "dot" => BorderStyle::Dotted,
+        _ => return (None, true),
+    };
+    match CellBorder::new(style, width, color) {
+        Ok(border) => (Some(border), false),
+        Err(_) => (None, true),
+    }
+}
+
+/// The useful, lossless WordprocessingML subset for our page-content image
+/// tuple. `margin` is Word's page content rectangle (rather than its physical
+/// page edge); unlike a paragraph-relative anchor, it has no implicit source
+/// paragraph whose identity we would have to invent on import.
+fn docx_page_content_position(element: &XmlElement) -> Option<PositionedImage> {
+    const EMUS_PER_TWIP: i64 = 635;
+    let anchor = element.find_descendant("anchor")?;
+    anchor.child("wrapNone")?;
+    // `behindDoc` only tells us on which side of text the picture paints.
+    // A nonzero `relativeHeight` additionally orders it among other floating
+    // objects.  OpenDoc's two-layer tuple deliberately has no such z-order,
+    // so accepting it here would make a source ordering silently disappear.
+    if !matches!(anchor.attr("relativeHeight"), None | Some("0")) {
+        return None;
+    }
+    let offset = |axis: &str| {
+        let position = anchor.child(axis)?;
+        if position.attr("relativeFrom") != Some("margin") {
+            return None;
+        }
+        let emus = position
+            .child("posOffset")?
+            .text()
+            .trim()
+            .parse::<i64>()
+            .ok()?;
+        let rounded = if emus >= 0 {
+            emus.checked_add(EMUS_PER_TWIP / 2)?
+        } else {
+            emus.checked_sub(EMUS_PER_TWIP / 2)?
+        } / EMUS_PER_TWIP;
+        Length::from_twips(i32::try_from(rounded).ok()?).ok()
+    };
+    let horizontal_offset = offset("positionH")?;
+    let vertical_offset = offset("positionV")?;
+    let layer = match anchor.attr("behindDoc").unwrap_or("0") {
+        "1" | "true" | "on" => PositionedImageLayer::BehindText,
+        "0" | "false" | "off" => PositionedImageLayer::InFrontOfText,
+        _ => return None,
+    };
+    Some(PositionedImage {
+        anchor: PositionedImageAnchor::PageContent,
+        horizontal_offset,
+        vertical_offset,
+        layer,
+    })
+}
+
+/// The wrapped, column-edge subset below maps to the in-flow placement model.
+/// Every other `wp:anchor` carries object positioning that ADR 0022 says must
+/// not be guessed from a partial tuple.
+fn has_unmapped_positioned_image(element: &XmlElement) -> bool {
+    let Some(anchor) = element.find_descendant("anchor") else {
+        return false;
+    };
+    if docx_page_content_position(element).is_some() {
+        return false;
+    }
+    let Some(horizontal) = anchor.child("positionH") else {
+        return true;
+    };
+    // The in-flow model captures only the writer's column-edge square-wrap
+    // subset.  `wrapText=left|right`, a behind-text layer, or an explicit
+    // z-order changes what Word paints; projecting any of those merely as
+    // `WrapStart`/`WrapEnd` would claim a faithful positioned-object mapping
+    // where none exists. Keep the useful horizontal side as an approximation,
+    // but make the source loss visible through the existing warning.
+    let supported_alignment = horizontal.attr("relativeFrom") == Some("column")
+        && horizontal
+            .child("align")
+            .is_some_and(|align| matches!(align.text().trim(), "left" | "right"))
+        && anchor
+            .child("wrapSquare")
+            .is_some_and(|wrap| matches!(wrap.attr("wrapText"), None | Some("bothSides")))
+        && matches!(anchor.attr("behindDoc"), None | Some("0" | "false" | "off"))
+        && matches!(anchor.attr("relativeHeight"), None | Some("0"));
+    !supported_alignment
 }
 
 pub(super) fn convert_parts(title: &str, parts: &DocxParts) -> Result<DocxImport, ImportError> {
@@ -51,12 +365,17 @@ pub(super) fn convert_parts(title: &str, parts: &DocxParts) -> Result<DocxImport
         warnings: Vec::new(),
         dropped: DroppedCounter::default(),
         list_ids: BTreeMap::new(),
+        list_levels: BTreeMap::new(),
         note_ids: BTreeMap::new(),
         footnotes: Vec::new(),
+        endnote_ids: BTreeSet::new(),
         comment_ranges: BTreeMap::new(),
         open_comment_ranges: Vec::new(),
         suggestions: Vec::new(),
         block_ids: BTreeSet::new(),
+        bookmarks: Vec::new(),
+        bookmark_names: BTreeSet::new(),
+        active_furniture: None,
     };
     if let Some(footnotes) = &parts.footnotes {
         converter.import_notes(footnotes, false);
@@ -71,6 +390,7 @@ pub(super) fn convert_parts(title: &str, parts: &DocxParts) -> Result<DocxImport
     if document.blocks.is_empty() {
         return Err(ImportError::EmptyInput);
     }
+    converter.install_list_starts(&mut document);
     // Section properties are read after the body, not during the walk: the
     // body-level `w:sectPr` is the *document's* page, while a `w:sectPr`
     // inside a paragraph's `w:pPr` marks an extra section OpenDoc has no
@@ -78,8 +398,11 @@ pub(super) fn convert_parts(title: &str, parts: &DocxParts) -> Result<DocxImport
     converter.import_section(body.child("sectPr"), &mut document);
     document.comments = converter.import_comments();
     document.footnotes = std::mem::take(&mut converter.footnotes);
+    document.endnote_ids = std::mem::take(&mut converter.endnote_ids);
     document.suggestions = std::mem::take(&mut converter.suggestions);
+    document.bookmarks = std::mem::take(&mut converter.bookmarks);
     let mut warnings = std::mem::take(&mut converter.warnings);
+    import_paperpile_docx_citations(&mut document, &mut warnings);
     warnings.extend(converter.dropped.into_warnings());
     document.warnings = warnings.clone();
     document
@@ -90,6 +413,12 @@ pub(super) fn convert_parts(title: &str, parts: &DocxParts) -> Result<DocxImport
     let blobs = parts
         .media
         .values()
+        .chain(
+            parts
+                .furniture_media
+                .values()
+                .flat_map(|media| media.values()),
+        )
         .filter(|blob| seen_hashes.insert(blob.hash.clone()))
         .cloned()
         .collect();
@@ -98,6 +427,179 @@ pub(super) fn convert_parts(title: &str, parts: &DocxParts) -> Result<DocxImport
         warnings,
         blobs,
     })
+}
+
+/// Reifies the citation identity Paperpile writes into Google Docs' DOCX
+/// export. Its body citations are hyperlinks of the form
+/// `paperpile.com/c/<document-key>/<item-key+…>`; its bibliography entries
+/// use `/b/` instead. We deliberately only look at `/c/` links, because a
+/// Paperpile bibliography can be stale or include unused references.
+///
+/// The link names the cited Paperpile item keys and retains the rendered
+/// label, but it does not contain bibliographic metadata. The public Paperpile
+/// endpoint requires the add-on's authenticated document access, so each
+/// reference is stored as an opaque source instead of inventing metadata from
+/// the reference list or the network.
+fn import_paperpile_docx_citations(document: &mut Document, warnings: &mut Vec<ModelWarning>) {
+    // Paperpile item keys are scoped to the Paperpile document named by the
+    // citation hyperlink.  Keeping that scope means that a combined import
+    // cannot accidentally conflate two otherwise equal keys, and retaining
+    // the original occurrence URL gives a future authenticated adapter the
+    // exact direct source it would need.  In particular, do not consult the
+    // `/b/` links in the rendered reference list for either identity or
+    // metadata: that list is not the citation occurrence source.
+    let mut references = BTreeMap::<(String, String), PaperpileReference>::new();
+    let mut groups = Vec::new();
+    for block in &mut document.blocks {
+        replace_paperpile_links_in_block(block, &mut references, &mut groups);
+    }
+    for footnote in &mut document.footnotes {
+        replace_paperpile_links_inlines(&mut footnote.body, &mut references, &mut groups);
+    }
+    if groups.is_empty() {
+        return;
+    }
+    document.citation_database.references = references
+        .into_iter()
+        .map(|((document_key, key), reference)| BibliographyReference {
+            id: reference.id,
+            revision: 0,
+            source: CitationSource {
+                format: CitationSourceFormat::Unknown("paperpile-docx-link".to_string()),
+                // This is intentionally the direct citation link, rather
+                // than a synthesized record or a URL from the bibliography.
+                // It contains the document and the ordered group of item keys
+                // that appeared at the occurrence.
+                bytes: reference.source_href.into_bytes(),
+            },
+            summary: CitationSummary {
+                title: format!("Paperpile reference {document_key}/{key}"),
+                authors: Vec::new(),
+                issued: None,
+                doi: None,
+                url: None,
+            },
+            deleted: false,
+        })
+        .collect();
+    document.citation_database.citations = groups;
+    warnings.push(ModelWarning {
+        code: "paperpile-docx-citations".to_string(),
+        message: "imported Paperpile body citation links, scoped item keys, and rendered labels; bibliography entries were not used because Paperpile metadata is not present in the public export".to_string(),
+    });
+}
+
+fn replace_paperpile_links_in_block(
+    block: &mut Block,
+    references: &mut BTreeMap<(String, String), PaperpileReference>,
+    groups: &mut Vec<CitationGroup>,
+) {
+    replace_paperpile_links_inlines(&mut block.content, references, groups);
+    if let BlockKind::Table { rows, .. } = &mut block.kind {
+        for row in rows {
+            for cell in &mut row.cells {
+                for nested in &mut cell.blocks {
+                    replace_paperpile_links_in_block(nested, references, groups);
+                }
+            }
+        }
+    }
+}
+
+fn replace_paperpile_links_inlines(
+    inlines: &mut [Inline],
+    references: &mut BTreeMap<(String, String), PaperpileReference>,
+    groups: &mut Vec<CitationGroup>,
+) {
+    for inline in inlines {
+        let Inline::Link { text, href, .. } = inline else {
+            continue;
+        };
+        let Some(citation_link) = paperpile_citation_link(href) else {
+            continue;
+        };
+        if text.trim().is_empty() {
+            continue;
+        }
+        let items = citation_link
+            .keys
+            .into_iter()
+            .map(|key| CitationItem {
+                reference_id: references
+                    .entry((citation_link.document_key.clone(), key))
+                    .or_insert_with(|| PaperpileReference {
+                        id: StableId::new("paperpile-reference"),
+                        source_href: citation_link.href.clone(),
+                    })
+                    .id
+                    .clone(),
+                locator: None,
+                label: None,
+                prefix: None,
+                suffix: None,
+                suppress_author: false,
+            })
+            .collect();
+        let citation_id = StableId::new("paperpile-citation");
+        groups.push(CitationGroup {
+            id: citation_id.clone(),
+            revision: 0,
+            items,
+            placement: CitationPlacement::Inline,
+            rendered_cache: Some(text.clone()),
+            deleted: false,
+        });
+        *inline = Inline::Citation {
+            id: StableId::new("citation-label"),
+            citation_id,
+            rendered_cache: Some(text.clone()),
+        };
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PaperpileReference {
+    id: StableId,
+    source_href: String,
+}
+
+#[derive(Clone, Debug)]
+struct PaperpileCitationLink {
+    document_key: String,
+    keys: Vec<String>,
+    href: String,
+}
+
+fn paperpile_citation_link(href: &str) -> Option<PaperpileCitationLink> {
+    let (_, remainder) = href.trim().split_once("://")?;
+    let (host, path) = remainder.split_once('/')?;
+    if !host.eq_ignore_ascii_case("paperpile.com") {
+        return None;
+    }
+    let mut parts = path.split('/');
+    if parts.next()? != "c" {
+        return None;
+    }
+    let document_key = parts.next()?;
+    let keys = parts.next()?;
+    if parts.next().is_some() || !paperpile_key_is_valid(document_key) || keys.is_empty() {
+        return None;
+    }
+    let keys = keys.split('+').map(str::to_string).collect::<Vec<_>>();
+    keys.iter()
+        .all(|key| paperpile_key_is_valid(key))
+        .then_some(PaperpileCitationLink {
+            document_key: document_key.to_string(),
+            keys,
+            href: href.to_string(),
+        })
+}
+
+fn paperpile_key_is_valid(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
 // ---------------------------------------------------------------------------
@@ -111,6 +613,10 @@ pub(super) fn inline_id(inline: &Inline) -> &StableId {
         | Inline::Citation { id, .. }
         | Inline::FootnoteRef { id, .. }
         | Inline::Mention { id, .. }
+        | Inline::GooglePersonChip { id, .. }
+        | Inline::GoogleRichLinkChip { id, .. }
+        | Inline::Dropdown { id, .. }
+        | Inline::DateChip { id, .. }
         | Inline::Equation { id, .. }
         | Inline::PageNumber { id, .. } => id,
     }
@@ -184,6 +690,88 @@ pub(super) fn hyperlink_field_target(instruction: &str) -> Option<String> {
 }
 
 impl<'a> Converter<'a> {
+    /// Numbering starts belong to Word's numbering definition, while the
+    /// OpenDoc block walk has already assigned each concrete `numId` a stable
+    /// list id.  Transfer only positive, non-default starts; default starts
+    /// stay absent so imported source is canonical.
+    fn install_list_starts(&self, document: &mut Document) {
+        for (num_id, list_id) in &self.list_ids {
+            let mut properties = ListProperties::default();
+            for level in 0..=8 {
+                if self
+                    .parts
+                    .numbering
+                    .is_ordered(&self.parts.styles, num_id, level)
+                    != Some(true)
+                {
+                    continue;
+                }
+                if let Some(start) = self
+                    .parts
+                    .numbering
+                    .start(num_id, level)
+                    .filter(|start| *start != 1)
+                {
+                    properties.ordered_starts.insert(level, start);
+                }
+                // Word defines starts for all levels of one numbering
+                // instance, including levels that have no current paragraph;
+                // those non-default starts are source state and must survive.
+                // Counter *formats* are different: a writer-generated
+                // abstract definition has defaults for unused levels, and
+                // importing them would materialise meaningless overrides.
+                let format = self
+                    .list_levels
+                    .get(num_id)
+                    .is_some_and(|levels| levels.contains(&level))
+                    .then(|| {
+                        self.parts
+                            .numbering
+                            .format(&self.parts.styles, num_id, level)
+                    })
+                    .flatten()
+                    .and_then(|format| match format.as_str() {
+                        "decimal" => Some(OrderedListFormat::Decimal),
+                        "lowerLetter" | "lowerAlpha" => Some(OrderedListFormat::LowerAlpha),
+                        "upperLetter" | "upperAlpha" => Some(OrderedListFormat::UpperAlpha),
+                        "lowerRoman" => Some(OrderedListFormat::LowerRoman),
+                        "upperRoman" => Some(OrderedListFormat::UpperRoman),
+                        _ => None,
+                    });
+                if let Some(format) =
+                    format.filter(|format| *format != OrderedListFormat::inherited_at(level))
+                {
+                    properties.ordered_formats.insert(level, format);
+                }
+                if self
+                    .parts
+                    .numbering
+                    .is_ordered(&self.parts.styles, num_id, level)
+                    == Some(false)
+                {
+                    let marker = self
+                        .parts
+                        .numbering
+                        .level_text(num_id, level)
+                        .and_then(|text| match text {
+                            "\u{2022}" | "\u{25cf}" => Some(opendoc_core::BulletListMarker::Disc),
+                            "\u{25e6}" | "\u{25cb}" => Some(opendoc_core::BulletListMarker::Circle),
+                            "\u{25a0}" => Some(opendoc_core::BulletListMarker::Square),
+                            glyph => opendoc_core::BulletListMarker::parse(glyph),
+                        });
+                    if let Some(marker) = marker.filter(|marker| {
+                        *marker != opendoc_core::BulletListMarker::inherited_at(level)
+                    }) {
+                        properties.bullet_markers.insert(level, marker);
+                    }
+                }
+            }
+            if !properties.is_empty() {
+                document.list_properties.insert(list_id.clone(), properties);
+            }
+        }
+    }
+
     // -- warnings ---------------------------------------------------------
 
     fn count(&mut self, code: &'static str) {
@@ -194,7 +782,6 @@ impl<'a> Converter<'a> {
 
     fn import_notes(&mut self, part: &XmlElement, endnote: bool) {
         let element_name = if endnote { "endnote" } else { "footnote" };
-        let mut imported = 0;
         for note in part.children_named(element_name) {
             let Some(id) = note.attr("id").map(str::trim) else {
                 continue;
@@ -216,15 +803,14 @@ impl<'a> Converter<'a> {
             self.note_ids
                 .insert((endnote, id.to_string()), stable_id.clone());
             self.footnotes.push(Footnote {
-                id: stable_id,
+                id: stable_id.clone(),
                 revision: 1,
                 body,
                 deleted: false,
             });
-            imported += 1;
-        }
-        if endnote {
-            self.dropped.count_n(ENDNOTES_AS_FOOTNOTES, imported);
+            if endnote {
+                self.endnote_ids.insert(stable_id);
+            }
         }
     }
 
@@ -352,6 +938,14 @@ impl<'a> Converter<'a> {
                 id: StableId::new("comment-thread"),
                 anchor: self.comment_anchor(&docx_id),
                 comments,
+                state: opendoc_core::CommentThreadState::Open,
+                resolved_by: None,
+                resolved_at_ms: None,
+                action_assignee: None,
+                action_due_at_ms: None,
+                action_completed_by: None,
+                action_completed_at_ms: None,
+                reactions: Vec::new(),
                 deleted: false,
             })
             .collect()
@@ -410,24 +1004,44 @@ impl<'a> Converter<'a> {
             self.count(DROPPED_SECTION_PROPERTIES);
         }
         for reference in furniture_references(sect_pr) {
-            // One header and one footer for the whole document (ADR 0009), so
-            // a first-page or even-page variant is named rather than silently
-            // applied everywhere.
-            if reference.variant != "default" {
-                self.count(DROPPED_HEADER_FOOTER);
-                continue;
-            }
+            let slot = match (reference.slot, reference.variant) {
+                (HeaderFooterSlot::Header, "default") => HeaderFooterSlot::Header,
+                (HeaderFooterSlot::Footer, "default") => HeaderFooterSlot::Footer,
+                (HeaderFooterSlot::Header, "first") => HeaderFooterSlot::FirstPageHeader,
+                (HeaderFooterSlot::Footer, "first") => HeaderFooterSlot::FirstPageFooter,
+                (HeaderFooterSlot::Header, "even") => HeaderFooterSlot::EvenPageHeader,
+                (HeaderFooterSlot::Footer, "even") => HeaderFooterSlot::EvenPageFooter,
+                _ => {
+                    self.count(DROPPED_HEADER_FOOTER);
+                    continue;
+                }
+            };
             let Some(part) = self.parts.furniture_parts.get(reference.rel_id) else {
                 self.count(DROPPED_HEADER_FOOTER);
                 continue;
             };
             let mut blocks = Vec::new();
+            self.active_furniture = Some(reference.rel_id.to_string());
             self.walk_blocks(part, &mut blocks, 0);
+            self.active_furniture = None;
             self.strip_unfurnishable(&mut blocks);
             if blocks.is_empty() {
+                // An explicit empty first/even part is Word's native
+                // suppression form. Ordinary empty furniture has no useful
+                // distinction, but variants must retain `Some(empty)` rather
+                // than accidentally inheriting the default header/footer.
+                if matches!(
+                    slot,
+                    HeaderFooterSlot::FirstPageHeader
+                        | HeaderFooterSlot::FirstPageFooter
+                        | HeaderFooterSlot::EvenPageHeader
+                        | HeaderFooterSlot::EvenPageFooter
+                ) {
+                    *document.furniture_mut(slot) = blocks;
+                }
                 continue;
             }
-            *document.furniture_mut(reference.slot) = blocks;
+            *document.furniture_mut(slot) = blocks;
         }
     }
 
@@ -462,7 +1076,11 @@ impl<'a> Converter<'a> {
             !block.content.is_empty()
                 || !matches!(
                     block.kind,
-                    BlockKind::Paragraph | BlockKind::Heading { .. } | BlockKind::ListItem { .. }
+                    BlockKind::Paragraph
+                        | BlockKind::Title
+                        | BlockKind::Subtitle
+                        | BlockKind::Heading { .. }
+                        | BlockKind::ListItem { .. }
                 )
         });
     }
@@ -474,6 +1092,17 @@ impl<'a> Converter<'a> {
                 "tbl" => {
                     if table_depth > 0 {
                         self.count(NESTED_TABLE);
+                    }
+                    if table_depth >= MAX_TABLE_DEPTH {
+                        // Flattened rather than refused: the paragraphs inside
+                        // the cells are the content, and the structure past
+                        // this depth is not something the model — or a reader —
+                        // can make sense of. `walk_blocks` on the table element
+                        // itself descends through `tr`/`tc` on the catch-all
+                        // arm and picks the paragraphs up.
+                        self.count(TABLE_NESTING_LIMIT);
+                        self.walk_blocks(element, out, table_depth);
+                        continue;
                     }
                     let block = self.convert_table(element, table_depth);
                     self.block_ids.insert(block.id.clone());
@@ -500,46 +1129,111 @@ impl<'a> Converter<'a> {
         }
     }
 
+    /// A `w:tbl` as a rectangular grid.
+    ///
+    /// The grid is *planned* before any cell content is converted, because a
+    /// `w:gridSpan` makes one `w:tc` occupy several columns: the covered
+    /// positions have to be materialised, or every later cell in the row lands
+    /// one column too far left. See [`crate::docx::table`].
     fn convert_table(&mut self, table: &XmlElement, table_depth: usize) -> Block {
+        // A table's borders and cell margins can come from the style it
+        // names as well as from its own `w:tblPr`; Word's built-in table
+        // styles are where it puts them. Resolved first so the table's own
+        // `w:tblPr` lies over the top.
+        let inherited = table
+            .child("tblPr")
+            .and_then(|tbl_pr| tbl_pr.child("tblStyle"))
+            .and_then(|style| style.attr("val"))
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(|id| self.parts.styles.resolve_table(id))
+            .unwrap_or_default();
+        let plan = plan_table(table, &inherited);
+        for code in &plan.dropped {
+            self.count(code);
+        }
+        let column_count = plan.column_count();
         let mut rows = Vec::new();
-        let mut row_elements = Vec::new();
-        collect_wrapped(table, "tr", &mut row_elements);
-        for row in row_elements {
-            let mut cells = Vec::new();
-            let mut cell_elements = Vec::new();
-            collect_wrapped(row, "tc", &mut cell_elements);
-            for cell in cell_elements {
-                if let Some(tc_pr) = cell.child("tcPr") {
-                    if tc_pr.child("gridSpan").is_some() || tc_pr.child("vMerge").is_some() {
-                        self.count(DROPPED_CELL_SPAN);
-                    }
+        for (row_index, planned_row) in plan.rows.iter().enumerate() {
+            let mut cells: Vec<TableCell> = Vec::new();
+            for (cell_index, planned) in planned_row.iter().enumerate() {
+                // The grid positions a `w:gridSpan` swallowed exist in the
+                // model even though no `w:tc` describes them, so they are
+                // filled before this cell is placed. Without them every cell
+                // after a span in the same row lands one column too far left
+                // — P1-4's misalignment, and the reason this is materialised
+                // rather than counted.
+                while cells.len() < planned.column {
+                    cells.push(self.empty_cell());
                 }
                 let mut blocks = Vec::new();
-                self.walk_blocks(cell, &mut blocks, table_depth + 1);
+                self.walk_blocks(planned.element, &mut blocks, table_depth + 1);
                 if blocks.is_empty() {
                     let block = Block::paragraph("");
                     self.block_ids.insert(block.id.clone());
                     blocks.push(block);
                 }
-                cells.push(TableCell::new(blocks));
+                let mut cell = TableCell::new(blocks);
+                cell.properties = planned.properties.clone();
+                // A covered cell keeps its identity and its content but never
+                // its own span: the rectangle belongs to the cell that starts
+                // it (ADR 0013).
+                if !plan.is_covered(row_index, cell_index) {
+                    cell.span = planned.span();
+                }
+                cells.push(cell);
             }
-            if cells.is_empty() {
+            // And the positions past the last `w:tc`: the columns a trailing
+            // span swallowed, and the tail of a row shorter than the grid.
+            while cells.len() < column_count {
                 cells.push(self.empty_cell());
             }
+            cells.truncate(column_count);
             rows.push(TableRow {
                 id: StableId::new("row"),
+                height: plan.row_heights.get(row_index).copied().flatten(),
+                header: plan.row_headers.get(row_index).copied().unwrap_or(false),
                 cells,
             });
         }
         if rows.is_empty() {
             rows.push(TableRow {
                 id: StableId::new("row"),
-                cells: vec![self.empty_cell()],
+                height: None,
+                header: false,
+                cells: (0..column_count).map(|_| self.empty_cell()).collect(),
             });
+        }
+        let mut columns: Vec<TableColumn> = (0..column_count)
+            .map(|index| TableColumn {
+                id: StableId::new("column"),
+                width: plan.column_widths.get(index).copied().flatten(),
+            })
+            .collect();
+        // Spans are a rectangle over a grid the file described; a file that
+        // described an impossible one is read without merges rather than as a
+        // document `validate` would refuse.
+        if validate_table_geometry(&columns, &rows).is_err() {
+            self.count(TABLE_MERGE_REPAIRED);
+            for row in rows.iter_mut() {
+                for cell in row.cells.iter_mut() {
+                    cell.span = CellSpan::SINGLE;
+                }
+            }
+            if validate_table_geometry(&columns, &rows).is_err() {
+                columns = (0..column_count).map(|_| TableColumn::auto()).collect();
+            }
         }
         Block {
             id: StableId::new("block"),
-            kind: BlockKind::table(rows),
+            kind: BlockKind::Table {
+                columns,
+                properties: opendoc_core::TableProperties {
+                    border: plan.border,
+                    alignment: plan.alignment,
+                },
+                rows,
+            },
             content: Vec::new(),
             properties: BlockProperties::default(),
         }
@@ -554,7 +1248,42 @@ impl<'a> Converter<'a> {
     // -- paragraphs -------------------------------------------------------
 
     fn convert_paragraph(&mut self, paragraph: &XmlElement, out: &mut Vec<Block>) {
+        // The writer's native TOC is one standalone `fldSimple`, whose field
+        // result is only a reader cache. Import the generating instruction,
+        // not that cached title/result text. A TOC mixed with real paragraph
+        // content or expressed through Word's multi-run field sequence has
+        // no unambiguous block boundary here and remains ordinary content.
+        if let Some(max_level) = docx_simple_toc_level(paragraph) {
+            let block = Block {
+                id: StableId::new("block"),
+                kind: BlockKind::TableOfContents { max_level },
+                content: Vec::new(),
+                properties: BlockProperties::default(),
+            };
+            self.block_ids.insert(block.id.clone());
+            out.push(block);
+            return;
+        }
+        let bookmarks = self.whole_paragraph_bookmarks(paragraph);
         let ppr = paragraph.child("pPr");
+        // An interior `w:sectPr` terminates the *preceding* section.  The
+        // model has no section record yet, but a next-page boundary itself is
+        // faithfully representable as a PageBreak.  Keep it after this
+        // paragraph rather than treating it like `pageBreakBefore` on the
+        // following paragraph; a following table or an empty final paragraph
+        // must still begin in the new physical section.  Its setup/furniture
+        // stay warned as unrepresentable below.
+        let section_break_after = ppr
+            .and_then(|properties| properties.child("sectPr"))
+            .is_some_and(section_starts_new_page);
+        // A Word caption is not an attribute of a drawing: it is a following
+        // paragraph carrying the built-in `Caption` style.  We only recover
+        // the narrow source shape this writer emits (one plain paragraph
+        // immediately after one image), rather than guessing that any styled
+        // paragraph elsewhere in a document belongs to an image.
+        let is_simple_caption = ppr
+            .and_then(|properties| properties.child_val("pStyle"))
+            .is_some_and(|style| style.trim() == "Caption");
         let style = ppr
             .and_then(|ppr| ppr.child_val("pStyle"))
             .map(|id| self.parts.styles.resolve(id));
@@ -589,14 +1318,8 @@ impl<'a> Converter<'a> {
             None => style.as_ref().and_then(|style| style.num_pr.clone()),
         };
         let kind = match style.as_ref().and_then(|style| style.heading) {
-            Some(HeadingStyle::Title) => {
-                self.count(TITLE_STYLE_AS_HEADING);
-                BlockKind::Heading { level: 1 }
-            }
-            Some(HeadingStyle::Subtitle) => {
-                self.count(TITLE_STYLE_AS_HEADING);
-                BlockKind::Heading { level: 2 }
-            }
+            Some(HeadingStyle::Title) => BlockKind::Title,
+            Some(HeadingStyle::Subtitle) => BlockKind::Subtitle,
             Some(HeadingStyle::Level(level)) => BlockKind::Heading {
                 level: level.clamp(1, 6),
             },
@@ -618,6 +1341,10 @@ impl<'a> Converter<'a> {
                         .entry(num_pr.num_id.clone())
                         .or_insert_with(|| StableId::new("docx-list"))
                         .clone();
+                    self.list_levels
+                        .entry(num_pr.num_id.clone())
+                        .or_default()
+                        .insert(num_pr.level.min(8));
                     BlockKind::ListItem {
                         list_id,
                         level: num_pr.level.min(8),
@@ -636,9 +1363,190 @@ impl<'a> Converter<'a> {
         if page_break_before {
             out.push(self.page_break_block());
         }
+        let output_start = out.len();
         let mut state = ParagraphState::new(kind, properties, style_props, false);
         self.walk_paragraph_content(paragraph, &mut state);
         self.finish_paragraph(state, out);
+        // A whole-paragraph bookmark has a stable owner only while this
+        // paragraph remains a block. Do not hide that owner in image layout
+        // metadata merely because the visible Caption shape is otherwise
+        // simple and adjacent.
+        if is_simple_caption && bookmarks.is_empty() {
+            self.attach_simple_image_caption(out, output_start);
+        }
+        self.install_paragraph_bookmarks(bookmarks, &out[output_start..]);
+        if section_break_after {
+            out.push(self.page_break_block());
+        }
+    }
+
+    /// Recover an adjacent DOCX Caption-style paragraph only where it has an
+    /// unambiguous OpenDoc owner.  Rich captions, field-generated numbering,
+    /// intervening blocks, and captions after non-images remain ordinary
+    /// paragraphs: the model has no place to retain their independent Word
+    /// semantics without inventing an association.
+    fn attach_simple_image_caption(&mut self, out: &mut Vec<Block>, caption_start: usize) {
+        if caption_start == 0 || out.len() != caption_start + 1 {
+            return;
+        }
+        let caption = match &out[caption_start] {
+            Block {
+                kind: BlockKind::Paragraph,
+                content,
+                properties,
+                ..
+            } if properties == &BlockProperties::default() => content
+                .iter()
+                .map(|inline| match inline {
+                    Inline::Text { text, marks, .. } if marks.is_empty() => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()
+                .map(|parts| parts.concat())
+                .filter(|caption| !caption.trim().is_empty()),
+            _ => None,
+        };
+        let Some(caption) = caption else {
+            return;
+        };
+        let Some(Block {
+            kind: BlockKind::Image { layout, .. },
+            ..
+        }) = out.get_mut(caption_start - 1)
+        else {
+            return;
+        };
+        // No overwrite: an image may already have an explicit extension
+        // caption. Leaving the styled paragraph visible is less lossy.
+        if layout.caption.is_some() {
+            return;
+        }
+        layout.caption = Some(caption);
+        out.remove(caption_start);
+    }
+
+    /// Collect only bookmarks that wrap the exact paragraph content.  The
+    /// element is intentionally inspected at this level: a bookmark inside a
+    /// run, hyperlink, tracked revision, or a range spanning paragraphs has a
+    /// character/range meaning that the stable-block model must not guess.
+    fn whole_paragraph_bookmarks(&mut self, paragraph: &XmlElement) -> Vec<ParagraphBookmark> {
+        let mut starts = BTreeMap::<String, (String, usize)>::new();
+        let mut ends = BTreeMap::<String, Vec<usize>>::new();
+        let mut direct_starts = 0usize;
+        let mut rejected = 0usize;
+        let mut position = 0usize;
+
+        for element in paragraph.elements() {
+            match element.local.as_str() {
+                "bookmarkStart" => {
+                    direct_starts += 1;
+                    let Some(id) = element
+                        .attr("id")
+                        .map(str::trim)
+                        .filter(|id| !id.is_empty())
+                    else {
+                        rejected += 1;
+                        continue;
+                    };
+                    let Some(name) = element
+                        .attr("name")
+                        .map(str::trim)
+                        .filter(|name| !name.is_empty())
+                    else {
+                        rejected += 1;
+                        continue;
+                    };
+                    if starts
+                        .insert(id.to_string(), (name.to_string(), position))
+                        .is_some()
+                    {
+                        rejected += 1;
+                    }
+                }
+                "bookmarkEnd" => {
+                    let Some(id) = element
+                        .attr("id")
+                        .map(str::trim)
+                        .filter(|id| !id.is_empty())
+                    else {
+                        rejected += 1;
+                        continue;
+                    };
+                    ends.entry(id.to_string()).or_default().push(position);
+                }
+                // These are positional/formatting annotations, not body
+                // content.  They do not make an otherwise whole-paragraph
+                // bookmark into a character-range bookmark.
+                "pPr" | "proofErr" | "customXmlPr" | "sdtPr" | "sdtEndPr" | "commentRangeStart"
+                | "commentRangeEnd" | "permStart" | "permEnd" => {}
+                _ => position += 1,
+            }
+        }
+
+        let nested_starts = paragraph
+            .descendants()
+            .into_iter()
+            .filter(|element| element.is("bookmarkStart"))
+            .count()
+            .saturating_sub(direct_starts);
+        rejected += nested_starts;
+
+        let mut imported = Vec::new();
+        for (id, (name, start)) in starts {
+            let Some(end_positions) = ends.remove(&id) else {
+                rejected += 1;
+                continue;
+            };
+            // A whole paragraph begins at the first body child and ends just
+            // after the last.  This includes the exact range emitted by our
+            // DOCX writer.  Anything else has a character/range distinction
+            // OpenDoc cannot retain.
+            if start != 0 || end_positions.as_slice() != [position] {
+                rejected += 1;
+                continue;
+            }
+            imported.push(ParagraphBookmark { name });
+        }
+        rejected += ends.values().map(Vec::len).sum::<usize>();
+        self.dropped.count_n(DROPPED_BOOKMARK_RANGE, rejected);
+        imported
+    }
+
+    fn install_paragraph_bookmarks(&mut self, bookmarks: Vec<ParagraphBookmark>, blocks: &[Block]) {
+        if bookmarks.is_empty() {
+            return;
+        }
+        let Some(block) = (blocks.len() == 1).then(|| &blocks[0]).filter(|block| {
+            !block.content.is_empty()
+                && matches!(
+                    block.kind,
+                    BlockKind::Paragraph
+                        | BlockKind::Title
+                        | BlockKind::Subtitle
+                        | BlockKind::Heading { .. }
+                        | BlockKind::ListItem { .. }
+                )
+        }) else {
+            self.dropped
+                .count_n(DROPPED_BOOKMARK_RANGE, bookmarks.len());
+            return;
+        };
+        for candidate in bookmarks {
+            let bookmark = Bookmark {
+                id: StableId::new("docx-bookmark"),
+                name: candidate.name,
+                block_id: block.id.clone(),
+                revision: 1,
+                deleted: false,
+            };
+            if bookmark.validate().is_err() {
+                self.count(DROPPED_BOOKMARK_NAME);
+            } else if !self.bookmark_names.insert(bookmark.name.clone()) {
+                self.count(DROPPED_BOOKMARK_DUPLICATE);
+            } else {
+                self.bookmarks.push(bookmark);
+            }
+        }
     }
 
     fn page_break_block(&mut self) -> Block {
@@ -698,7 +1606,11 @@ impl<'a> Converter<'a> {
                     let block = self.page_break_block();
                     out.push(block);
                 }
-                Segment::Image { rel_id, alt } => {
+                Segment::Image {
+                    rel_id,
+                    alt,
+                    layout,
+                } => {
                     if text_count > 0 {
                         self.count(SPLIT_INLINE_IMAGE);
                     }
@@ -710,7 +1622,7 @@ impl<'a> Converter<'a> {
                         &mut current,
                         out,
                     );
-                    let block = self.image_block(&rel_id, alt);
+                    let block = self.image_block(&rel_id, alt, layout);
                     out.push(block);
                 }
             }
@@ -752,23 +1664,52 @@ impl<'a> Converter<'a> {
         out.push(block);
     }
 
-    fn image_block(&mut self, rel_id: &str, alt: Option<String>) -> Block {
-        let block = match self.parts.media.get(rel_id) {
+    /// Resolve a relationship in the part currently being walked.  Word only
+    /// guarantees IDs are unique inside one `.rels` part; falling back from a
+    /// header/footer ID to the main document would silently bind the wrong
+    /// target when both happen to use (for example) `rId1`.
+    fn current_relationship(&self, rel_id: &str) -> Option<&Relationship> {
+        match &self.active_furniture {
+            Some(furniture_id) => self
+                .parts
+                .furniture_relationships
+                .get(furniture_id)
+                .and_then(|relationships| relationships.get(rel_id)),
+            None => self.parts.relationships.get(rel_id),
+        }
+    }
+
+    fn current_media(&self, rel_id: &str) -> Option<&crate::ImportedBlob> {
+        match &self.active_furniture {
+            Some(furniture_id) => self
+                .parts
+                .furniture_media
+                .get(furniture_id)
+                .and_then(|media| media.get(rel_id)),
+            None => self.parts.media.get(rel_id),
+        }
+    }
+
+    fn image_block(&mut self, rel_id: &str, alt: Option<String>, layout: ImageLayout) -> Block {
+        let block = match self.current_media(rel_id) {
             Some(blob) => Block {
                 id: StableId::new("block"),
                 kind: BlockKind::Image {
                     blob_hash: blob.hash.clone(),
-                    alt_text: alt.unwrap_or_else(|| blob.name.clone()),
-                    layout: Default::default(),
+                    // A package filename is storage bookkeeping, not author
+                    // supplied alternative text. In particular, our own
+                    // writer emits a required DrawingML name while omitting
+                    // `descr` for an empty source alt string; importing that
+                    // name here would manufacture accessibility content.
+                    alt_text: alt.unwrap_or_default(),
+                    layout,
                 },
                 content: Vec::new(),
                 properties: BlockProperties::default(),
             },
             None => {
                 let target = self
-                    .parts
-                    .relationships
-                    .get(rel_id)
+                    .current_relationship(rel_id)
                     .map(|rel| rel.target.clone())
                     .unwrap_or_else(|| rel_id.to_string());
                 let name = media_name(&target);
@@ -856,7 +1797,7 @@ impl<'a> Converter<'a> {
     fn walk_hyperlink(&mut self, element: &XmlElement, state: &mut ParagraphState) {
         let href = element
             .attr_prefixed("r", "id")
-            .and_then(|id| self.parts.relationships.get(id.trim()))
+            .and_then(|id| self.current_relationship(id.trim()))
             .map(|rel| rel.target.clone())
             .filter(|target| !target.trim().is_empty())
             .or_else(|| {
@@ -1212,15 +2153,29 @@ impl<'a> Converter<'a> {
             self.count(DROPPED_NESTED_IMAGE);
             return;
         }
-        let alt = element.find_descendant("docPr").and_then(|doc_pr| {
-            ["descr", "title", "name"]
-                .iter()
-                .find_map(|attr| doc_pr.attr(attr))
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-        });
-        self.emit_segment(state, Segment::Image { rel_id, alt });
+        if has_unmapped_positioned_image(element) {
+            self.count(DROPPED_POSITIONED_IMAGE);
+        }
+        let alt = docx_image_accessible_text(element);
+        let (layout, malformed_opacity, malformed_crop, malformed_border) =
+            docx_image_layout(element);
+        if malformed_opacity {
+            self.count(DROPPED_IMAGE_OPACITY);
+        }
+        if malformed_crop {
+            self.count(DROPPED_IMAGE_CROP);
+        }
+        if malformed_border {
+            self.count(DROPPED_IMAGE_BORDER);
+        }
+        self.emit_segment(
+            state,
+            Segment::Image {
+                rel_id,
+                alt,
+                layout,
+            },
+        );
     }
 
     fn emit(&mut self, state: &mut ParagraphState, inline: Inline) {
@@ -1273,4 +2228,74 @@ impl<'a> Converter<'a> {
             }
         }
     }
+}
+
+/// DrawingML holds an image title and description separately. OpenDoc has one
+/// accessible-text field, so retain both source values in their documented
+/// order rather than treating the first non-empty attribute as an excuse to
+/// discard the other. `wp:docPr` is authoritative when present, but some
+/// producers put equivalent metadata only on `pic:cNvPr`. DrawingML's
+/// required generic object name is bookkeeping, not a replacement for either
+/// accessible field.
+fn docx_image_accessible_text(element: &XmlElement) -> Option<String> {
+    let accessible_text = |properties: &XmlElement| {
+        let attribute = |name: &str| {
+            properties
+                .attr(name)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        };
+        match (attribute("title"), attribute("descr")) {
+            (Some(title), Some(description)) if title == description => Some(title),
+            (Some(title), Some(description)) => Some(format!("{title}\n{description}")),
+            (Some(title), None) => Some(title),
+            (None, Some(description)) => Some(description),
+            (None, None) => None,
+        }
+    };
+    let doc_pr = element.find_descendant("docPr");
+    let picture_properties = element.find_descendant("cNvPr");
+    // `wp:docPr` is the drawing's authoritative nonvisual record. Some
+    // producers leave its accessible fields empty and put them only on
+    // `pic:cNvPr`, so fall back by whole record — never splice a title from
+    // one record with a description from the other, which fabricates an
+    // accessible label when producer metadata conflicts.
+    doc_pr
+        .and_then(accessible_text)
+        .or_else(|| picture_properties.and_then(accessible_text))
+}
+
+/// Recognise the bounded field shape written by [`docx_write`]: a paragraph
+/// with no properties and one `w:fldSimple` instruction beginning `TOC` and
+/// carrying its heading scope as `\o "1-N"`. A result cached by Word is
+/// intentionally irrelevant—OpenDoc derives entries again from its headings.
+fn docx_simple_toc_level(paragraph: &XmlElement) -> Option<u8> {
+    if paragraph.child("pPr").is_some() {
+        return None;
+    }
+    let fields: Vec<&XmlElement> = paragraph.elements().collect();
+    let [field] = fields.as_slice() else {
+        return None;
+    };
+    if !field.is("fldSimple") {
+        return None;
+    }
+    let instruction = field.attr("instr")?.trim();
+    let mut tokens = instruction.split_whitespace();
+    if !tokens.next()?.eq_ignore_ascii_case("TOC") {
+        return None;
+    }
+    while let Some(token) = tokens.next() {
+        if token.eq_ignore_ascii_case("\\o") {
+            let range = tokens.next()?.trim_matches('"');
+            let (first, last) = range.split_once('-')?;
+            if first != "1" {
+                return None;
+            }
+            let max_level = last.parse::<u8>().ok()?;
+            return (1..=6).contains(&max_level).then_some(max_level);
+        }
+    }
+    None
 }

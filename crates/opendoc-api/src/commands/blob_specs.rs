@@ -47,6 +47,17 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         false,
         Some("write")
     ),
+    // This is deliberately a byte-for-byte export, rather than an implicit
+    // conversion. A document may hold PNG, JPEG, SVG, or a future image
+    // format; saving it must not quietly discard metadata or pixels.
+    command!(
+        "export_image_blob",
+        AppExport,
+        [arg!("blobHash", String)],
+        false,
+        false,
+        Some("read")
+    ),
     command!(
         "sign_blob_with_openssh_private_key",
         AppDocument,

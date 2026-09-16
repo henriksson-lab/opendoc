@@ -7,7 +7,8 @@ use opendoc_core::{HeaderFooterSlot, Length, PageNumberField, PageSetup};
 /// which relationship.
 pub(super) struct FurnitureReference<'a> {
     pub(super) slot: HeaderFooterSlot,
-    /// `default`, `first` or `even`. OpenDoc models only `default`.
+    /// `default`, `first` or `even`. OpenDoc models each document-wide
+    /// variant; section-local variants still require a section model.
     pub(super) variant: &'a str,
     pub(super) rel_id: &'a str,
 }
@@ -98,6 +99,27 @@ pub(super) fn section_has_unrepresentable_properties(sect_pr: &XmlElement) -> bo
         .and_then(|cols| cols.attr("num"))
         .and_then(|num| num.trim().parse::<u32>().ok())
         .is_some_and(|num| num > 1)
+}
+
+/// Whether an interior `w:sectPr` starts its following section on a fresh
+/// physical page.
+///
+/// Word defaults a missing `w:type` to `nextPage`.  OpenDoc has no durable
+/// section identity yet, but its ordinary `BlockKind::PageBreak` can retain
+/// that visible boundary without pretending to retain the following
+/// section's geometry or furniture.  `continuous` and `nextColumn` do not
+/// start a fresh page, so inventing a page break for either would be a visual
+/// corruption.  Odd/even-page starts can require an extra blank page; one
+/// ordinary page break is the closest representable boundary and the caller
+/// still reports the unrepresentable section properties.
+pub(super) fn section_starts_new_page(sect_pr: &XmlElement) -> bool {
+    !matches!(
+        sect_pr
+            .child("type")
+            .and_then(|kind| kind.attr("val"))
+            .map(str::trim),
+        Some("continuous" | "nextColumn")
+    )
 }
 
 /// The page-number field a WordprocessingML field instruction names, if it is

@@ -166,6 +166,17 @@ fn render_citation_inner(
 pub fn render_bibliography_rich(
     database: &CitationDatabase,
 ) -> Result<Vec<RichBibliographyEntry>, CitationError> {
+    // No bibliography entries means no CSL state needs rendering. Apart from
+    // being the exact result for a new (or all-deleted) database, this keeps
+    // an ordinary empty-document projection from recursively decoding a
+    // bundled style it cannot possibly use.
+    if !database
+        .references
+        .iter()
+        .any(|reference| !reference.deleted)
+    {
+        return Ok(Vec::new());
+    }
     render_database(database).map(|rendered| rendered.bibliography)
 }
 

@@ -19,13 +19,20 @@ impl Length {
     pub const ZERO: Length = Length(0);
     /// 22 inches: wider than any page OpenDoc supports, and far from the
     /// range where twip arithmetic could overflow `i32`.
-    pub const MAX_TWIPS: i32 = 22 * 1440;
+    pub const MAX_TWIPS: i32 = 22 * Self::TWIPS_PER_INCH;
     /// Indents and first-line offsets may be negative (a hanging indent, or
     /// content deliberately bled into the margin).
     pub const MIN_TWIPS: i32 = -Self::MAX_TWIPS;
-    const TWIPS_PER_POINT: f64 = 20.0;
-    const TWIPS_PER_INCH: f64 = 1440.0;
-    const TWIPS_PER_CENTIMETER: f64 = Self::TWIPS_PER_INCH / 2.54;
+    /// 1pt = 20 twips. Public because every surface that shows a length in
+    /// points — the toolbar, the table dialogs, the image dialog, the
+    /// generated TypeScript bindings — must divide by *this* number and not
+    /// by a copy of it.
+    pub const TWIPS_PER_POINT: i32 = 20;
+    /// 1in = 1440 twips, for the same reason.
+    pub const TWIPS_PER_INCH: i32 = 1440;
+    const TWIPS_PER_POINT_F64: f64 = Self::TWIPS_PER_POINT as f64;
+    const TWIPS_PER_INCH_F64: f64 = Self::TWIPS_PER_INCH as f64;
+    const TWIPS_PER_CENTIMETER: f64 = Self::TWIPS_PER_INCH_F64 / 2.54;
 
     pub fn from_twips(twips: i32) -> Result<Self, ModelError> {
         if !(Self::MIN_TWIPS..=Self::MAX_TWIPS).contains(&twips) {
@@ -35,11 +42,11 @@ impl Length {
     }
 
     pub fn from_points(points: f64) -> Result<Self, ModelError> {
-        Self::from_scaled(points, Self::TWIPS_PER_POINT)
+        Self::from_scaled(points, Self::TWIPS_PER_POINT_F64)
     }
 
     pub fn from_inches(inches: f64) -> Result<Self, ModelError> {
-        Self::from_scaled(inches, Self::TWIPS_PER_INCH)
+        Self::from_scaled(inches, Self::TWIPS_PER_INCH_F64)
     }
 
     pub fn from_centimeters(centimeters: f64) -> Result<Self, ModelError> {
@@ -62,11 +69,11 @@ impl Length {
     }
 
     pub fn points(self) -> f64 {
-        f64::from(self.0) / Self::TWIPS_PER_POINT
+        f64::from(self.0) / Self::TWIPS_PER_POINT_F64
     }
 
     pub fn inches(self) -> f64 {
-        f64::from(self.0) / Self::TWIPS_PER_INCH
+        f64::from(self.0) / Self::TWIPS_PER_INCH_F64
     }
 
     pub fn is_negative(self) -> bool {
@@ -183,6 +190,80 @@ impl LineSpacing {
             }
         }
     }
+
+    /// The line spacings a UI offers, in the order it should offer them.
+    ///
+    /// They live here, next to the type, because the wire encoding and the
+    /// label have to be defined exactly once: the contract generator exports
+    /// this list to TypeScript, so no view ever writes `"multiple:1500"` by
+    /// hand or takes it apart again.
+    pub const PRESETS: [LineSpacing; 4] = [
+        LineSpacing::Multiple(LineHeightMultiple(1_000)),
+        LineSpacing::Multiple(LineHeightMultiple(1_150)),
+        LineSpacing::Multiple(LineHeightMultiple(1_500)),
+        LineSpacing::Multiple(LineHeightMultiple(2_000)),
+    ];
+
+    /// The rule's canonical name — the `mode` half of the command surface and
+    /// of the block projection.
+    pub fn mode(self) -> &'static str {
+        match self {
+            LineSpacing::Multiple(_) => "multiple",
+            LineSpacing::Exact(_) => "exact",
+            LineSpacing::AtLeast(_) => "at-least",
+        }
+    }
+
+    /// The rule's number: thousandths of a line for `multiple`, twips for the
+    /// other two. The unit travels with [`LineSpacing::mode`], never alone.
+    pub fn value(self) -> i32 {
+        match self {
+            LineSpacing::Multiple(multiple) => multiple.thousandths() as i32,
+            LineSpacing::Exact(height) | LineSpacing::AtLeast(height) => height.twips(),
+        }
+    }
+
+    /// Rebuilds a spacing from the `mode`/`value` pair [`LineSpacing::mode`]
+    /// and [`LineSpacing::value`] produce. The only parser for that pair.
+    pub fn parse(mode: &str, value: i32) -> Result<Self, ModelError> {
+        match mode.trim() {
+            "multiple" => {
+                let thousandths = u32::try_from(value).map_err(|_| {
+                    ModelError::InvalidDocument("line spacing multiple is negative")
+                })?;
+                LineHeightMultiple::from_thousandths(thousandths).map(LineSpacing::Multiple)
+            }
+            "exact" => LineSpacing::exactly(Length::from_twips(value)?),
+            "at-least" => LineSpacing::at_least(Length::from_twips(value)?),
+            _ => Err(ModelError::InvalidDocument("unknown line spacing rule")),
+        }
+    }
+
+    /// How this spacing reads to a person: the label a menu or a `<select>`
+    /// shows. A projection rule, so it is Rust's and not the view's.
+    pub fn label(self) -> String {
+        match self {
+            LineSpacing::Multiple(multiple) => match multiple.thousandths() {
+                1_000 => "Single".to_string(),
+                2_000 => "Double".to_string(),
+                _ => format!("{}\u{d7}", trim_trailing_zeros(multiple.ratio())),
+            },
+            LineSpacing::Exact(height) => {
+                format!("Exactly {} pt", trim_trailing_zeros(height.points()))
+            }
+            LineSpacing::AtLeast(height) => {
+                format!("At least {} pt", trim_trailing_zeros(height.points()))
+            }
+        }
+    }
+}
+
+/// `1.50` -> `1.5`, `12.00` -> `12`. Two decimals is exactly the resolution a
+/// twip has in points (0.05pt), so nothing is rounded away that was stored.
+pub(crate) fn trim_trailing_zeros(value: f64) -> String {
+    let text = format!("{value:.2}");
+    let text = text.trim_end_matches('0');
+    text.trim_end_matches('.').to_string()
 }
 
 /// Horizontal alignment of a block's content.

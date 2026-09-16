@@ -11,19 +11,35 @@
 // outlives every rebuild, so re-rendering cannot stack them; the drag
 // listeners are added on mousedown and removed on mouseup.
 import { promptDialog } from "./ui";
+import { openFile } from "./invoke";
+import { downloadExport } from "./files";
 import type { AppBlock } from "./types";
+import {
+  APP_MAX_IMAGE_TWIPS,
+  APP_MIN_IMAGE_TWIPS,
+  APP_TWIPS_PER_POINT,
+} from "./generated/document";
 import { editorHost, state } from "./state";
-import { edit, focusBlock, query, requireBlock, run, showError } from "./shared";
+import { bytesFromBase64, edit, findBlock, focusBlock, native, query, requireBlock, run, showError } from "./shared";
 
 /** How close to the picture's trailing edge the pointer starts a resize. */
 const IMAGE_HANDLE_PX = 8;
-/** Smallest picture worth having: a quarter inch. */
-const IMAGE_MIN_TWIPS = 360;
-/** The model refuses anything past 22in, so the drag stops there too. */
-const IMAGE_MAX_TWIPS = 22 * 1440;
+const IMAGE_BORDER_STYLES = [
+  { value: "none", label: "None" },
+  { value: "solid", label: "Solid" },
+  { value: "dashed", label: "Dashed" },
+  { value: "dotted", label: "Dotted" },
+  { value: "double", label: "Double" },
+];
 
 type ImageEdge = "east" | "south" | "corner";
 type ImageTarget = { blockId: string; box: HTMLElement; edge: ImageEdge };
+type ImagePositionAnchorOption = { value: string; label: string };
+
+function imageAnchorLabel(candidate: AppBlock): string {
+  const text = candidate.content.map((inline) => inline.text ?? "").join("").trim();
+  return text ? text.slice(0, 56) : candidate.kind;
+}
 
 type ImageResize = ImageTarget & {
   originX: number;
@@ -39,6 +55,13 @@ type ImageResize = ImageTarget & {
 };
 
 let imageResize: ImageResize | null = null;
+
+/**
+ * The keyboard resize increment.  One point is small enough for an ordinary
+ * adjustment; holding Alt makes a larger ten-point move without introducing
+ * a second, DOM-only size state.
+ */
+const KEYBOARD_RESIZE_STEP_TWIPS = APP_TWIPS_PER_POINT;
 
 /**
  * Twips per CSS pixel, measured rather than assumed.
@@ -59,14 +82,23 @@ function twipsPerPixel(): number {
   return 15;
 }
 
+/** The drag stops exactly where the model's own bounds do, so a gesture can
+ *  never produce a size the command would then refuse. */
 function clampImageTwips(twips: number): number {
-  return Math.min(IMAGE_MAX_TWIPS, Math.max(IMAGE_MIN_TWIPS, Math.round(twips)));
+  return Math.min(APP_MAX_IMAGE_TWIPS, Math.max(APP_MIN_IMAGE_TWIPS, Math.round(twips)));
 }
 
 /** Twips as the length `opendoc-render` would emit, so a preview and a commit
  *  draw the same box. */
 function twipsToPt(twips: number): string {
-  return `${twips / 20}pt`;
+  return `${twips / APP_TWIPS_PER_POINT}pt`;
+}
+
+/** The rendered box is the authority when the document deliberately leaves
+ * one or both dimensions automatic. */
+function renderedImageTwips(box: HTMLElement, axis: "width" | "height"): number | null {
+  const pixels = box.getBoundingClientRect()[axis];
+  return pixels > 0 ? clampImageTwips(pixels * twipsPerPixel()) : null;
 }
 
 /** The image the pointer would resize, when it sits on a trailing edge. */
@@ -197,6 +229,63 @@ editorHost.onmouseleave = () => {
   editorHost.classList.remove("resize-image-east", "resize-image-south", "resize-image-corner");
 };
 
+/**
+ * Resize the focused image with Ctrl+Shift+Arrow.
+ *
+ * A figure is already an atomic, tab-focusable document object.  This handler
+ * deliberately reads both its block id and current box from that object, then
+ * commits one ordinary model command.  It does not add persistent resize
+ * handles or remember a browser-only dimension, so keyboard, pointer, undo,
+ * collaboration and export all share the same source of truth.
+ *
+ * Alt changes the increment from 1pt to 10pt.  Plain arrows remain document
+ * navigation, and View mode remains non-mutating.
+ */
+export async function resizeFocusedImageFromKeyboard(event: KeyboardEvent): Promise<boolean> {
+  if (!event.ctrlKey || !event.shiftKey || event.metaKey || state.documentEditingMode === "view") return false;
+  const direction = event.key;
+  if (!(["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"] as string[]).includes(direction)) return false;
+
+  const focused = document.activeElement instanceof Element ? document.activeElement : null;
+  const figure = focused?.closest<HTMLElement>("figure.doc-image");
+  const blockId = figure?.getAttribute("data-block-id");
+  if (!figure || !blockId || !editorHost.contains(figure)) return false;
+  const block = findBlock(blockId);
+  const box = figure.querySelector<HTMLElement>("img, .doc-image-placeholder");
+  if (!block || block.kind !== "image" || !box) return false;
+
+  const step = KEYBOARD_RESIZE_STEP_TWIPS * (event.altKey ? 10 : 1);
+  if (direction === "ArrowLeft" || direction === "ArrowRight") {
+    const current = block.image_width_twips ?? renderedImageTwips(box, "width");
+    if (current === null) return false;
+    const next = clampImageTwips(current + (direction === "ArrowRight" ? step : -step));
+    if (next !== current) await edit("set_image_block_width", { blockId, twips: next });
+    return true;
+  }
+  const current = block.image_height_twips ?? renderedImageTwips(box, "height");
+  if (current === null) return false;
+  const next = clampImageTwips(current + (direction === "ArrowDown" ? step : -step));
+  if (next !== current) await edit("set_image_block_height", { blockId, twips: next });
+  return true;
+}
+
+/**
+ * Cancel an atomic image selection without turning Escape into a hidden model
+ * edit. A selected figure is represented by a DOM range over the object; if
+ * that range survives blur, Format > Image can still act on an object the
+ * keyboard user has explicitly left. Clearing it is the only honest
+ * deselection: images have no caret position inside them.
+ */
+export function clearFocusedImageSelection(): boolean {
+  const focused = document.activeElement instanceof Element ? document.activeElement : null;
+  const figure = focused?.closest<HTMLElement>("figure.doc-image");
+  if (!figure || !editorHost.contains(figure)) return false;
+  document.getSelection()?.removeAllRanges();
+  state.selection = null;
+  figure.blur();
+  return true;
+}
+
 /** The image block the caret is on, with a message when it is not on one. */
 export function focusImageBlock(): AppBlock | null {
   const block = focusBlock();
@@ -209,7 +298,7 @@ export function focusImageBlock(): AppBlock | null {
 export async function promptImageSize(): Promise<void> {
   const block = focusImageBlock();
   if (!block) return;
-  const points = (twips: number | null | undefined) => (twips == null ? "" : String(twips / 20));
+  const points = (twips: number | null | undefined) => (twips == null ? "" : String(twips / APP_TWIPS_PER_POINT));
   const result = await promptDialog({
     title: "Image size",
     fields: [
@@ -219,18 +308,374 @@ export async function promptImageSize(): Promise<void> {
     submit: "Apply",
   });
   if (!result) return;
-  const width = result.width.trim() === "" ? null : Math.round(Number(result.width) * 20);
-  const height = result.height.trim() === "" ? null : Math.round(Number(result.height) * 20);
+  // The dialog belongs to the image selected when it was opened. A remote
+  // projection may delete that block (or replace it with another block kind)
+  // before Apply; do not turn the saved id into an edit for stale content.
+  const live = findBlock(block.id);
+  if (live?.kind !== "image") {
+    showError("This image was deleted or changed while its size dialog was open. Select an image and try again.");
+    return;
+  }
+  const width = result.width.trim() === "" ? null : Math.round(Number(result.width) * APP_TWIPS_PER_POINT);
+  const height = result.height.trim() === "" ? null : Math.round(Number(result.height) * APP_TWIPS_PER_POINT);
   if (width === null && height === null) {
-    await edit("clear_image_block_size", { blockId: block.id });
+    await edit("clear_image_block_size", { blockId: live.id });
     return;
   }
   if (width !== null && height !== null) {
-    await edit("set_image_block_size", { blockId: block.id, widthTwips: width, heightTwips: height });
+    await edit("set_image_block_size", { blockId: live.id, widthTwips: width, heightTwips: height });
     return;
   }
-  if (width !== null) await edit("set_image_block_width", { blockId: block.id, twips: width });
-  else if (height !== null) await edit("set_image_block_height", { blockId: block.id, twips: height });
+  if (width !== null) await edit("set_image_block_width", { blockId: live.id, twips: width });
+  else if (height !== null) await edit("set_image_block_height", { blockId: live.id, twips: height });
+}
+
+/**
+ * Make the selected image out-of-flow using the durable ADR 0022 geometry.
+ *
+ * The anchor picker deliberately lists document blocks by their visible text
+ * rather than exposing an opaque stable id as the primary UI.  Page content
+ * is always available, and the image itself is excluded because the command
+ * rejects self anchors.  This is an OpenDoc layout control, not a promise
+ * that DOCX, ODT, or Google exports can retain their native drawing models.
+ */
+export async function promptImagePosition(): Promise<void> {
+  const block = focusImageBlock();
+  if (!block) return;
+  const positioned = block.image_positioned;
+  const anchoredBlock = typeof positioned?.anchor === "object" ? positioned.anchor.Block : "";
+  const anchors = positionAnchorOptions(state.doc?.blocks ?? [], block.id, anchoredBlock);
+  const points = (twips: number | undefined) => String((twips ?? 0) / APP_TWIPS_PER_POINT);
+  const result = await promptDialog({
+    title: "Position image",
+    body: "Positioning is an OpenDoc layout setting. Exports may use an in-flow fallback when their native format cannot represent it.",
+    fields: [
+      { name: "anchor", label: "Anchor", type: "select", value: anchoredBlock, options: anchors },
+      {
+        name: "horizontal", label: "Horizontal offset (pt)", type: "number", step: "0.05",
+        value: points(positioned?.horizontal_offset),
+      },
+      {
+        name: "vertical", label: "Vertical offset (pt)", type: "number", step: "0.05",
+        value: points(positioned?.vertical_offset),
+      },
+      {
+        name: "layer", label: "Layer", type: "select",
+        value: positioned?.layer === "InFrontOfText" ? "in-front-of-text" : "behind-text",
+        options: [
+          { value: "behind-text", label: "Behind text" },
+          { value: "in-front-of-text", label: "In front of text" },
+        ],
+      },
+    ],
+    submit: "Apply",
+  });
+  if (!result) return;
+  const horizontalOffsetTwips = Math.round(Number(result.horizontal) * APP_TWIPS_PER_POINT);
+  const verticalOffsetTwips = Math.round(Number(result.vertical) * APP_TWIPS_PER_POINT);
+  if (!Number.isSafeInteger(horizontalOffsetTwips) || !Number.isSafeInteger(verticalOffsetTwips)) {
+    showError("Image offsets must be finite point measurements.");
+    return;
+  }
+  // A remote replacement can remove the selected atomic object while its
+  // position dialog is open. The dialog's ids describe the image the reader
+  // opened, not an instruction to apply geometry to whatever now owns focus.
+  const live = findBlock(block.id);
+  if (live?.kind !== "image") {
+    showError("This image was deleted or changed while its position dialog was open. Select an image and try again.");
+    return;
+  }
+  await edit("set_image_block_positioned", {
+    blockId: live.id,
+    anchorBlockId: result.anchor || null,
+    horizontalOffsetTwips,
+    verticalOffsetTwips,
+    layer: result.layer,
+  });
+}
+
+/**
+ * The dialog may edit a document that has converged after its image was last
+ * positioned. A deleted or nested target is intentionally not a selectable
+ * visual anchor, but it is still durable source state: omitting it makes a
+ * browser `<select>` substitute the first (page-content) value on Apply.
+ */
+export function positionAnchorOptions(
+  blocks: AppBlock[],
+  imageBlockId: string,
+  anchoredBlockId: string,
+): ImagePositionAnchorOption[] {
+  const options: ImagePositionAnchorOption[] = [
+    { value: "", label: "Page content" },
+    ...blocks
+      .filter((candidate) => candidate.id !== imageBlockId)
+      .map((candidate) => ({ value: candidate.id, label: `Block: ${imageAnchorLabel(candidate)}` })),
+  ];
+  if (anchoredBlockId && !options.some((option) => option.value === anchoredBlockId)) {
+    options.splice(1, 0, {
+      value: anchoredBlockId,
+      label: "Unavailable block anchor (preserved; page-content fallback)",
+    });
+  }
+  return options;
+}
+
+/** Return the selected out-of-flow image to ordinary document flow. */
+export async function clearImagePosition(): Promise<void> {
+  const block = focusImageBlock();
+  if (block) await edit("clear_image_block_positioned", { blockId: block.id });
+}
+
+/** Save the selected image's source bytes without decoding or re-encoding it.
+ * A PNG remains a PNG, a JPEG remains a JPEG, and formats we do not edit yet
+ * (such as SVG) stay usable rather than becoming a lossy surprise. */
+export async function saveFocusedImage(): Promise<void> {
+  const block = focusImageBlock();
+  if (!block?.blob_hash) return;
+  const blob = state.doc?.blobs.find((candidate) => candidate.hash === block.blob_hash);
+  // `defaultName` reaches a native save dialog. Blob names normally come from
+  // a file picker, but imports can supply metadata, so keep separators and
+  // control characters out of its suggested path.
+  const baseName =
+    (blob?.name || "image")
+      .replace(/[\\/:\0-\x1f]/g, "-")
+      .replace(/\.[^.]+$/, "")
+      .trim() || "image";
+  await downloadExport("export_image_blob", "original image", {
+    args: { blobHash: block.blob_hash },
+    defaultBaseName: baseName,
+  });
+}
+
+/** Edit image-specific metadata and optionally replace only its source blob.
+ * Replacing does not mutate the old asset: other image blocks can still point
+ * at it, while this block receives one ordinary, undoable blob-reference
+ * operation. */
+export async function promptImageProperties(): Promise<void> {
+  const block = focusImageBlock();
+  if (!block?.blob_hash) return;
+  // Blob names are source/attachment metadata. They are deliberately kept
+  // outside the image's accessible name, but remain inspectable here and in
+  // the Files panel so a person can identify what will be saved unchanged.
+  const sourceName = state.doc?.blobs.find((blob) => blob.hash === block.blob_hash)?.name ?? "Unavailable source";
+  const result = await promptDialog({
+    title: "Image properties",
+    body: "The source file name is attachment metadata. It is not shown as a caption or used as alternative text.",
+    fields: [
+      {
+        name: "sourceName",
+        label: "Source file",
+        value: sourceName,
+        readonly: true,
+      },
+      {
+        name: "altText",
+        label: "Alternative text",
+        type: "textarea",
+        value: block.alt_text ?? "",
+        placeholder: "Describe it for readers who cannot see it; leave blank when decorative",
+      },
+      {
+        name: "caption",
+        label: "Caption",
+        type: "textarea",
+        value: block.image_caption ?? "",
+        placeholder: "Visible text below the image (optional)",
+      },
+      {
+        name: "wrapTop",
+        label: "Wrap clearance top (pt)",
+        type: "number",
+        value: String((block.image_wrap_clearance?.top ?? 0) / APP_TWIPS_PER_POINT),
+      },
+      {
+        name: "wrapEnd",
+        label: "Wrap clearance end (pt)",
+        type: "number",
+        value: String((block.image_wrap_clearance?.end ?? 0) / APP_TWIPS_PER_POINT),
+      },
+      {
+        name: "wrapBottom",
+        label: "Wrap clearance bottom (pt)",
+        type: "number",
+        value: String((block.image_wrap_clearance?.bottom ?? 0) / APP_TWIPS_PER_POINT),
+      },
+      {
+        name: "wrapStart",
+        label: "Wrap clearance start (pt)",
+        type: "number",
+        value: String((block.image_wrap_clearance?.start ?? 0) / APP_TWIPS_PER_POINT),
+      },
+      {
+        name: "borderStyle",
+        label: "Border style",
+        type: "select",
+        value: block.image_border?.style ?? "none",
+        options: IMAGE_BORDER_STYLES,
+      },
+      {
+        name: "borderPoints",
+        label: "Border thickness (points)",
+        type: "number",
+        step: "0.5",
+        value: String((block.image_border?.twips ?? 20) / APP_TWIPS_PER_POINT),
+      },
+      {
+        name: "borderColor",
+        label: "Border colour",
+        type: "color",
+        value: block.image_border?.color ?? "#000000",
+      },
+      {
+        name: "rotation",
+        label: "Rotation (degrees)",
+        type: "number",
+        value: String(block.image_rotation_degrees ?? 0),
+      },
+      {
+        name: "opacity",
+        label: "Opacity (%)",
+        type: "number",
+        value: String(block.image_opacity_percent ?? 100),
+      },
+      {
+        name: "cropTop",
+        label: "Crop top (%)",
+        type: "number",
+        value: String(block.image_crop_top_percent ?? 0),
+      },
+      {
+        name: "cropRight",
+        label: "Crop right (%)",
+        type: "number",
+        value: String(block.image_crop_right_percent ?? 0),
+      },
+      {
+        name: "cropBottom",
+        label: "Crop bottom (%)",
+        type: "number",
+        value: String(block.image_crop_bottom_percent ?? 0),
+      },
+      {
+        name: "cropLeft",
+        label: "Crop left (%)",
+        type: "number",
+        value: String(block.image_crop_left_percent ?? 0),
+      },
+    ],
+    submit: "Save",
+  });
+  if (!result) return;
+  const rotation = Number(result.rotation);
+  const opacity = Number(result.opacity);
+  const crop = [
+    result.cropTop,
+    result.cropRight,
+    result.cropBottom,
+    result.cropLeft,
+  ].map(Number);
+  const borderPoints = Number(result.borderPoints);
+  const wrapClearance = [result.wrapTop, result.wrapEnd, result.wrapBottom, result.wrapStart].map(Number);
+  if (!Number.isInteger(rotation) || rotation < -360 || rotation > 360) {
+    showError("Rotation must be a whole number from -360 to 360.");
+    return;
+  }
+  if (!Number.isInteger(opacity) || opacity < 0 || opacity > 100) {
+    showError("Opacity must be a whole percentage from 0 to 100.");
+    return;
+  }
+  if (
+    !crop.every((value) => Number.isInteger(value) && value >= 0 && value <= 100) ||
+    crop[0] + crop[2] >= 100 ||
+    crop[1] + crop[3] >= 100
+  ) {
+    showError("Crop values must be 0–100%, leaving some width and height visible.");
+    return;
+  }
+  if (!Number.isFinite(borderPoints) || borderPoints < 0 || borderPoints > 6) {
+    showError("Border thickness must be between 0 and 6 points.");
+    return;
+  }
+  if (!wrapClearance.every((value) => Number.isFinite(value) && value >= 0 && value <= 1584)) {
+    showError("Wrap clearance must be between 0 and 1584 points.");
+    return;
+  }
+  // Validate every field before emitting an operation. In particular, an
+  // invalid crop must not leave an updated alt text behind as a partial save.
+  if (result.altText !== (block.alt_text ?? "")) {
+    await edit("update_image_alt_text", { blockId: block.id, altText: result.altText });
+  }
+  if (result.caption !== (block.image_caption ?? "")) {
+    await edit("set_image_block_caption", { blockId: block.id, caption: result.caption });
+  }
+  const wrapTwips = wrapClearance.map((value) => Math.round(value * APP_TWIPS_PER_POINT));
+  const currentWrap = block.image_wrap_clearance;
+  if (
+    wrapTwips.some((value, index) => value !== [currentWrap?.top ?? 0, currentWrap?.end ?? 0, currentWrap?.bottom ?? 0, currentWrap?.start ?? 0][index])
+  ) {
+    if (block.image_placement !== "wrap-start" && block.image_placement !== "wrap-end") {
+      showError("Choose a Wrap text placement before setting image wrap clearance.");
+      return;
+    }
+    await edit("set_image_block_wrap_clearance", {
+      blockId: block.id,
+      topTwips: wrapTwips[0],
+      endTwips: wrapTwips[1],
+      bottomTwips: wrapTwips[2],
+      startTwips: wrapTwips[3],
+    });
+  }
+  const borderTwips = Math.round(borderPoints * APP_TWIPS_PER_POINT);
+  if (
+    result.borderStyle !== (block.image_border?.style ?? "none") ||
+    (result.borderStyle !== "none" &&
+      (borderTwips !== (block.image_border?.twips ?? 20) ||
+        result.borderColor !== (block.image_border?.color ?? "#000000")))
+  ) {
+    await edit("set_image_block_border", {
+      blockId: block.id,
+      style: result.borderStyle,
+      twips: borderTwips,
+      color: result.borderColor,
+    });
+  }
+  await edit("set_image_block_effects", {
+    blockId: block.id,
+    rotationDegrees: rotation,
+    opacityPercent: opacity,
+  });
+  await edit("set_image_block_crop", {
+    blockId: block.id,
+    topPercent: crop[0],
+    rightPercent: crop[1],
+    bottomPercent: crop[2],
+    leftPercent: crop[3],
+  });
+}
+
+/** Replace the selected image while retaining its document position, layout,
+ * and accessibility metadata. */
+export async function replaceFocusedImage(): Promise<void> {
+  const block = focusImageBlock();
+  if (!block?.blob_hash) return;
+  const file = await native("Could not open that image", () =>
+    openFile(["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "tif", "tiff"]),
+  );
+  if (!file) return;
+  const known = new Set((state.doc?.blobs ?? []).map((blob) => blob.hash));
+  const updated = await run("add_binary_blob", {
+    name: file.name,
+    mediaType: file.media_type,
+    bytes: bytesFromBase64(file.base64),
+  });
+  const replacement =
+    updated.blobs.find((blob) => !known.has(blob.hash)) ??
+    updated.blobs.find((blob) => blob.name === file.name && blob.size === file.size);
+  if (!replacement) {
+    showError("The image was opened but could not be stored.");
+    return;
+  }
+  await edit("update_image_blob_hash", { blockId: block.id, blobHash: replacement.hash });
 }
 
 /**
@@ -247,6 +692,15 @@ export async function insertImageFiles(files: File[], afterBlockId: string | nul
   if (!after) return;
   for (const file of files) {
     try {
+      // A cell is a real block container.  Remember the ids before the
+      // operation rather than looking only at `doc.blocks` afterwards: the
+      // latter misses an image inserted in a table cell, leaving `after` at
+      // the original paragraph and reversing the rest of a multi-file drop.
+      const before = new Set(documentBlockIds(state.doc?.blocks ?? []));
+      // `after` is narrowed before the asynchronous blob round-trip. Keep a
+      // concrete anchor for this iteration; the next iteration receives the
+      // newly inserted image below.
+      const anchor = after;
       const name = file.name || "pasted image";
       const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
       // Which hash the bytes have is Rust's answer, not one recomputed here:
@@ -259,13 +713,33 @@ export async function insertImageFiles(files: File[], afterBlockId: string | nul
         updated.blobs.find((item) => !known.has(item.hash)) ??
         [...updated.blobs].reverse().find((item) => item.size === bytes.length && item.name === name);
       if (!blob) return;
-      await edit("insert_image_block_after", { afterBlockId: after, blobHash: blob.hash, altText: name });
+      // A dropped file's name remains blob metadata, not an accidental alt
+      // description. The Image properties dialog is where an author supplies
+      // meaningful alternative text or a visible caption.
+      await run("insert_image_block_after", { afterBlockId: anchor, blobHash: blob.hash, altText: "" });
       // Each picture lands after the previous one, so dropping several keeps
-      // the order they were dropped in.
-      const inserted = [...(state.doc?.blocks ?? [])].reverse().find((block) => block.kind === "image" && block.blob_hash === blob.hash);
+      // the order they were dropped in, including when that sibling is in a
+      // cell rather than the top-level body.
+      const inserted = Array.from(documentBlocks(state.doc?.blocks ?? [])).find(
+        (block) => !before.has(block.id) && block.kind === "image" && block.blob_hash === blob.hash,
+      );
       after = inserted?.id ?? after;
     } catch {
       // reported by run()
     }
   }
+}
+
+/** Walk the projection's body and every table-cell block in document order. */
+function* documentBlocks(blocks: AppBlock[]): Generator<AppBlock> {
+  for (const block of blocks) {
+    yield block;
+    for (const row of block.rows ?? []) {
+      for (const cell of row) yield* documentBlocks(cell);
+    }
+  }
+}
+
+function documentBlockIds(blocks: AppBlock[]): string[] {
+  return [...documentBlocks(blocks)].map((block) => block.id);
 }

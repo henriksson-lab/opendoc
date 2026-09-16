@@ -1,0 +1,20 @@
+[package]
+name = "opendoc-fuzz"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Fuzz targets for the file parsers. The crate holds the *targets* — one
+# `fn(&[u8])` per reader, each asserting the invariants that reader promises —
+# so that the same target can be driven two ways: by the in-gate harness in
+# `src/harness.rs`, which runs on stable and is part of
+# `cargo test --release --workspace`, and by `cargo fuzz`, which needs nightly
+# and is therefore opt-in (see `fuzz/README.md`).
+
+[dependencies]
+base64 = "0.22"
+opendoc-core = { path = "../opendoc-core" }
+opendoc-import = { path = "../opendoc-import" }
+opendoc-spreadsheet = { path = "../opendoc-spreadsheet" }
+serde_json = "1"
+zip = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }

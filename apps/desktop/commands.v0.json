@@ -39,11 +39,7 @@
       "args": {
         "mode": "string",
         "storageBackends": "object[]",
-        "signingEnabled": "boolean|null",
-        "subject": "string|null",
-        "documentUuid": "string|null",
-        "presence": "object[]",
-        "permissions": "object[]"
+        "signingEnabled": "boolean|null"
       }
     },
     {
@@ -53,10 +49,7 @@
         "mode": "string",
         "storageBackends": "object[]",
         "signingEnabled": "boolean|null",
-        "subject": "string|null",
-        "documentUuid": "string|null",
-        "commandName": "string",
-        "permissions": "object[]"
+        "commandName": "string"
       }
     },
     {
@@ -66,11 +59,8 @@
         "mode": "string",
         "storageBackends": "object[]",
         "signingEnabled": "boolean|null",
-        "subject": "string|null",
-        "documentUuid": "string|null",
         "targetSubject": "string|null",
-        "actions": "string[]",
-        "permissions": "object[]"
+        "role": "string|null"
       }
     },
     {
@@ -80,12 +70,7 @@
         "mode": "string",
         "storageBackends": "object[]",
         "signingEnabled": "boolean|null",
-        "subject": "string|null",
-        "documentUuid": "string|null",
-        "baseManifest": "string|null",
-        "operations": "object[]",
-        "permissions": "object[]",
-        "presence": "object[]"
+        "operations": "object[]"
       }
     },
     {
@@ -95,10 +80,8 @@
         "mode": "string",
         "storageBackends": "object[]",
         "signingEnabled": "boolean|null",
-        "subject": "string|null",
         "documentUuid": "string|null",
         "doi": "string|null",
-        "permissions": "object[]",
         "serviceIndex": "object[]",
         "scannedDocuments": "object[]"
       }
@@ -135,6 +118,26 @@
     },
     {
       "name": "export_docx",
+      "returns": "AppExport",
+      "args": {}
+    },
+    {
+      "name": "export_odt",
+      "returns": "AppExport",
+      "args": {}
+    },
+    {
+      "name": "export_pdf",
+      "returns": "AppExport",
+      "args": {}
+    },
+    {
+      "name": "export_html",
+      "returns": "AppExport",
+      "args": {}
+    },
+    {
+      "name": "export_text",
       "returns": "AppExport",
       "args": {}
     },
@@ -183,6 +186,13 @@
         "afterBlockId": "string",
         "blobHash": "string",
         "altText": "string"
+      }
+    },
+    {
+      "name": "export_image_blob",
+      "returns": "AppExport",
+      "args": {
+        "blobHash": "string"
       }
     },
     {
@@ -268,6 +278,22 @@
       }
     },
     {
+      "name": "set_bookmark",
+      "returns": "AppDocument",
+      "args": {
+        "bookmarkId": "string|null",
+        "name": "string",
+        "blockId": "string"
+      }
+    },
+    {
+      "name": "delete_bookmark",
+      "returns": "AppDocument",
+      "args": {
+        "bookmarkId": "string"
+      }
+    },
+    {
       "name": "add_paragraph",
       "returns": "AppDocument",
       "args": {
@@ -310,6 +336,15 @@
       "returns": "AppDocument",
       "args": {
         "blockId": "string"
+      }
+    },
+    {
+      "name": "move_block",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "anchorBlockId": "string",
+        "placement": "string"
       }
     },
     {
@@ -367,7 +402,22 @@
       }
     },
     {
+      "name": "set_page_furniture_html",
+      "returns": "AppDocument",
+      "args": {
+        "slot": "string",
+        "html": "string"
+      }
+    },
+    {
       "name": "clear_page_furniture",
+      "returns": "AppDocument",
+      "args": {
+        "slot": "string"
+      }
+    },
+    {
+      "name": "clear_page_furniture_override",
       "returns": "AppDocument",
       "args": {
         "slot": "string"
@@ -504,6 +554,58 @@
       }
     },
     {
+      "name": "set_block_keep_with_next",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "keepWithNext": "boolean"
+      }
+    },
+    {
+      "name": "set_editor_selection_block_keep_with_next",
+      "returns": "AppDocument",
+      "args": {
+        "selection": "EditorSelection",
+        "keepWithNext": "boolean"
+      }
+    },
+    {
+      "name": "set_block_background",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "color": "string"
+      }
+    },
+    {
+      "name": "set_editor_selection_block_background",
+      "returns": "AppDocument",
+      "args": {
+        "selection": "EditorSelection",
+        "color": "string"
+      }
+    },
+    {
+      "name": "set_block_border",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "style": "string",
+        "twips": "number",
+        "color": "string"
+      }
+    },
+    {
+      "name": "set_editor_selection_block_border",
+      "returns": "AppDocument",
+      "args": {
+        "selection": "EditorSelection",
+        "style": "string",
+        "twips": "number",
+        "color": "string"
+      }
+    },
+    {
       "name": "clear_block_property",
       "returns": "AppDocument",
       "args": {
@@ -609,6 +711,15 @@
       }
     },
     {
+      "name": "insert_date_chip_after",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "afterInlineId": "string|null",
+        "date": "string"
+      }
+    },
+    {
       "name": "update_mention_label",
       "returns": "AppDocument",
       "args": {
@@ -617,12 +728,41 @@
       }
     },
     {
+      "name": "select_dropdown_option",
+      "returns": "AppDocument",
+      "args": {
+        "inlineId": "string",
+        "optionId": "string"
+      }
+    },
+    {
+      "name": "update_date_chip",
+      "returns": "AppDocument",
+      "args": {
+        "inlineId": "string",
+        "date": "string"
+      }
+    },
+    {
       "name": "add_footnote_ref",
       "returns": "AppDocument",
       "args": {}
     },
     {
+      "name": "add_endnote_ref",
+      "returns": "AppDocument",
+      "args": {}
+    },
+    {
       "name": "insert_footnote_ref_after",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "afterInlineId": "string|null"
+      }
+    },
+    {
+      "name": "insert_endnote_ref_after",
       "returns": "AppDocument",
       "args": {
         "blockId": "string",
@@ -697,6 +837,30 @@
       }
     },
     {
+      "name": "set_ordered_list_start",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "start": "number"
+      }
+    },
+    {
+      "name": "set_ordered_list_format",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "format": "string"
+      }
+    },
+    {
+      "name": "set_bullet_list_marker",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "marker": "string"
+      }
+    },
+    {
       "name": "adjust_editor_selection_list_indent",
       "returns": "AppDocument",
       "args": {
@@ -715,6 +879,32 @@
       "name": "add_page_break",
       "returns": "AppDocument",
       "args": {}
+    },
+    {
+      "name": "insert_horizontal_rule_after",
+      "returns": "AppDocument",
+      "args": {
+        "afterBlockId": "string"
+      }
+    },
+    {
+      "name": "add_horizontal_rule",
+      "returns": "AppDocument",
+      "args": {}
+    },
+    {
+      "name": "insert_table_of_contents_after",
+      "returns": "AppDocument",
+      "args": {
+        "afterBlockId": "string"
+      }
+    },
+    {
+      "name": "insert_bibliography_after",
+      "returns": "AppDocument",
+      "args": {
+        "afterBlockId": "string"
+      }
     },
     {
       "name": "insert_table_after",
@@ -800,6 +990,73 @@
       }
     },
     {
+      "name": "set_table_row_height",
+      "returns": "AppDocument",
+      "args": {
+        "tableBlockId": "string",
+        "rowId": "string",
+        "twips": "number"
+      }
+    },
+    {
+      "name": "clear_table_row_height",
+      "returns": "AppDocument",
+      "args": {
+        "tableBlockId": "string",
+        "rowId": "string"
+      }
+    },
+    {
+      "name": "set_table_row_header",
+      "returns": "AppDocument",
+      "args": {
+        "tableBlockId": "string",
+        "rowId": "string",
+        "header": "boolean"
+      }
+    },
+    {
+      "name": "sort_table_rows",
+      "returns": "AppDocument",
+      "args": {
+        "tableBlockId": "string",
+        "columnId": "string",
+        "descending": "boolean"
+      }
+    },
+    {
+      "name": "set_table_border",
+      "returns": "AppDocument",
+      "args": {
+        "tableBlockId": "string",
+        "style": "string",
+        "twips": "number",
+        "color": "string"
+      }
+    },
+    {
+      "name": "clear_table_border",
+      "returns": "AppDocument",
+      "args": {
+        "tableBlockId": "string"
+      }
+    },
+    {
+      "name": "set_table_alignment",
+      "returns": "AppDocument",
+      "args": {
+        "tableBlockId": "string",
+        "alignment": "string"
+      }
+    },
+    {
+      "name": "clear_table_alignment",
+      "returns": "AppDocument",
+      "args": {
+        "tableBlockId": "string"
+      }
+    },
+    {
       "name": "merge_table_cells",
       "returns": "AppDocument",
       "args": {
@@ -840,6 +1097,14 @@
       "args": {
         "cellId": "string",
         "alignment": "string"
+      }
+    },
+    {
+      "name": "set_table_cell_row_header",
+      "returns": "AppDocument",
+      "args": {
+        "cellId": "string",
+        "rowHeader": "boolean"
       }
     },
     {
@@ -982,6 +1247,32 @@
       }
     },
     {
+      "name": "add_block_delete_suggestion",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "author": "string"
+      }
+    },
+    {
+      "name": "add_block_insert_suggestion",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "author": "string",
+        "text": "string"
+      }
+    },
+    {
+      "name": "add_block_replace_suggestion",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "author": "string",
+        "text": "string"
+      }
+    },
+    {
       "name": "add_delete_suggestion",
       "returns": "AppDocument",
       "args": {
@@ -1017,6 +1308,47 @@
         "author": "string",
         "markKind": "string",
         "value": "string|null"
+      }
+    },
+    {
+      "name": "add_text_range_format_removal_suggestion",
+      "returns": "AppDocument",
+      "args": {
+        "startInlineId": "string",
+        "endInlineId": "string",
+        "author": "string",
+        "markKind": "string",
+        "value": "string|null"
+      }
+    },
+    {
+      "name": "add_text_range_format_replacement_suggestion",
+      "returns": "AppDocument",
+      "args": {
+        "startInlineId": "string",
+        "endInlineId": "string",
+        "author": "string",
+        "markKind": "string",
+        "expectedValue": "string",
+        "value": "string"
+      }
+    },
+    {
+      "name": "add_link_change_suggestion",
+      "returns": "AppDocument",
+      "args": {
+        "inlineId": "string",
+        "author": "string",
+        "href": "string|null"
+      }
+    },
+    {
+      "name": "add_paragraph_style_suggestion",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "author": "string",
+        "style": "string"
       }
     },
     {
@@ -1075,6 +1407,42 @@
       "returns": "AppDocument",
       "args": {
         "inlineId": "string"
+      }
+    },
+    {
+      "name": "resolve_comment_thread",
+      "returns": "AppDocument",
+      "args": {
+        "threadId": "string",
+        "resolvedBy": "string"
+      }
+    },
+    {
+      "name": "reopen_comment_thread",
+      "returns": "AppDocument",
+      "args": {
+        "threadId": "string"
+      }
+    },
+    {
+      "name": "set_comment_thread_action",
+      "returns": "AppDocument",
+      "args": {
+        "threadId": "string",
+        "assignee": "string|null",
+        "dueAtMs": "number|null",
+        "completed": "boolean",
+        "completedBy": "string|null"
+      }
+    },
+    {
+      "name": "set_comment_thread_reaction",
+      "returns": "AppDocument",
+      "args": {
+        "threadId": "string",
+        "emoji": "string",
+        "actor": "string",
+        "present": "boolean"
       }
     },
     {
@@ -1246,6 +1614,73 @@
       "args": {
         "blockId": "string",
         "placement": "string"
+      }
+    },
+    {
+      "name": "set_image_block_wrap_clearance",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "topTwips": "number",
+        "endTwips": "number",
+        "bottomTwips": "number",
+        "startTwips": "number"
+      }
+    },
+    {
+      "name": "set_image_block_positioned",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "anchorBlockId": "string|null?",
+        "horizontalOffsetTwips": "number",
+        "verticalOffsetTwips": "number",
+        "layer": "string"
+      }
+    },
+    {
+      "name": "clear_image_block_positioned",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string"
+      }
+    },
+    {
+      "name": "set_image_block_effects",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "rotationDegrees": "number",
+        "opacityPercent": "number"
+      }
+    },
+    {
+      "name": "set_image_block_crop",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "topPercent": "number",
+        "rightPercent": "number",
+        "bottomPercent": "number",
+        "leftPercent": "number"
+      }
+    },
+    {
+      "name": "set_image_block_caption",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "caption": "string"
+      }
+    },
+    {
+      "name": "set_image_block_border",
+      "returns": "AppDocument",
+      "args": {
+        "blockId": "string",
+        "style": "string",
+        "twips": "number",
+        "color": "string"
       }
     },
     {
@@ -1573,6 +2008,29 @@
       }
     },
     {
+      "name": "set_spreadsheet_print_area",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string",
+        "range": "string"
+      }
+    },
+    {
+      "name": "clear_spreadsheet_print_area",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string"
+      }
+    },
+    {
+      "name": "set_spreadsheet_print_orientation",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string",
+        "orientation": "string"
+      }
+    },
+    {
       "name": "set_spreadsheet_basic_filter_options",
       "returns": "AppDocument",
       "args": {
@@ -1677,6 +2135,26 @@
       }
     },
     {
+      "name": "set_spreadsheet_selection_rows_hidden",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string",
+        "anchor": "string",
+        "focus": "string",
+        "hidden": "boolean"
+      }
+    },
+    {
+      "name": "set_spreadsheet_selection_columns_hidden",
+      "returns": "AppDocument",
+      "args": {
+        "sheetId": "string",
+        "anchor": "string",
+        "focus": "string",
+        "hidden": "boolean"
+      }
+    },
+    {
       "name": "copy_spreadsheet_range",
       "returns": "AppDocument",
       "args": {
@@ -1717,7 +2195,7 @@
     },
     {
       "name": "export_spreadsheet_csv",
-      "returns": "string",
+      "returns": "AppExport",
       "args": {
         "sheetId": "string",
         "delimiter": "string|null?"
@@ -1733,7 +2211,12 @@
     },
     {
       "name": "export_spreadsheet_xlsx",
-      "returns": "string",
+      "returns": "AppExport",
+      "args": {}
+    },
+    {
+      "name": "export_spreadsheet_pdf",
+      "returns": "AppExport",
       "args": {}
     },
     {
@@ -1766,6 +2249,13 @@
       "returns": "AppDocument",
       "args": {
         "name": "string"
+      }
+    },
+    {
+      "name": "import_bibtex",
+      "returns": "AppDocument",
+      "args": {
+        "source": "string"
       }
     },
     {
@@ -1995,6 +2485,14 @@
       }
     },
     {
+      "name": "sign_current_repository_version_with_openssh_private_key",
+      "returns": "AppDocument",
+      "args": {
+        "privateKeyPem": "string",
+        "signerDisplay": "string"
+      }
+    },
+    {
       "name": "verify_current_signature",
       "returns": "string",
       "args": {
@@ -2070,6 +2568,14 @@
       "name": "render_document_html",
       "returns": "string",
       "args": {}
+    },
+    {
+      "name": "render_suggestion_preview_html",
+      "returns": "string",
+      "args": {
+        "suggestionId": "string",
+        "resolution": "string"
+      }
     },
     {
       "name": "apply_editor_mark",

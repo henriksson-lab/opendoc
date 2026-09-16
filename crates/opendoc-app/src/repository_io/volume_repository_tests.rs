@@ -83,7 +83,7 @@ fn a_document_saved_into_a_volume_reopens_from_the_durable_bytes() {
             .expect("save");
         assert!(!saved.has_unsaved_changes);
         uuid = saved.uuid.clone();
-        visible_text = saved.visible_text.clone();
+        visible_text = saved.visible_text();
         // The save is only in memory until the driver drains it.
         assert!(volume.pending_len() > 0);
         assert!(durable.0.is_empty());
@@ -106,8 +106,10 @@ fn a_document_saved_into_a_volume_reopens_from_the_durable_bytes() {
         )
         .expect("open");
     assert_eq!(opened.uuid, uuid);
-    assert_eq!(opened.visible_text, visible_text);
-    assert!(opened.visible_text.contains("persisted across a page load"));
+    assert_eq!(opened.visible_text(), visible_text);
+    assert!(opened
+        .visible_text()
+        .contains("persisted across a page load"));
     assert!(!opened.has_unsaved_changes);
 }
 
@@ -219,6 +221,6 @@ fn an_unflushed_commit_is_lost_whole_rather_than_half_written() {
             None,
         )
         .expect("open");
-    assert!(opened.visible_text.contains("first save"));
-    assert!(!opened.visible_text.contains("never made it"));
+    assert!(opened.visible_text().contains("first save"));
+    assert!(!opened.visible_text().contains("never made it"));
 }

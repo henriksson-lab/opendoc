@@ -92,8 +92,15 @@ pub fn validate_canonical_column_label(value: &str) -> Result<(), SpreadsheetErr
 
 pub fn normalize_named_range_name(value: &str) -> Result<String, SpreadsheetError> {
     let value = value.trim();
+    let mut characters = value.chars();
+    let Some(first) = characters.next() else {
+        return Err(SpreadsheetError::Format(format!(
+            "invalid named range {value}"
+        )));
+    };
     if value.is_empty()
-        || !value.chars().all(|ch| ch.is_ascii_alphabetic())
+        || !(first.is_ascii_alphabetic() || first == '_')
+        || !characters.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
         || normalize_cell_address(value).is_ok()
     {
         return Err(SpreadsheetError::Format(format!(
@@ -177,11 +184,50 @@ pub fn number_to_column(mut value: u32) -> Option<String> {
     Some(chars.into_iter().collect())
 }
 
+/// Largest magnitude printed as plain digits.
+///
+/// `f64` represents integers exactly up to 2^53 (~9.0e15); past that the
+/// trailing digits of a decimal expansion describe the binary value, not
+/// the number anyone wrote. 1e15 is the round decade below that bound.
+const PLAIN_INTEGER_LIMIT: f64 = 1e15;
+
+/// Canonical text for a number.
+///
+/// Whole numbers print as digits, everything else as the shortest decimal
+/// that reads back as the same `f64`. Large magnitudes print in scientific
+/// notation: `format!("{}", value as i64)` **saturates** in Rust, so `1E21`,
+/// `2^63` and `FACT(25)` all used to come out as the same
+/// `9223372036854775807`. The in-memory `f64` was always right; this is the
+/// text the grid shows and CSV export writes.
 pub fn trim_number(value: f64) -> String {
+    if !value.is_finite() {
+        return value.to_string();
+    }
+    if value.abs() >= PLAIN_INTEGER_LIMIT {
+        return scientific_number(value);
+    }
     if value.fract() == 0.0 {
         format!("{}", value as i64)
     } else {
         value.to_string()
+    }
+}
+
+/// `1e21` → `1E+21`, `9.223372036854776e18` → `9.223372036854776E+18`.
+///
+/// The mantissa is Rust's shortest round-tripping form, so the text parses
+/// back to the same `f64` it came from.
+fn scientific_number(value: f64) -> String {
+    let formatted = format!("{value:e}");
+    match formatted.split_once('e') {
+        Some((mantissa, exponent)) => {
+            if let Some(negative) = exponent.strip_prefix('-') {
+                format!("{mantissa}E-{negative}")
+            } else {
+                format!("{mantissa}E+{exponent}")
+            }
+        }
+        None => formatted,
     }
 }
 

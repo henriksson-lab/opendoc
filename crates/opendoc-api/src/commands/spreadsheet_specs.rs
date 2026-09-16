@@ -385,6 +385,30 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         Some("write")
     ),
     command!(
+        "set_spreadsheet_print_area",
+        AppDocument,
+        [arg!("sheetId", String), arg!("range", String)],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
+        "clear_spreadsheet_print_area",
+        AppDocument,
+        [arg!("sheetId", String)],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
+        "set_spreadsheet_print_orientation",
+        AppDocument,
+        [arg!("sheetId", String), arg!("orientation", String)],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
         "set_spreadsheet_basic_filter_options",
         AppDocument,
         [
@@ -512,6 +536,32 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         Some("write")
     ),
     command!(
+        "set_spreadsheet_selection_rows_hidden",
+        AppDocument,
+        [
+            arg!("sheetId", String),
+            arg!("anchor", String),
+            arg!("focus", String),
+            arg!("hidden", Boolean)
+        ],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
+        "set_spreadsheet_selection_columns_hidden",
+        AppDocument,
+        [
+            arg!("sheetId", String),
+            arg!("anchor", String),
+            arg!("focus", String),
+            arg!("hidden", Boolean)
+        ],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
         "copy_spreadsheet_range",
         AppDocument,
         [
@@ -564,7 +614,7 @@ pub(crate) const SPECS: &[CommandSpec] = &[
     ),
     command!(
         "export_spreadsheet_csv",
-        String,
+        AppExport,
         [
             arg!("sheetId", String),
             arg!("delimiter", NullableString, optional)
@@ -583,7 +633,15 @@ pub(crate) const SPECS: &[CommandSpec] = &[
     ),
     command!(
         "export_spreadsheet_xlsx",
-        String,
+        AppExport,
+        [],
+        false,
+        false,
+        Some("read")
+    ),
+    command!(
+        "export_spreadsheet_pdf",
+        AppExport,
         [],
         false,
         false,

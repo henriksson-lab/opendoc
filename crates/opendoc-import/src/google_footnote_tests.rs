@@ -39,6 +39,62 @@ fn imports_google_docs_footnotes_as_document_local_source() {
 }
 
 #[test]
+fn imports_valid_structural_footnote_content_without_aborting_the_document() {
+    let input = json!({
+        "body": { "content": [{
+            "paragraph": { "elements": [
+                { "textRun": { "content": "Text", "textStyle": {} } },
+                { "footnoteReference": { "footnoteId": "fn-1" } }
+            ] }
+        }] },
+        "footnotes": {
+            "fn-1": {
+                "footnoteId": "fn-1",
+                "content": [
+                    { "paragraph": { "elements": [{
+                        "textRun": { "content": "Opening", "textStyle": {} }
+                    }] } },
+                    { "table": { "tableRows": [
+                        { "tableCells": [
+                            { "content": [{ "paragraph": { "elements": [{ "textRun": { "content": "left", "textStyle": {} } }] } }] },
+                            { "content": [{ "paragraph": { "elements": [{ "textRun": { "content": "right", "textStyle": {} } }] } }] }
+                        ] }
+                    ] } },
+                    { "table": { "tableRows": [
+                        { "tableCells": [
+                            { "content": [{ "paragraph": { "elements": [{ "textRun": { "content": "again", "textStyle": {} } }] } }] }
+                        ] }
+                    ] } },
+                    { "sectionBreak": {} }
+                ]
+            }
+        }
+    });
+
+    let report = import_google_docs_json("Google", input.to_string().as_bytes()).unwrap();
+    let body = &report.document.footnotes[0].body;
+    let text = body
+        .iter()
+        .filter_map(|inline| match inline {
+            Inline::Text { text, .. } | Inline::Link { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<String>();
+    assert_eq!(text, "Opening\nleft\tright\nagain\n[Page break]");
+    assert_eq!(
+        report
+            .warnings
+            .iter()
+            .filter(|warning| warning.code == "google-footnote-table-flattened")
+            .count(),
+        1
+    );
+    assert!(report.warnings.iter().any(|warning| {
+        warning.code == "google-footnote-block-fallback" && warning.message.contains("page break")
+    }));
+}
+
+#[test]
 fn malformed_google_docs_footnote_source_aborts() {
     let base = json!({
         "body": { "content": [{
@@ -105,8 +161,7 @@ fn malformed_google_docs_footnote_source_aborts() {
     input["footnotes"]["fn-1"]["content"] = json!([{ "table": {} }]);
     let err = import_google_docs_json("Google", input.to_string().as_bytes()).unwrap_err();
     assert!(
-        err.to_string()
-            .contains("only paragraph footnote content is supported"),
+        err.to_string().contains("malformed Google Docs table"),
         "{err}"
     );
 }

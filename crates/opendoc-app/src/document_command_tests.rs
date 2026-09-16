@@ -1,5 +1,6 @@
 use super::*;
 use opendoc_core::{Alignment, Length, LineSpacing, TextDirection};
+use serde_json::json;
 
 fn app_with_paragraphs(texts: &[&str]) -> OpenDocApp {
     let mut app = OpenDocApp::new_sample();
@@ -13,6 +14,142 @@ fn app_with_paragraphs(texts: &[&str]) -> OpenDocApp {
 
 fn block_id(app: &OpenDocApp, index: usize) -> String {
     app.document.blocks[index].id.to_string()
+}
+
+#[test]
+fn date_chip_command_updates_one_validated_atomic_value_and_undoes() {
+    let mut app = app_with_paragraphs(&[""]);
+    let chip_id = StableId::parse("date-chip-command").expect("valid id");
+    app.document.blocks[0].content = vec![Inline::DateChip {
+        id: chip_id.clone(),
+        date: "2024-02-29".to_string(),
+    }];
+
+    app.dispatch_command(
+        "update_date_chip",
+        json!({ "inlineId": chip_id, "date": "2025-03-01" }),
+    )
+    .expect("the public command reaches the atomic update");
+    assert!(matches!(
+        &app.document.blocks[0].content[0],
+        Inline::DateChip { date, .. } if date == "2025-03-01"
+    ));
+
+    app.undo_current_edit()
+        .expect("date-chip update is undoable");
+    assert!(matches!(
+        &app.document.blocks[0].content[0],
+        Inline::DateChip { date, .. } if date == "2024-02-29"
+    ));
+
+    let error = app
+        .dispatch_command(
+            "update_date_chip",
+            json!({ "inlineId": chip_id, "date": "2025-02-29" }),
+        )
+        .expect_err("invalid calendar values remain rejected at the command boundary");
+    assert!(
+        error.to_string().contains("invalid calendar date"),
+        "{error}"
+    );
+}
+
+#[test]
+fn date_chip_insert_uses_the_caret_boundary_validates_and_undoes() {
+    let mut app = app_with_paragraphs(&["before"]);
+    let block_id = block_id(&app, 0);
+    let after_inline_id = match &app.document.blocks[0].content[0] {
+        Inline::Text { id, .. } => id.to_string(),
+        inline => panic!("expected text inline, got {inline:?}"),
+    };
+
+    app.dispatch_command(
+        "insert_date_chip_after",
+        json!({ "blockId": block_id, "afterInlineId": after_inline_id, "date": "2028-02-29" }),
+    )
+    .expect("the public command inserts a validated atomic chip at the caret");
+    assert!(matches!(
+        app.document.blocks[0].content.last(),
+        Some(Inline::DateChip { date, .. }) if date == "2028-02-29"
+    ));
+    app.undo_current_edit()
+        .expect("insert is one undoable gesture");
+    assert_eq!(app.document.blocks[0].content.len(), 1);
+
+    let error = app
+        .dispatch_command(
+            "insert_date_chip_after",
+            json!({ "blockId": block_id, "afterInlineId": null, "date": "2025-02-29" }),
+        )
+        .expect_err("invalid calendar values cannot be inserted");
+    assert!(
+        error.to_string().contains("invalid calendar date"),
+        "{error}"
+    );
+}
+
+#[test]
+fn table_of_contents_insert_is_one_undoable_atomic_block() {
+    let mut app = app_with_paragraphs(&["before"]);
+    let before = block_id(&app, 0);
+    app.dispatch_command(
+        "insert_table_of_contents_after",
+        json!({ "afterBlockId": before }),
+    )
+    .expect("table of contents inserts");
+    assert!(matches!(
+        app.document.blocks[1].kind,
+        BlockKind::TableOfContents { max_level: 3 }
+    ));
+    app.undo_current_edit().expect("undo TOC insertion");
+    assert_eq!(app.document.blocks.len(), 1);
+}
+
+#[test]
+fn bibliography_insert_is_one_undoable_atomic_block() {
+    let mut app = app_with_paragraphs(&["before"]);
+    let before = block_id(&app, 0);
+    app.dispatch_command(
+        "insert_bibliography_after",
+        json!({ "afterBlockId": before }),
+    )
+    .expect("bibliography inserts");
+    assert!(matches!(
+        app.document.blocks[1].kind,
+        BlockKind::Bibliography
+    ));
+    app.undo_current_edit()
+        .expect("undo bibliography insertion");
+    assert_eq!(app.document.blocks.len(), 1);
+}
+
+#[test]
+fn anchored_endnote_inserts_at_the_requested_caret_and_undoes_as_one_gesture() {
+    let mut app = app_with_paragraphs(&["before"]);
+    let block_id = block_id(&app, 0);
+    let after_inline_id = match &app.document.blocks[0].content[0] {
+        Inline::Text { id, .. } => id.to_string(),
+        inline => panic!("expected text inline, got {inline:?}"),
+    };
+
+    app.dispatch_command(
+        "insert_endnote_ref_after",
+        json!({ "blockId": block_id, "afterInlineId": after_inline_id }),
+    )
+    .expect("endnote inserts at caret");
+
+    assert_eq!(app.document.blocks.len(), 1, "no synthetic paragraph");
+    let note_id = match app.document.blocks[0].content.last() {
+        Some(Inline::FootnoteRef { footnote_id, .. }) => footnote_id.clone(),
+        inline => panic!("expected endnote reference, got {inline:?}"),
+    };
+    assert!(app.document.endnote_ids.contains(&note_id));
+    assert!(app.document.footnotes.iter().any(|note| note.id == note_id));
+
+    app.undo_current_edit().expect("undo endnote gesture");
+    assert!(app.document.endnote_ids.is_empty());
+    assert!(app.document.footnotes.iter().all(|note| note.deleted));
+    assert_eq!(app.document.blocks[0].content.len(), 1);
 }
 
 fn list_ids(app: &OpenDocApp) -> Vec<Option<String>> {
@@ -31,7 +168,7 @@ fn appended_list_items_share_one_run_and_a_paragraph_starts_a_new_one() {
 
     app.add_list_item("one", 0, "bullet").unwrap();
     app.add_list_item("two", 0, "bullet").unwrap();
-    app.add_paragraph("between");
+    app.add_paragraph("between").expect("paragraph");
     app.add_list_item("three", 0, "bullet").unwrap();
     app.add_list_item("four", 0, "bullet").unwrap();
 
@@ -48,12 +185,109 @@ fn appended_list_items_share_one_run_and_a_paragraph_starts_a_new_one() {
 }
 
 #[test]
+fn ordered_list_start_is_run_level_source_state_and_undo_restores_default() {
+    let mut app = OpenDocApp::new_sample();
+    app.new_document("Lists");
+    app.document.blocks.clear();
+    app.add_list_item("one", 0, "ordered").unwrap();
+    app.add_list_item("two", 0, "ordered").unwrap();
+    let second = block_id(&app, 1);
+    let list_id = app.document.blocks[0].list_id().unwrap().clone();
+
+    app.dispatch_command(
+        "set_ordered_list_start",
+        json!({ "blockId": second, "start": 7 }),
+    )
+    .unwrap();
+    assert_eq!(app.document.list_properties[&list_id].start_for(0), 7);
+    assert_eq!(app.operation_journal.last().unwrap().kind, "set-list-start");
+
+    app.undo_current_edit().unwrap();
+    assert_eq!(
+        app.document
+            .list_properties
+            .get(&list_id)
+            .map(|p| p.start_for(0)),
+        None,
+        "undo canonicalises the default by removing the empty run property"
+    );
+}
+
+#[test]
+fn ordered_list_format_is_run_level_source_state_and_undo_restores_inheritance() {
+    let mut app = OpenDocApp::new_sample();
+    app.new_document("Lists");
+    app.document.blocks.clear();
+    app.add_list_item("one", 0, "ordered").unwrap();
+    let id = block_id(&app, 0);
+    let list_id = app.document.blocks[0].list_id().unwrap().clone();
+
+    app.dispatch_command(
+        "set_ordered_list_format",
+        json!({ "blockId": id, "format": "upper-roman" }),
+    )
+    .unwrap();
+    assert_eq!(
+        app.document.list_properties[&list_id].format_for(0),
+        opendoc_core::OrderedListFormat::UpperRoman
+    );
+    assert_eq!(
+        app.operation_journal.last().unwrap().kind,
+        "set-list-format"
+    );
+
+    app.undo_current_edit().unwrap();
+    assert!(!app.document.list_properties.contains_key(&list_id));
+}
+
+#[test]
+fn ordered_list_start_rejects_bullets_and_zero() {
+    let mut app = OpenDocApp::new_sample();
+    app.new_document("Lists");
+    app.document.blocks.clear();
+    app.add_list_item("one", 0, "bullet").unwrap();
+    let id = block_id(&app, 0);
+    assert!(app.set_ordered_list_start(&id, 3).is_err());
+    assert!(app.set_ordered_list_start(&id, 0).is_err());
+}
+
+#[test]
+fn bookmark_command_is_journalled_and_delete_writes_a_tombstone() {
+    let mut app = app_with_paragraphs(&["target", "retarget"]);
+    let target = block_id(&app, 0);
+    app.dispatch_command(
+        "set_bookmark",
+        json!({ "bookmarkId": null, "name": "intro_target", "blockId": target }),
+    )
+    .expect("public bookmark command creates a target");
+    let bookmark = app.document.bookmarks[0].clone();
+    assert_eq!(
+        app.operation_journal.last().unwrap().kind,
+        "upsert-bookmark"
+    );
+    let retarget = block_id(&app, 1);
+    app.dispatch_command(
+        "set_bookmark",
+        json!({ "bookmarkId": bookmark.id, "name": "intro_target", "blockId": retarget }),
+    )
+    .expect("existing bookmark can retarget through the public command");
+    assert_eq!(app.document.bookmarks[0].block_id.as_str(), retarget);
+    app.dispatch_command("delete_bookmark", json!({ "bookmarkId": bookmark.id }))
+        .expect("public delete command tombstones the bookmark");
+    assert!(app
+        .document
+        .bookmarks
+        .iter()
+        .any(|item| item.id == bookmark.id && item.deleted));
+}
+
+#[test]
 fn inserting_a_list_item_after_an_item_joins_that_run() {
     let mut app = OpenDocApp::new_sample();
     app.new_document("Lists");
     app.document.blocks.clear();
     app.add_list_item("one", 0, "bullet").unwrap();
-    app.add_paragraph("after");
+    app.add_paragraph("after").expect("paragraph");
 
     let anchor = block_id(&app, 0);
     app.insert_list_item_after(anchor, "one and a half", 0, "bullet")
@@ -61,6 +295,17 @@ fn inserting_a_list_item_after_an_item_joins_that_run() {
     let ids = list_ids(&app);
     assert_eq!(ids[0], ids[1]);
     assert_eq!(ids[2], None);
+}
+
+#[test]
+fn title_and_subtitle_styles_are_durable() {
+    let mut app = app_with_paragraphs(&["named style"]);
+    let id = block_id(&app, 0);
+    app.set_block_text_style(&id, "title", 0, "bullet").unwrap();
+    assert!(matches!(app.document.blocks[0].kind, BlockKind::Title));
+    app.set_block_text_style(&id, "subtitle", 0, "bullet")
+        .unwrap();
+    assert!(matches!(app.document.blocks[0].kind, BlockKind::Subtitle));
 }
 
 #[test]
@@ -248,6 +493,9 @@ fn block_properties_are_set_cleared_journalled_and_projected() {
     assert_eq!(projected.indent_first_line_twips, Some(-360));
     assert_eq!(projected.line_spacing_mode.as_deref(), Some("multiple"));
     assert_eq!(projected.line_spacing_value, Some(1_500));
+    // How that spacing reads is a projection rule, so the DTO carries the
+    // label and no view has to work out what "multiple:1500" means.
+    assert_eq!(projected.line_spacing_label.as_deref(), Some("1.5\u{d7}"));
 
     app.clear_block_property(&id, BlockPropertyKey::Alignment)
         .unwrap();
@@ -589,7 +837,7 @@ fn a_footer_carries_text_and_an_unresolved_page_number_field() {
 
     let projected = app.document();
     assert!(projected.footer_html.contains("data-field=\"page-number\""));
-    assert!(projected.body_html.is_empty() || !projected.body_html.contains("doc-page-number"));
+    assert!(projected.body_html().is_empty() || !projected.body_html().contains("doc-page-number"));
     assert_eq!(projected.footer.len(), 1);
     assert!(projected.header_html.is_empty());
     app.snapshot_document().validate_source().unwrap();
@@ -597,6 +845,181 @@ fn a_footer_carries_text_and_an_unresolved_page_number_field() {
     app.clear_page_furniture("footer").unwrap();
     assert!(app.document.footer.is_empty());
     assert!(app.document().footer_html.is_empty());
+}
+
+#[test]
+fn first_page_furniture_undo_and_inherit_preserve_absent_override() {
+    let mut app = app_with_paragraphs(&["body"]);
+    app.dispatch_command(
+        "set_page_furniture",
+        json!({ "slot": "header", "text": "Ordinary", "field": "none", "alignment": "start" }),
+    )
+    .unwrap();
+    app.dispatch_command(
+        "set_page_furniture",
+        json!({ "slot": "first-page-header", "text": "First", "field": "none", "alignment": "start" }),
+    )
+    .unwrap();
+    assert!(app
+        .document
+        .has_furniture_override(opendoc_core::HeaderFooterSlot::FirstPageHeader));
+
+    // `None` means inheritance, whereas `Some(vec![])` suppresses the
+    // ordinary header. Undo must restore the former exact state.
+    app.undo_current_edit().unwrap();
+    assert!(!app
+        .document
+        .has_furniture_override(opendoc_core::HeaderFooterSlot::FirstPageHeader));
+    assert_eq!(
+        app.document
+            .furniture_for_page(opendoc_core::HeaderFooterSlot::Header, 0),
+        app.document.header.as_slice()
+    );
+
+    app.dispatch_command(
+        "set_page_furniture",
+        json!({ "slot": "first-page-header", "text": "First", "field": "none", "alignment": "start" }),
+    )
+    .unwrap();
+    app.dispatch_command(
+        "clear_page_furniture_override",
+        json!({ "slot": "first-page-header" }),
+    )
+    .unwrap();
+    assert!(!app
+        .document
+        .has_furniture_override(opendoc_core::HeaderFooterSlot::FirstPageHeader));
+    app.undo_current_edit().unwrap();
+    assert_eq!(
+        app.document
+            .furniture(opendoc_core::HeaderFooterSlot::FirstPageHeader)
+            .len(),
+        1,
+        "undoing inherit restores the explicit first-page fragment"
+    );
+    assert!(app
+        .dispatch_command("clear_page_furniture_override", json!({ "slot": "header" }))
+        .is_err());
+}
+
+#[test]
+fn page_furniture_lines_become_distinct_paragraph_blocks() {
+    let mut app = app_with_paragraphs(&["body"]);
+    app.set_page_furniture(
+        "header",
+        "Running head\n\nConfidential",
+        "page-count",
+        "end",
+    )
+    .unwrap();
+
+    assert_eq!(app.document.header.len(), 3);
+    assert!(matches!(
+        app.document.header[0].content.as_slice(),
+        [Inline::Text { text, .. }] if text == "Running head"
+    ));
+    assert!(
+        app.document.header[1].content.is_empty(),
+        "blank line is a paragraph"
+    );
+    assert!(matches!(
+        app.document.header[2].content.as_slice(),
+        [Inline::Text { text, .. }, Inline::PageNumber { field: opendoc_core::PageNumberField::PageCount, .. }]
+        if text == "Confidential "
+    ));
+    assert!(app
+        .document
+        .header
+        .iter()
+        .all(|block| block.properties.alignment == Some(Alignment::End)));
+    app.snapshot_document().validate_source().unwrap();
+}
+
+#[test]
+fn rich_html_furniture_keeps_supported_structure_and_is_one_undoable_edit() {
+    let mut app = app_with_paragraphs(&["body"]);
+    app.dispatch_command(
+        "set_page_furniture_html",
+        json!({
+            "slot": "header",
+            "html": "<h2 style=\"text-align:center;direction:rtl\">Running <em>head</em></h2><ol><li>first</li><li><a href=\"https://example.test\">second</a></li></ol>"
+        }),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        app.document.header[0].kind,
+        BlockKind::Heading { level: 2 }
+    ));
+    assert_eq!(
+        app.document.header[0].properties.alignment,
+        Some(Alignment::Center)
+    );
+    assert_eq!(
+        app.document.header[0].properties.direction,
+        Some(opendoc_core::TextDirection::RightToLeft)
+    );
+    assert!(matches!(
+        app.document.header[1].kind,
+        BlockKind::ListItem {
+            kind: ListKind::Ordered,
+            ..
+        }
+    ));
+    assert!(matches!(
+        app.document.header[2].kind,
+        BlockKind::ListItem {
+            kind: ListKind::Ordered,
+            ..
+        }
+    ));
+    assert!(matches!(
+        app.document.header[2].content.as_slice(),
+        [Inline::Link { href, .. }] if href == "https://example.test"
+    ));
+    assert!(app.document().header_html.contains("<ol"));
+    assert!(app
+        .document()
+        .header_html
+        .contains("text-align:center;direction:rtl;"));
+    app.snapshot_document().validate_source().unwrap();
+
+    app.undo_current_edit().unwrap();
+    assert!(
+        app.document.header.is_empty(),
+        "rich replacement is one undo step"
+    );
+}
+
+#[test]
+fn rich_html_furniture_imports_a_native_standalone_table() {
+    let mut app = app_with_paragraphs(&["body"]);
+    app.set_page_furniture_html(
+        "footer",
+        "<table><tr><th>H</th><td><strong>V</strong></td></tr></table>",
+    )
+    .unwrap();
+
+    assert!(matches!(
+        app.document.footer[0].kind,
+        BlockKind::Table { .. }
+    ));
+    assert!(app.document().footer_html.contains("<table"));
+    app.snapshot_document().validate_source().unwrap();
+}
+
+#[test]
+fn rich_html_furniture_refuses_degrading_objects_without_changing_the_slot() {
+    let mut app = app_with_paragraphs(&["body"]);
+    app.set_page_furniture("footer", "Keep", "none", "start")
+        .unwrap();
+    let before = app.document.footer.clone();
+
+    let error = app
+        .set_page_furniture_html("footer", "<p>new</p><svg><circle /></svg>")
+        .unwrap_err();
+    assert!(error.to_string().contains("was not applied"));
+    assert_eq!(app.document.footer, before);
 }
 
 #[test]
@@ -704,7 +1127,7 @@ fn app_with_table() -> (OpenDocApp, String) {
 
 fn table_of(app: &OpenDocApp) -> (&[opendoc_core::TableColumn], &[opendoc_core::TableRow]) {
     match &app.document.blocks[1].kind {
-        opendoc_core::BlockKind::Table { columns, rows } => (columns, rows),
+        opendoc_core::BlockKind::Table { columns, rows, .. } => (columns, rows),
         other => panic!("expected a table, got {other:?}"),
     }
 }
@@ -754,6 +1177,59 @@ fn an_added_row_is_as_wide_as_the_table() {
     assert!(app.document.visible_text().contains("new"));
 }
 
+/// OB-21: "insert above the first row" and "insert left of the first column".
+/// Neither could be expressed while the anchor was `Option<id>`, because
+/// `None` there means *append*; the contract's `first` keyword is the one
+/// position an id cannot name.
+#[test]
+fn a_row_and_a_column_can_be_inserted_before_the_first_one() {
+    let (mut app, table) = app_with_table();
+    let first_column_before = table_of(&app).0[0].id.to_string();
+    let first_row_before = table_of(&app).1[0].id.to_string();
+
+    app.dispatch_command(
+        "add_table_row",
+        serde_json::json!({ "tableBlockId": table, "afterRow": "first", "text": "top" }),
+    )
+    .unwrap();
+    app.dispatch_command(
+        "insert_table_column",
+        serde_json::json!({ "tableBlockId": table, "afterColumnId": "first" }),
+    )
+    .unwrap();
+
+    let (columns, rows) = table_of(&app);
+    assert_eq!(rows.len(), 3);
+    assert_eq!(columns.len(), 3);
+    assert_ne!(
+        rows[0].id.to_string(),
+        first_row_before,
+        "the new row is above the one that used to be first"
+    );
+    assert_eq!(rows[1].id.to_string(), first_row_before);
+    assert_ne!(columns[0].id.to_string(), first_column_before);
+    assert_eq!(columns[1].id.to_string(), first_column_before);
+    assert!(rows.iter().all(|row| row.cells.len() == 3));
+    app.document.validate().unwrap();
+
+    // Omitting the anchor still means append, unchanged.
+    let before: Vec<String> = table_of(&app)
+        .1
+        .iter()
+        .map(|row| row.id.to_string())
+        .collect();
+    app.add_table_row(&table, None, "bottom").unwrap();
+    let after: Vec<String> = table_of(&app)
+        .1
+        .iter()
+        .map(|row| row.id.to_string())
+        .collect();
+    assert_eq!(after.len(), before.len() + 1);
+    assert_eq!(after[..before.len()], before[..], "the new row went last");
+    assert!(app.document.visible_text().contains("bottom"));
+    assert!(app.document.visible_text().contains("top"));
+}
+
 #[test]
 fn column_width_is_twips_and_refuses_a_hairline() {
     let (mut app, table) = app_with_table();
@@ -771,6 +1247,134 @@ fn column_width_is_twips_and_refuses_a_hairline() {
 
     app.clear_table_column_width(&table, &column).unwrap();
     assert_eq!(table_of(&app).0[0].width, None);
+}
+
+#[test]
+fn row_height_is_a_minimum_in_twips_and_can_return_to_auto() {
+    let (mut app, table) = app_with_table();
+    let row = table_of(&app).1[0].id.to_string();
+
+    app.set_table_row_height(&table, &row, 720).unwrap();
+    assert_eq!(
+        table_of(&app).1[0].height.map(|height| height.twips()),
+        Some(720)
+    );
+
+    assert!(app.set_table_row_height(&table, &row, 0).is_err());
+    assert_eq!(
+        table_of(&app).1[0].height.map(|height| height.twips()),
+        Some(720),
+        "a refused height leaves the stored one alone"
+    );
+
+    app.clear_table_row_height(&table, &row).unwrap();
+    assert_eq!(table_of(&app).1[0].height, None);
+}
+
+#[test]
+fn table_row_header_is_typed_state_and_can_be_toggled() {
+    let (mut app, table) = app_with_table();
+    let row = table_of(&app).1[0].id.to_string();
+
+    app.set_table_row_header(&table, &row, true).unwrap();
+    assert!(table_of(&app).1[0].header);
+
+    app.set_table_row_header(&table, &row, false).unwrap();
+    assert!(!table_of(&app).1[0].header);
+}
+
+#[test]
+fn table_sort_orders_body_rows_by_a_column_and_keeps_headers_pinned() {
+    let (mut app, table) = app_with_table();
+    let first = table_of(&app).1[0].id.to_string();
+    let second = table_of(&app).1[1].id.to_string();
+    let column = table_of(&app).0[0].id.to_string();
+
+    app.set_table_row_header(&table, &first, true).unwrap();
+    app.sort_table_rows(&table, &column, true).unwrap();
+    let ids: Vec<String> = table_of(&app)
+        .1
+        .iter()
+        .map(|row| row.id.to_string())
+        .collect();
+    assert_eq!(ids, vec![first.clone(), second.clone()]);
+
+    app.set_table_row_header(&table, &first, false).unwrap();
+    app.sort_table_rows(&table, &column, true).unwrap();
+    let ids: Vec<String> = table_of(&app)
+        .1
+        .iter()
+        .map(|row| row.id.to_string())
+        .collect();
+    assert_eq!(ids, vec![second, first]);
+}
+
+#[test]
+fn table_border_is_document_state_and_can_be_explicitly_cleared() {
+    let (mut app, table) = app_with_table();
+
+    app.set_table_border(&table, "dashed", 20, "#336699")
+        .unwrap();
+    let block = app
+        .document
+        .blocks
+        .iter()
+        .find(|block| block.id.to_string() == table)
+        .expect("table block");
+    let BlockKind::Table { properties, .. } = &block.kind else {
+        panic!("expected table");
+    };
+    let border = properties.border.expect("stated table border");
+    assert_eq!(border.style(), opendoc_core::BorderStyle::Dashed);
+    assert_eq!(border.width().twips(), 20);
+    assert_eq!(border.color().as_hex(), "#336699");
+
+    app.clear_table_border(&table).unwrap();
+    let BlockKind::Table { properties, .. } = &app
+        .document
+        .blocks
+        .iter()
+        .find(|block| block.id.to_string() == table)
+        .expect("table block")
+        .kind
+    else {
+        panic!("expected table");
+    };
+    assert_eq!(properties.border, None);
+}
+
+#[test]
+fn table_alignment_is_table_state_and_can_be_explicitly_cleared() {
+    let (mut app, table) = app_with_table();
+
+    app.set_table_alignment(&table, "center").unwrap();
+    let BlockKind::Table { properties, .. } = &app
+        .document
+        .blocks
+        .iter()
+        .find(|block| block.id.to_string() == table)
+        .expect("table block")
+        .kind
+    else {
+        panic!("expected table");
+    };
+    assert_eq!(
+        properties.alignment,
+        Some(opendoc_core::TableAlignment::Center)
+    );
+
+    app.clear_table_alignment(&table).unwrap();
+    let BlockKind::Table { properties, .. } = &app
+        .document
+        .blocks
+        .iter()
+        .find(|block| block.id.to_string() == table)
+        .expect("table block")
+        .kind
+    else {
+        panic!("expected table");
+    };
+    assert_eq!(properties.alignment, None);
 }
 
 #[test]
@@ -812,6 +1416,7 @@ fn cell_styling_is_typed_and_survives_the_source_projection() {
         .unwrap();
     app.set_table_cell_vertical_alignment(&cell, "bottom")
         .unwrap();
+    app.set_table_cell_row_header(&cell, true).unwrap();
     app.set_table_cell_padding(&cell, "end", 120).unwrap();
 
     // The projection the repository saves and reloads must carry all of
@@ -828,6 +1433,7 @@ fn cell_styling_is_typed_and_survives_the_source_projection() {
     assert!(!shape.cells[0][0].covered);
     assert!(shape.cells[1][0].covered, "the cell under the merge");
     assert!(!shape.cells[0][1].covered);
+    assert_eq!(shape.cells[0][0].properties.row_header, Some(true));
 
     app.clear_table_cell_property(&cell, "background").unwrap();
     assert_eq!(table_of(&app).1[0].cells[0].properties.background, None);
@@ -835,6 +1441,8 @@ fn cell_styling_is_typed_and_survives_the_source_projection() {
         .properties
         .vertical_alignment
         .is_some());
+    app.clear_table_cell_property(&cell, "row-header").unwrap();
+    assert_eq!(table_of(&app).1[0].cells[0].properties.row_header, None);
 
     // Values the model cannot represent are refused at the command, not
     // smuggled in as strings.

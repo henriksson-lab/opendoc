@@ -1,5 +1,5 @@
 use opendoc_core::{digest_bytes, HashRef};
-use opendoc_format::SignatureRecord;
+use opendoc_format::{ManifestRecord, SignatureRecord, VersionCoverageRecord};
 use ssh_key::{HashAlg, LineEnding, PrivateKey, PublicKey, SshSig};
 use std::collections::hash_map::DefaultHasher;
 use std::fmt;
@@ -211,6 +211,123 @@ pub fn verify_record_for_target_with_public_key(
     verify_record_with_public_key(record, payload)
 }
 
+/// Sign a committed version: the manifest, and through it the history the
+/// manifest names.
+///
+/// # What the target is
+///
+/// The signature's `target` is the content hash of the encoded
+/// [`ManifestRecord`]. The signed payload is the canonical CBOR encoding of
+/// the [`VersionCoverageRecord`] derived from that manifest — so the payload
+/// both *is* determined by the manifest and *says*, in readable fields, what
+/// it determined: the parent, the snapshot, the operation segments and the
+/// blob digests.
+///
+/// This is a different target from [`sign_target`] as the application uses it
+/// today, which signs the encoded snapshot and nothing else. That signature is
+/// blind to everything outside the snapshot: rewrite the head manifest with no
+/// parent and no operation segments and the snapshot is byte-identical, so it
+/// still verifies over a document whose history has been erased.
+///
+/// The caller must store the returned coverage record alongside the signature
+/// — `opendoc_store::Repository::write_version_signature` does both — because
+/// it is the only stored form of the payload, and the only form in which the
+/// version's claim about its own ancestry survives the loss of the manifest.
+pub fn sign_version(
+    backend: &impl SignerBackend,
+    manifest: &ManifestRecord,
+    title: impl Into<String>,
+    signer: Signer,
+) -> Result<(VersionCoverageRecord, SignatureRecord), SignError> {
+    let coverage = version_coverage(manifest)?;
+    let payload = version_payload(&coverage)?;
+    let record = sign_target(backend, coverage.manifest.clone(), title, signer, &payload)?;
+    Ok((coverage, record))
+}
+
+/// Verify a version signature against the manifest a verifier actually holds.
+///
+/// # What is checked
+///
+/// 1. The coverage record is **re-derived** from `manifest`; nothing the
+///    signer or the repository supplied is trusted to describe it.
+/// 2. `record.target` must equal that manifest's hash, so a signature cannot
+///    be lifted from one version onto another.
+/// 3. The signature must verify over the canonical encoding of the derived
+///    coverage.
+///
+/// # What this detects that a snapshot signature cannot
+///
+/// **Truncated history.** The parent hash, the operation segment hashes and
+/// the blob digests are all inside the manifest, so they are all inside the
+/// target. Dropping the parent link, dropping a segment, or swapping a blob
+/// changes the manifest, changes its hash, and the signature no longer names
+/// this version at all.
+///
+/// # What it still does not detect
+///
+/// **Deletion.** This is a statement about bytes, not about availability: if
+/// the ancestor manifests the signed chain names have simply been removed from
+/// the store, this manifest is unchanged and this check still says `Signed`.
+/// Pair it with `opendoc_store::Repository::audit_manifest_chain`, which walks
+/// the signed coverage's ancestry and reports what the repository no longer
+/// holds.
+pub fn verify_version_signature(
+    backend: &impl SignerBackend,
+    record: &SignatureRecord,
+    manifest: &ManifestRecord,
+) -> Result<SignatureState, SignError> {
+    let coverage = version_coverage(manifest)?;
+    verify_record_for_target(
+        backend,
+        record,
+        &coverage.manifest,
+        &version_payload(&coverage)?,
+    )
+}
+
+/// [`verify_version_signature`] using the public key carried in the record.
+pub fn verify_version_signature_with_public_key(
+    record: &SignatureRecord,
+    manifest: &ManifestRecord,
+) -> Result<SignatureState, SignError> {
+    let coverage = version_coverage(manifest)?;
+    verify_record_for_target_with_public_key(
+        record,
+        &coverage.manifest,
+        &version_payload(&coverage)?,
+    )
+}
+
+/// Verify a version signature against a *stored* coverage record, for the case
+/// where the manifest itself is no longer in the repository.
+///
+/// The coverage record is not trusted for being stored: it is the payload, so
+/// a coverage record that has been edited — a parent link removed, a segment
+/// dropped — does not verify. What it buys is that a version's claim about its
+/// own ancestry remains readable and provable after the manifest it describes
+/// is gone, which is exactly the state a truncated repository is in.
+pub fn verify_version_coverage_with_public_key(
+    record: &SignatureRecord,
+    coverage: &VersionCoverageRecord,
+) -> Result<SignatureState, SignError> {
+    verify_record_for_target_with_public_key(
+        record,
+        &coverage.manifest,
+        &version_payload(coverage)?,
+    )
+}
+
+fn version_coverage(manifest: &ManifestRecord) -> Result<VersionCoverageRecord, SignError> {
+    VersionCoverageRecord::for_manifest(manifest).map_err(|err| SignError::Backend(err.to_string()))
+}
+
+fn version_payload(coverage: &VersionCoverageRecord) -> Result<Vec<u8>, SignError> {
+    coverage
+        .signing_payload()
+        .map_err(|err| SignError::Backend(err.to_string()))
+}
+
 pub fn sign_blob_hash(
     backend: &impl SignerBackend,
     blob_hash: HashRef,
@@ -318,13 +435,57 @@ impl DecodedImagePixels {
     }
 }
 
+/// Pixels the *signer asserts* are the decoding of a particular container.
+///
+/// OpenDoc has no image decoder in this graph — the pixels arrive as command
+/// arguments, from whatever decoded the container — so this profile cannot
+/// claim to have checked that they really are `source`'s pixels. What it can
+/// do, and what it now does, is bind the two together: the container's content
+/// digest is part of the frame that gets signed, so the attestation says
+/// "*this* signer says *these* pixels come from *that* blob" and cannot be
+/// lifted onto a different blob.
+///
+/// Before this type existed, `width`, `height` and `pixels` came from the
+/// caller and verification recomputed the digest from the frame stored beside
+/// the signature — the same caller-supplied bytes — so the check could never
+/// disagree and a signature could be transplanted onto any image at all.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssertedImagePixels {
+    /// Content digest of the container bytes the pixels are asserted to decode
+    /// from. Verification recomputes this from the blob it actually holds.
+    pub source: HashRef,
+    pub pixels: DecodedImagePixels,
+}
+
+impl AssertedImagePixels {
+    /// Bind `pixels` to the bytes they are asserted to have been decoded from.
+    pub fn from_container(container: &[u8], pixels: DecodedImagePixels) -> Result<Self, SignError> {
+        Ok(Self {
+            source: digest_bytes("sha256", container)
+                .map_err(|err| SignError::Backend(err.to_string()))?,
+            pixels,
+        })
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ImagePixelsProfile;
 
 impl ImagePixelsProfile {
-    pub fn semantic_digest_pixels(&self, image: &DecodedImagePixels) -> Result<HashRef, SignError> {
+    pub fn semantic_digest_pixels(
+        &self,
+        image: &AssertedImagePixels,
+    ) -> Result<HashRef, SignError> {
         digest_bytes("sha256", &canonical_image_pixels(image))
             .map_err(|err| SignError::Backend(err.to_string()))
+    }
+
+    /// The container digest a stored frame binds itself to.
+    ///
+    /// The verifier needs this to compare against the blob it actually has;
+    /// reading it through the profile keeps the frame format in one place.
+    pub fn asserted_source(&self, frame: &[u8]) -> Result<HashRef, SignError> {
+        Ok(parse_image_pixels_frame(frame)?.source)
     }
 }
 
@@ -339,11 +500,14 @@ impl TypedSignatureProfile for ImagePixelsProfile {
     }
 
     fn included_fields(&self) -> Vec<String> {
+        // Named for what they are: a digest of the container, which is checked,
+        // and a frame of pixels, which is the signer's word.
         vec![
-            "width".to_string(),
-            "height".to_string(),
-            "color_model".to_string(),
-            "normalized_pixels".to_string(),
+            "source_blob_digest".to_string(),
+            "asserted_width".to_string(),
+            "asserted_height".to_string(),
+            "asserted_color_model".to_string(),
+            "asserted_normalized_pixels".to_string(),
         ]
     }
 
@@ -352,15 +516,18 @@ impl TypedSignatureProfile for ImagePixelsProfile {
             "compression".to_string(),
             "container_metadata".to_string(),
             "storage_path".to_string(),
+            // Stated rather than implied: nothing in OpenDoc decodes the
+            // container to check the pixels against it.
+            "independent_decode_of_the_container".to_string(),
         ]
     }
 }
 
-pub fn image_pixels_frame(image: &DecodedImagePixels) -> Vec<u8> {
+pub fn image_pixels_frame(image: &AssertedImagePixels) -> Vec<u8> {
     canonical_image_pixels(image)
 }
 
-fn parse_image_pixels_frame(bytes: &[u8]) -> Result<DecodedImagePixels, SignError> {
+fn parse_image_pixels_frame(bytes: &[u8]) -> Result<AssertedImagePixels, SignError> {
     const MAGIC: &[u8] = b"opendoc.image.pixels.v0\n";
     if !bytes.starts_with(MAGIC) {
         return Err(SignError::Backend(
@@ -368,6 +535,7 @@ fn parse_image_pixels_frame(bytes: &[u8]) -> Result<DecodedImagePixels, SignErro
         ));
     }
     let mut offset = MAGIC.len();
+    let source = read_bytes_field(bytes, &mut offset, b"source")?;
     let width = read_u32_field(bytes, &mut offset, b"width")?;
     let height = read_u32_field(bytes, &mut offset, b"height")?;
     let color_model = read_bytes_field(bytes, &mut offset, b"color")?;
@@ -377,25 +545,41 @@ fn parse_image_pixels_frame(bytes: &[u8]) -> Result<DecodedImagePixels, SignErro
             "image pixel profile frame has trailing bytes".to_string(),
         ));
     }
+    let source = String::from_utf8(source)
+        .map_err(|err| SignError::Backend(format!("image source digest is not UTF-8: {err}")))?;
+    let source = HashRef::parse(&source)
+        .map_err(|err| SignError::Backend(format!("image source digest is invalid: {err}")))?;
     let color_model = String::from_utf8(color_model)
         .map_err(|err| SignError::Backend(format!("image color model is not UTF-8: {err}")))?;
-    let image = DecodedImagePixels {
-        width,
-        height,
-        color_model,
-        pixels,
+    let image = AssertedImagePixels {
+        source,
+        pixels: DecodedImagePixels {
+            width,
+            height,
+            color_model,
+            pixels,
+        },
     };
-    validate_image_pixels(&image)?;
+    validate_image_pixels(&image.pixels)?;
     Ok(image)
 }
 
-fn canonical_image_pixels(image: &DecodedImagePixels) -> Vec<u8> {
+fn canonical_image_pixels(image: &AssertedImagePixels) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(b"opendoc.image.pixels.v0\n");
-    append_length_prefixed(&mut out, b"width", image.width.to_string().as_bytes());
-    append_length_prefixed(&mut out, b"height", image.height.to_string().as_bytes());
-    append_length_prefixed(&mut out, b"color", image.color_model.as_bytes());
-    append_length_prefixed(&mut out, b"pixels", &image.pixels);
+    append_length_prefixed(&mut out, b"source", image.source.to_string().as_bytes());
+    append_length_prefixed(
+        &mut out,
+        b"width",
+        image.pixels.width.to_string().as_bytes(),
+    );
+    append_length_prefixed(
+        &mut out,
+        b"height",
+        image.pixels.height.to_string().as_bytes(),
+    );
+    append_length_prefixed(&mut out, b"color", image.pixels.color_model.as_bytes());
+    append_length_prefixed(&mut out, b"pixels", &image.pixels.pixels);
     out
 }
 
@@ -933,12 +1117,19 @@ mod tests {
         assert!(profile.semantic_digest(b"@read-1\nACGT\n+\n").is_err());
     }
 
+    /// The signature must be *bound* to the container it names.
+    ///
+    /// This replaces `image_pixel_signature_ignores_container_bytes`, which
+    /// built `same_pixels_different_blob` field-for-field identical to `image`
+    /// and so could not fail. It also asserted the property this profile now
+    /// deliberately does not have: ignoring the container bytes is exactly what
+    /// let an attestation be transplanted onto a different image.
     #[test]
-    fn image_pixel_signature_ignores_container_bytes() {
+    fn an_image_pixel_signature_cannot_be_lifted_onto_other_image_bytes() {
         let backend = ResearchSigner::new("secret");
         let profile = ImagePixelsProfile;
-        let source_png = HashRef::parse("sha256:source-png").unwrap();
-        let source_webp = HashRef::parse("sha256:source-webp").unwrap();
+        let png = b"PNG container bytes".as_slice();
+        let webp = b"WEBP container bytes".as_slice();
         let signer = Signer {
             key_identity: "ssh-ed25519 AAA".to_string(),
             display_name: "Alice".to_string(),
@@ -946,42 +1137,60 @@ mod tests {
         let pixels = vec![
             255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
         ];
-        let image = DecodedImagePixels::rgba8(2, 2, pixels.clone()).unwrap();
-        let same_pixels_different_blob = DecodedImagePixels::rgba8(2, 2, pixels).unwrap();
+        let decoded = DecodedImagePixels::rgba8(2, 2, pixels).unwrap();
+        let from_png = AssertedImagePixels::from_container(png, decoded.clone()).unwrap();
+        let from_webp = AssertedImagePixels::from_container(webp, decoded).unwrap();
 
         let signed = sign_typed_content(
             &backend,
             &profile,
-            source_png,
+            from_png.source.clone(),
             "Decoded image",
             signer,
-            &image_pixels_frame(&image),
+            &image_pixels_frame(&from_png),
         )
         .unwrap();
-        let recomputed = profile
-            .semantic_digest_pixels(&same_pixels_different_blob)
-            .unwrap();
 
         assert_eq!(signed.profile, "opendoc.image.pixels.v0");
         assert_eq!(
-            signed.source_blob,
-            HashRef::parse("sha256:source-png").unwrap()
+            signed.semantic_digest,
+            profile.semantic_digest_pixels(&from_png).unwrap()
         );
-        assert_eq!(signed.semantic_digest, recomputed);
-        assert_ne!(signed.source_blob, source_webp);
+        // The same pixels, asserted against a different container, are a
+        // different attestation. This is the assertion the old test could not
+        // make, because its two values were the same value.
+        assert_ne!(
+            profile.semantic_digest_pixels(&from_png).unwrap(),
+            profile.semantic_digest_pixels(&from_webp).unwrap()
+        );
+        // And the container the frame names is recoverable, so a verifier can
+        // check it against the blob it actually holds.
+        assert_eq!(
+            profile
+                .asserted_source(&image_pixels_frame(&from_png))
+                .unwrap(),
+            digest_bytes("sha256", png).unwrap()
+        );
+        assert_ne!(
+            profile
+                .asserted_source(&image_pixels_frame(&from_png))
+                .unwrap(),
+            digest_bytes("sha256", webp).unwrap()
+        );
         assert_eq!(
             signed.excluded_fields,
             vec![
                 "compression".to_string(),
                 "container_metadata".to_string(),
-                "storage_path".to_string()
+                "storage_path".to_string(),
+                "independent_decode_of_the_container".to_string(),
             ]
         );
         assert_eq!(
             verify_record(
                 &backend,
                 &signed.signature,
-                recomputed.to_string().as_bytes()
+                signed.semantic_digest.to_string().as_bytes()
             )
             .unwrap(),
             SignatureState::Signed
@@ -991,8 +1200,17 @@ mod tests {
     #[test]
     fn image_pixel_profile_detects_semantic_changes_and_bad_frames() {
         let profile = ImagePixelsProfile;
-        let original = DecodedImagePixels::rgba8(1, 1, vec![1, 2, 3, 255]).unwrap();
-        let changed = DecodedImagePixels::rgba8(1, 1, vec![1, 2, 4, 255]).unwrap();
+        let container = b"container".as_slice();
+        let original = AssertedImagePixels::from_container(
+            container,
+            DecodedImagePixels::rgba8(1, 1, vec![1, 2, 3, 255]).unwrap(),
+        )
+        .unwrap();
+        let changed = AssertedImagePixels::from_container(
+            container,
+            DecodedImagePixels::rgba8(1, 1, vec![1, 2, 4, 255]).unwrap(),
+        )
+        .unwrap();
 
         assert_ne!(
             profile.semantic_digest_pixels(&original).unwrap(),
@@ -1034,7 +1252,7 @@ mod tests {
         );
     }
 
-    const TEST_ED25519_PRIVATE_KEY: &str = r#"
+    pub(super) const TEST_ED25519_PRIVATE_KEY: &str = r#"
 -----BEGIN OPENSSH PRIVATE KEY-----
 b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
 QyNTUxOQAAACCzPq7zfqLffKoBDe/eo04kH2XxtSmk9D7RQyf1xUqrYgAAAJgAIAxdACAM
@@ -1043,4 +1261,338 @@ AAAEC2BsIi0QwW2uFscKTUUXNHLsYX4FxlaSDSblbAj7WR7bM+rvN+ot98qgEN796jTiQf
 ZfG1KaT0PtFDJ/XFSqtiAAAAEHVzZXJAZXhhbXBsZS5jb20BAgMEBQ==
 -----END OPENSSH PRIVATE KEY-----
 "#;
+}
+
+/// What a version signature proves that a snapshot signature does not.
+///
+/// Every other signature test in this crate signs an opaque byte string and
+/// then changes that byte string — which shows the backend works, and says
+/// nothing about *what* is inside the payload. These tests build a real
+/// repository with a real manifest chain, truncate it the two ways a
+/// repository can be truncated, and check what each signature can see.
+#[cfg(test)]
+mod version_signature_tests {
+    use super::tests::TEST_ED25519_PRIVATE_KEY;
+    use super::*;
+    use opendoc_core::digest_bytes;
+    use opendoc_store::{LocalObjectStore, ObjectStore, ObjectStoreLayout, Repository};
+    use std::fs;
+    use std::path::PathBuf;
+
+    const DOCUMENT: &str = "version-signature-doc";
+    const BRANCH: &str = "main";
+
+    fn temp_root(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "opendoc-version-signature-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        root
+    }
+
+    fn signer(backend: &OpenSshSigner) -> Signer {
+        Signer {
+            key_identity: backend.public_key_openssh().unwrap(),
+            display_name: "Tester".to_string(),
+        }
+    }
+
+    fn put(repo: &Repository<LocalObjectStore>, bytes: &[u8]) -> HashRef {
+        let hash = digest_bytes("sha256", bytes).unwrap();
+        repo.store().put_if_absent(&hash, bytes).unwrap();
+        hash
+    }
+
+    /// Two committed versions, each with its own snapshot and operation
+    /// segment, returned newest last.
+    fn build_chain(repo: &Repository<LocalObjectStore>) -> (Vec<HashRef>, Vec<HashRef>) {
+        let mut manifests = Vec::new();
+        let mut snapshots = Vec::new();
+        let mut parent = None;
+        for index in 0..2 {
+            let snapshot = put(repo, format!("snapshot {index}").as_bytes());
+            let segment = put(repo, format!("segment {index}").as_bytes());
+            let manifest = ManifestRecord {
+                document_uuid: DOCUMENT.to_string(),
+                branch: BRANCH.to_string(),
+                parent: parent.clone(),
+                snapshot: snapshot.clone(),
+                operation_segments: vec![segment],
+                signatures: Vec::new(),
+                blobs: Vec::new(),
+                created_at_ms: 1_000 + index as u64,
+            };
+            let hash = repo
+                .commit_manifest(&manifest, parent.as_ref())
+                .unwrap()
+                .unwrap();
+            parent = Some(hash.clone());
+            manifests.push(hash);
+            snapshots.push(snapshot);
+        }
+        (manifests, snapshots)
+    }
+
+    /// Truncation by *rewrite*: the snapshot is untouched, the parent link and
+    /// the operation segments are gone, and the branch head moves to the
+    /// result. This is the shape that leaves a repository that opens normally.
+    #[test]
+    fn a_version_signature_sees_a_rewritten_rootless_manifest_where_a_snapshot_signature_cannot() {
+        let root = temp_root("rewrite");
+        let repo = Repository::new(LocalObjectStore::new(&root));
+        let (manifests, snapshots) = build_chain(&repo);
+        let head = manifests[1].clone();
+        let manifest = repo.read_manifest(&head).unwrap().unwrap();
+        let backend = OpenSshSigner::from_private_key_pem(TEST_ED25519_PRIVATE_KEY).unwrap();
+
+        let (coverage, version_signature) =
+            sign_version(&backend, &manifest, "Version", signer(&backend)).unwrap();
+        assert_eq!(version_signature.target, head);
+        assert_eq!(coverage.parent, Some(manifests[0].clone()));
+
+        // The signature the application takes today: over the snapshot bytes.
+        let snapshot_bytes = repo.store().get(&snapshots[1]).unwrap().unwrap();
+        let snapshot_signature = sign_target(
+            &backend,
+            snapshots[1].clone(),
+            "Snapshot",
+            signer(&backend),
+            &snapshot_bytes,
+        )
+        .unwrap();
+
+        let rootless = ManifestRecord {
+            parent: None,
+            operation_segments: Vec::new(),
+            ..manifest.clone()
+        };
+        let rootless_hash = repo.write_manifest(&rootless).unwrap();
+        assert_ne!(rootless_hash, head);
+        assert_eq!(
+            rootless.snapshot, manifest.snapshot,
+            "the truncation leaves the document itself untouched"
+        );
+
+        // The snapshot signature cannot tell the two apart: its payload is the
+        // snapshot, and the snapshot did not move.
+        assert_eq!(
+            verify_record_for_target_with_public_key(
+                &snapshot_signature,
+                &snapshots[1],
+                &snapshot_bytes
+            )
+            .unwrap(),
+            SignatureState::Signed,
+            "the snapshot signature verifies over a version with no history at all"
+        );
+
+        // The version signature does.
+        assert_eq!(
+            verify_version_signature_with_public_key(&version_signature, &manifest).unwrap(),
+            SignatureState::Signed
+        );
+        assert_eq!(
+            verify_version_signature_with_public_key(&version_signature, &rootless).unwrap(),
+            SignatureState::Broken,
+            "a version signature must not verify over a manifest with the history removed"
+        );
+        assert_eq!(
+            verify_version_signature(&backend, &version_signature, &rootless).unwrap(),
+            SignatureState::Broken
+        );
+
+        // And dropping one segment while keeping the parent is refused too.
+        let short = ManifestRecord {
+            operation_segments: Vec::new(),
+            ..manifest.clone()
+        };
+        assert_eq!(
+            verify_version_signature_with_public_key(&version_signature, &short).unwrap(),
+            SignatureState::Broken
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Truncation by *deletion*: the signed manifest is byte-identical, so the
+    /// signature still verifies. The repository walk is what refuses.
+    #[test]
+    fn a_deleted_ancestor_is_refused_even_though_the_signature_still_verifies() {
+        let root = temp_root("deletion");
+        let repo = Repository::new(LocalObjectStore::new(&root));
+        let (manifests, _) = build_chain(&repo);
+        let head = manifests[1].clone();
+        let manifest = repo.read_manifest(&head).unwrap().unwrap();
+        let backend = OpenSshSigner::from_private_key_pem(TEST_ED25519_PRIVATE_KEY).unwrap();
+
+        let (coverage, record) =
+            sign_version(&backend, &manifest, "Version", signer(&backend)).unwrap();
+        repo.write_version_signature(&coverage, &record).unwrap();
+
+        // Before: signed, and the history it named is all here.
+        let signed = repo
+            .read_signed_version(&head)
+            .unwrap()
+            .expect("a signed version is its signature *and* the payload it was taken over");
+        assert_eq!(signed.signatures, vec![record.clone()]);
+        assert_eq!(
+            verify_version_coverage_with_public_key(&signed.signatures[0], &signed.coverage)
+                .unwrap(),
+            SignatureState::Signed
+        );
+        assert!(!repo
+            .audit_manifest_chain(&signed.coverage)
+            .unwrap()
+            .history_is_truncated());
+
+        fs::remove_file(root.join(ObjectStoreLayout::object_key(&manifests[0]))).unwrap();
+
+        // After: the signature is untouched and still verifies — that is the
+        // whole point of this test, not a defect.
+        let signed = repo
+            .read_signed_version(&head)
+            .unwrap()
+            .expect("a signed version is its signature *and* the payload it was taken over");
+        assert_eq!(
+            verify_version_coverage_with_public_key(&signed.signatures[0], &signed.coverage)
+                .unwrap(),
+            SignatureState::Signed,
+            "deleting an object cannot change bytes that were already signed"
+        );
+        assert_eq!(
+            verify_version_signature_with_public_key(
+                &signed.signatures[0],
+                &repo.read_manifest(&head).unwrap().unwrap()
+            )
+            .unwrap(),
+            SignatureState::Signed
+        );
+
+        // And the audit refuses it, naming the manifest that is gone.
+        let audit = repo.audit_manifest_chain(&signed.coverage).unwrap();
+        assert!(
+            audit.history_is_truncated(),
+            "a repository missing a manifest the signature named is truncated"
+        );
+        assert_eq!(audit.missing_manifests(), vec![manifests[0].clone()]);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// The stored coverage record is the signed payload, so editing it to hide
+    /// the truncation breaks the signature instead.
+    #[test]
+    fn an_edited_coverage_sidecar_does_not_verify() {
+        let root = temp_root("edited-coverage");
+        let repo = Repository::new(LocalObjectStore::new(&root));
+        let (manifests, _) = build_chain(&repo);
+        let head = manifests[1].clone();
+        let manifest = repo.read_manifest(&head).unwrap().unwrap();
+        let backend = OpenSshSigner::from_private_key_pem(TEST_ED25519_PRIVATE_KEY).unwrap();
+        let (coverage, record) =
+            sign_version(&backend, &manifest, "Version", signer(&backend)).unwrap();
+        repo.write_version_signature(&coverage, &record).unwrap();
+
+        let mut forged = coverage.clone();
+        forged.parent = None;
+        forged.operation_segments = Vec::new();
+        repo.store()
+            .put_named(
+                &ObjectStoreLayout::version_coverage_key(&head),
+                &forged.signing_payload().unwrap(),
+            )
+            .unwrap();
+
+        let stored = repo.read_version_coverage(&head).unwrap().unwrap();
+        assert_eq!(stored, forged, "the sidecar really was replaced");
+        assert_eq!(
+            verify_version_coverage_with_public_key(&record, &stored).unwrap(),
+            SignatureState::Broken,
+            "a coverage record that claims less history than was signed must not verify"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// The record's `target` is not decoration: the repository files a
+    /// signature sidecar under it, so a record whose target names a different
+    /// version would be read back as that version's signature.
+    #[test]
+    fn a_record_that_names_another_manifest_is_refused_even_when_its_payload_matches() {
+        let root = temp_root("wrong-target");
+        let repo = Repository::new(LocalObjectStore::new(&root));
+        let (manifests, _) = build_chain(&repo);
+        let manifest = repo.read_manifest(&manifests[1]).unwrap().unwrap();
+        let backend = OpenSshSigner::from_private_key_pem(TEST_ED25519_PRIVATE_KEY).unwrap();
+        let (coverage, record) =
+            sign_version(&backend, &manifest, "Version", signer(&backend)).unwrap();
+
+        let mut relabelled = record.clone();
+        relabelled.target = manifests[0].clone();
+        // The signature bytes still verify over the payload; only the claim
+        // about which version this is has been changed.
+        assert_eq!(
+            verify_record_with_public_key(&relabelled, &coverage.signing_payload().unwrap())
+                .unwrap(),
+            SignatureState::Signed
+        );
+        assert_eq!(
+            verify_version_signature_with_public_key(&relabelled, &manifest).unwrap(),
+            SignatureState::Broken,
+            "a record naming another manifest must not pass as this version's signature"
+        );
+        assert_eq!(
+            verify_version_coverage_with_public_key(&relabelled, &coverage).unwrap(),
+            SignatureState::Broken
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_version_signature_cannot_be_lifted_onto_another_version() {
+        let root = temp_root("lift");
+        let repo = Repository::new(LocalObjectStore::new(&root));
+        let (manifests, _) = build_chain(&repo);
+        let backend = OpenSshSigner::from_private_key_pem(TEST_ED25519_PRIVATE_KEY).unwrap();
+        let older = repo.read_manifest(&manifests[0]).unwrap().unwrap();
+        let newer = repo.read_manifest(&manifests[1]).unwrap().unwrap();
+        let (_, record) = sign_version(&backend, &newer, "Version", signer(&backend)).unwrap();
+
+        assert_eq!(
+            verify_version_signature_with_public_key(&record, &older).unwrap(),
+            SignatureState::Broken
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// The signed payload is readable on its own: an investigator holding only
+    /// these bytes learns that the version claimed a parent, without the
+    /// repository that has since lost it.
+    #[test]
+    fn the_signed_payload_says_what_it_covered() {
+        let root = temp_root("self-describing");
+        let repo = Repository::new(LocalObjectStore::new(&root));
+        let (manifests, snapshots) = build_chain(&repo);
+        let manifest = repo.read_manifest(&manifests[1]).unwrap().unwrap();
+        let backend = OpenSshSigner::from_private_key_pem(TEST_ED25519_PRIVATE_KEY).unwrap();
+        let (coverage, record) =
+            sign_version(&backend, &manifest, "Version", signer(&backend)).unwrap();
+        let payload = coverage.signing_payload().unwrap();
+
+        // Everything below is read back from the payload bytes alone.
+        let read = VersionCoverageRecord::from_signing_payload(&payload).unwrap();
+        assert_eq!(
+            verify_version_coverage_with_public_key(&record, &read).unwrap(),
+            SignatureState::Signed
+        );
+        assert_eq!(read.document_uuid, DOCUMENT);
+        assert_eq!(read.branch, BRANCH);
+        assert_eq!(read.manifest, manifests[1]);
+        assert_eq!(read.parent, Some(manifests[0].clone()));
+        assert_eq!(read.snapshot, snapshots[1]);
+        assert_eq!(read.operation_segments.len(), 1);
+        let _ = fs::remove_dir_all(root);
+    }
 }

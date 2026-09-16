@@ -8,5 +8,12 @@ opendoc-core = { path = "../opendoc-core" }
 opendoc-format = { path = "../opendoc-format" }
 ssh-key = { version = "0.7.0-rc.11", features = ["crypto", "ed25519"] }
 
+# End-to-end proof that a version signature refuses a truncated repository
+# needs a real repository. The edge is dev-only and one-way: opendoc-store
+# does not depend on opendoc-sign, so the runtime graph is unchanged and no
+# consumer of the store gains an ssh-key dependency.
+[dev-dependencies]
+opendoc-store = { path = "../opendoc-store" }
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"

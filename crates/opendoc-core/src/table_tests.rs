@@ -10,9 +10,12 @@ fn table_structure_rejects_duplicate_row_and_cell_ids() {
         id: StableId::parse("table-1").unwrap(),
         kind: BlockKind::Table {
             columns: vec![TableColumn::auto()],
+            properties: Default::default(),
             rows: vec![
                 TableRow {
                     id: row_id.clone(),
+                    height: None,
+                    header: false,
                     cells: vec![TableCell {
                         id: StableId::parse("cell-1").unwrap(),
                         span: CellSpan::SINGLE,
@@ -22,6 +25,8 @@ fn table_structure_rejects_duplicate_row_and_cell_ids() {
                 },
                 TableRow {
                     id: row_id,
+                    height: None,
+                    header: false,
                     cells: vec![TableCell {
                         id: StableId::parse("cell-2").unwrap(),
                         span: CellSpan::SINGLE,
@@ -53,6 +58,15 @@ fn table_structure_rejects_duplicate_row_and_cell_ids() {
         doc.validate(),
         Err(ModelError::InvalidDocument("duplicate table cell id"))
     ));
+
+    if let BlockKind::Table { rows, .. } = &mut doc.blocks[0].kind {
+        rows[0].cells.pop();
+        rows[1].cells[0].id = rows[0].cells[0].id.clone();
+    }
+    assert!(matches!(
+        doc.validate(),
+        Err(ModelError::InvalidDocument("duplicate table cell id"))
+    ));
 }
 
 /// Builds an `rows`x`columns` grid of single cells whose text is its
@@ -64,6 +78,8 @@ fn grid(rows: usize, columns: usize) -> Block {
             (0..rows)
                 .map(|row| TableRow {
                     id: StableId::new("row"),
+                    height: None,
+                    header: false,
                     cells: (0..columns)
                         .map(|column| {
                             TableCell::new(vec![Block::paragraph(format!("r{row}c{column}"))])
@@ -79,7 +95,7 @@ fn grid(rows: usize, columns: usize) -> Block {
 
 fn table_parts(block: &mut Block) -> (&mut Vec<TableColumn>, &mut Vec<TableRow>) {
     match &mut block.kind {
-        BlockKind::Table { columns, rows } => (columns, rows),
+        BlockKind::Table { columns, rows, .. } => (columns, rows),
         _ => panic!("not a table"),
     }
 }
@@ -210,6 +226,7 @@ fn table_cell_properties_round_trip_every_key() {
         TableCellProperty::BorderStart(border),
         TableCellProperty::BorderEnd(border),
         TableCellProperty::VerticalAlignment(VerticalAlignment::Middle),
+        TableCellProperty::RowHeader(true),
         TableCellProperty::PaddingTop(padding),
         TableCellProperty::PaddingBottom(padding),
         TableCellProperty::PaddingStart(padding),
@@ -298,6 +315,7 @@ fn table_structure_rejects_empty_table_shapes() {
         id: StableId::parse("table-empty").unwrap(),
         kind: BlockKind::Table {
             columns: Vec::new(),
+            properties: Default::default(),
             rows: Vec::new(),
         },
         content: Vec::new(),
@@ -310,8 +328,11 @@ fn table_structure_rejects_empty_table_shapes() {
 
     doc.blocks[0].kind = BlockKind::Table {
         columns: vec![TableColumn::auto()],
+        properties: Default::default(),
         rows: vec![TableRow {
             id: StableId::parse("row-empty").unwrap(),
+            height: None,
+            header: false,
             cells: Vec::new(),
         }],
     };
@@ -322,8 +343,11 @@ fn table_structure_rejects_empty_table_shapes() {
 
     doc.blocks[0].kind = BlockKind::Table {
         columns: vec![TableColumn::auto()],
+        properties: Default::default(),
         rows: vec![TableRow {
             id: StableId::parse("row-with-empty-cell").unwrap(),
+            height: None,
+            header: false,
             cells: vec![TableCell {
                 id: StableId::parse("cell-empty").unwrap(),
                 span: CellSpan::SINGLE,

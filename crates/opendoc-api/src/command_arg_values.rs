@@ -2,8 +2,8 @@
 
 use crate::command_parse::CommandParseError;
 use crate::{
-    AppCitationItem, EditorSelection, FindOptions, OpenDocPermissionGrant, OpenDocPresencePeer,
-    OpenDocRelayOperation, OpenDocRuntimeLookupEntry, OpenDocStorageBackend,
+    AppCitationItem, EditorSelection, FindOptions, OpenDocRelayOperation,
+    OpenDocRuntimeLookupEntry, OpenDocStorageBackend,
 };
 use opendoc_spreadsheet::{SheetFilterCriterion, SheetFilterSortSpec};
 use serde_json::Value;
@@ -82,6 +82,17 @@ pub(crate) fn arg_optional_u32(args: &Value, name: &str) -> Result<Option<u32>, 
     }
 }
 
+pub(crate) fn arg_optional_u64(args: &Value, name: &str) -> Result<Option<u64>, CommandParseError> {
+    match args.get(name) {
+        Some(Value::Null) | None => Ok(None),
+        Some(value) => value.as_u64().map(Some).ok_or_else(|| {
+            CommandParseError::Format(format!(
+                "argument {name} must be a non-negative integer or null"
+            ))
+        }),
+    }
+}
+
 pub(crate) fn arg_i32(args: &Value, name: &str) -> Result<i32, CommandParseError> {
     let Some(value) = args.get(name).and_then(Value::as_i64) else {
         return Err(CommandParseError::Format(format!(
@@ -89,6 +100,12 @@ pub(crate) fn arg_i32(args: &Value, name: &str) -> Result<i32, CommandParseError
         )));
     };
     i32::try_from(value)
+        .map_err(|_| CommandParseError::Format(format!("integer argument {name} is out of range")))
+}
+
+pub(crate) fn arg_i16(args: &Value, name: &str) -> Result<i16, CommandParseError> {
+    let value = arg_i32(args, name)?;
+    i16::try_from(value)
         .map_err(|_| CommandParseError::Format(format!("integer argument {name} is out of range")))
 }
 
@@ -189,22 +206,6 @@ pub(crate) fn arg_string_array(args: &Value, name: &str) -> Result<Vec<String>, 
                     "string-array argument {name} contains a non-string"
                 ))
             })
-        })
-        .collect()
-}
-
-pub(crate) fn arg_runtime_share_actions(args: &Value, name: &str) -> Vec<String> {
-    let Some(values) = args.get(name).and_then(Value::as_array) else {
-        return Vec::new();
-    };
-    values
-        .iter()
-        .map(|value| match value {
-            Value::String(value) => value.clone(),
-            Value::Null => "null".to_string(),
-            Value::Bool(value) => value.to_string(),
-            Value::Number(value) => value.to_string(),
-            _ => String::new(),
         })
         .collect()
 }
@@ -310,35 +311,6 @@ pub(crate) fn arg_filter_sort_specs(
         .collect()
 }
 
-pub(crate) fn arg_presence_peers(
-    args: &Value,
-    name: &str,
-) -> Result<Vec<OpenDocPresencePeer>, CommandParseError> {
-    let Some(values) = args.get(name) else {
-        return Ok(Vec::new());
-    };
-    let Some(values) = values.as_array() else {
-        return Err(CommandParseError::Format(format!(
-            "argument {name} must be a presence-peer array"
-        )));
-    };
-    Ok(values
-        .iter()
-        .filter_map(|value| {
-            let entry = value.as_object()?;
-            let subject = normalized_value_string(entry.get("subject"))?;
-            Some(OpenDocPresencePeer {
-                subject,
-                display_name: normalized_value_string(entry.get("display_name"))
-                    .unwrap_or_default(),
-                role: normalized_value_string(entry.get("role")).unwrap_or_default(),
-                cursor_anchor: normalized_value_string(entry.get("cursor_anchor")),
-                last_seen_ms: nonnegative_integer_millis(entry.get("last_seen_ms")),
-            })
-        })
-        .collect())
-}
-
 pub(crate) fn normalized_value_string(value: Option<&Value>) -> Option<String> {
     value
         .and_then(Value::as_str)
@@ -346,7 +318,7 @@ pub(crate) fn normalized_value_string(value: Option<&Value>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-pub(crate) fn nonnegative_integer_millis(value: Option<&Value>) -> u64 {
+pub(crate) fn nonnegative_integer(value: Option<&Value>) -> u64 {
     let Some(value) = value else {
         return 0;
     };
@@ -363,35 +335,13 @@ pub(crate) fn nonnegative_integer_millis(value: Option<&Value>) -> u64 {
         .unwrap_or(0)
 }
 
-pub(crate) fn arg_permission_grants(
-    args: &Value,
-    name: &str,
-) -> Result<Vec<OpenDocPermissionGrant>, CommandParseError> {
-    let Some(values) = args.get(name) else {
-        return Ok(Vec::new());
-    };
-    let Some(values) = values.as_array() else {
-        return Err(CommandParseError::Format(format!(
-            "argument {name} must be a permission-grant array"
-        )));
-    };
-    Ok(values
-        .iter()
-        .filter_map(|value| {
-            let entry = value.as_object()?;
-            let subject = normalized_value_string(entry.get("subject"))?;
-            let action = normalized_value_string(entry.get("action"))?;
-            let scope = normalized_value_string(entry.get("scope"))?;
-            Some(OpenDocPermissionGrant {
-                subject,
-                action,
-                scope,
-                document_uuid: normalized_value_string(entry.get("document_uuid")),
-            })
-        })
-        .collect())
-}
-
+/// The batch a sync preflight is asked about.
+///
+/// An operation's identity is `(actor, seq)`, the same `OperationId` the merge
+/// and the service use, so there is no separate opaque id that could disagree
+/// with it. A malformed entry is kept rather than dropped — the preflight
+/// refuses the batch and says which entry was wrong, which is more useful than
+/// silently shortening it.
 pub(crate) fn arg_relay_operations(
     args: &Value,
     name: &str,
@@ -409,19 +359,15 @@ pub(crate) fn arg_relay_operations(
         .map(|value| {
             let Some(entry) = value.as_object() else {
                 return OpenDocRelayOperation {
-                    id: String::new(),
                     actor: String::new(),
                     seq: 0,
                     kind: String::new(),
-                    base_manifest: None,
                 };
             };
             OpenDocRelayOperation {
-                id: normalized_value_string(entry.get("id")).unwrap_or_default(),
                 actor: normalized_value_string(entry.get("actor")).unwrap_or_default(),
-                seq: nonnegative_integer_millis(entry.get("seq")),
+                seq: nonnegative_integer(entry.get("seq")),
                 kind: normalized_value_string(entry.get("kind")).unwrap_or_default(),
-                base_manifest: normalized_value_string(entry.get("base_manifest")),
             }
         })
         .collect())

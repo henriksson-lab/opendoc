@@ -1,5 +1,6 @@
 use crate::{
-    AppArchiveTombstone, AppBlobRef, AppOperationEnvelope, AppOperationRecord, OpenDocApp,
+    AppApiError, AppArchiveTombstone, AppBlobRef, AppOperationEnvelope, AppOperationRecord,
+    OpenDocApp, OpenDocServiceSession,
 };
 use opendoc_import::ImportedBlob;
 use std::collections::BTreeMap;
@@ -21,7 +22,12 @@ pub(crate) struct AppLifecycleService<'a> {
     last_manifest: &'a mut Option<String>,
     saved_operation_count: &'a mut usize,
     saved_signature_count: &'a mut usize,
-    next_seq: &'a mut u64,
+    merge_base: &'a mut Option<opendoc_core::Document>,
+    remote_operation_count: &'a mut usize,
+    next_envelope_seq: &'a mut u64,
+    next_operation_seq: &'a mut u64,
+    service_session: &'a mut Option<OpenDocServiceSession>,
+    operation_inverses: &'a mut BTreeMap<opendoc_merge::OperationId, opendoc_merge::Inversion>,
 }
 
 impl<'a> AppLifecycleService<'a> {
@@ -42,7 +48,12 @@ impl<'a> AppLifecycleService<'a> {
             last_manifest: &mut app.last_manifest,
             saved_operation_count: &mut app.saved_operation_count,
             saved_signature_count: &mut app.saved_signature_count,
-            next_seq: &mut app.next_seq,
+            merge_base: &mut app.merge_base,
+            remote_operation_count: &mut app.remote_operation_count,
+            next_envelope_seq: &mut app.next_envelope_seq,
+            next_operation_seq: &mut app.next_operation_seq,
+            service_session: &mut app.service_session,
+            operation_inverses: &mut app.operation_inverses,
         }
     }
 
@@ -59,7 +70,21 @@ impl<'a> AppLifecycleService<'a> {
         self.operation_envelopes.clear();
         self.undo_stack.clear();
         self.redo_stack.clear();
-        *self.next_seq = 1;
+        // The captured inverses describe operations in the journal that just
+        // went away. `DocumentOperationService` also discards stale entries
+        // when it mints the next id, so this is not required for correctness —
+        // it releases the memory now rather than at the next document's first
+        // edit.
+        self.operation_inverses.clear();
+        // A collaboration session is its merge base plus the operation log it
+        // anchors. Throwing the log away and keeping the base would leave a
+        // replica claiming to be a client of a document it no longer holds.
+        *self.merge_base = None;
+        *self.remote_operation_count = 0;
+        // The service's answers were about the log that just went away.
+        *self.service_session = None;
+        *self.next_envelope_seq = 1;
+        *self.next_operation_seq = 1;
     }
 
     pub(crate) fn clear_repository_binding(&mut self) {
@@ -71,13 +96,17 @@ impl<'a> AppLifecycleService<'a> {
         *self.saved_signature_count = 0;
     }
 
-    pub(crate) fn restore_imported_blobs(&mut self, blobs: Vec<ImportedBlob>) {
+    pub(crate) fn restore_imported_blobs(
+        &mut self,
+        blobs: Vec<ImportedBlob>,
+    ) -> Result<(), AppApiError> {
         let mut present = self
             .blobs
             .iter()
             .map(|blob| blob.hash.clone())
             .collect::<std::collections::BTreeSet<_>>();
         for blob in blobs {
+            crate::blob_service::validate_binary_blob_size(blob.bytes.len())?;
             let hash = match opendoc_core::HashRef::parse(&blob.hash) {
                 Ok(hash) => hash.to_string(),
                 Err(_) => continue,
@@ -112,6 +141,7 @@ impl<'a> AppLifecycleService<'a> {
             });
             present.insert(hash);
         }
+        Ok(())
     }
 }
 
@@ -139,8 +169,11 @@ impl OpenDocApp {
         self.lifecycle_service().clear_repository_binding();
     }
 
-    pub(crate) fn restore_imported_blobs(&mut self, blobs: Vec<ImportedBlob>) {
-        self.lifecycle_service().restore_imported_blobs(blobs);
+    pub(crate) fn restore_imported_blobs(
+        &mut self,
+        blobs: Vec<ImportedBlob>,
+    ) -> Result<(), AppApiError> {
+        self.lifecycle_service().restore_imported_blobs(blobs)
     }
 
     fn lifecycle_service(&mut self) -> AppLifecycleService<'_> {

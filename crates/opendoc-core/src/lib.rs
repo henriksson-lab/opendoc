@@ -10,31 +10,39 @@
 mod annotation;
 mod block;
 mod block_properties;
+mod bookmark;
 mod citation;
 mod document;
 mod ids;
 mod image;
 mod inline;
+mod list;
 mod measure;
 mod page;
 mod table;
+mod text_sequence;
 mod warning;
 
 pub use annotation::*;
 pub use block::*;
 pub use block_properties::*;
+pub use bookmark::*;
 pub use citation::*;
 pub use document::*;
 pub use ids::*;
 pub use image::*;
 pub use inline::*;
+pub use list::*;
 pub use measure::*;
 pub use page::*;
 pub use table::*;
+pub use text_sequence::*;
 pub use warning::*;
 
 #[cfg(test)]
 mod annotation_tests;
+#[cfg(test)]
+mod bookmark_tests;
 #[cfg(test)]
 mod citation_tests;
 #[cfg(test)]

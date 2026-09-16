@@ -1,6 +1,47 @@
 use crate::*;
 
 #[test]
+fn legacy_text_sequence_has_deterministic_token_gaps_and_retains_tombstones() {
+    let uuid = DocumentUuid::parse("doc-sequence").unwrap();
+    let inline = StableId::parse("inline-sequence").unwrap();
+    let mut sequence = TextSequence::materialize_legacy(&uuid, &inline, "a😀b");
+    sequence.validate().unwrap();
+    assert_eq!(sequence.visible_text(), "a😀b");
+
+    let gap = sequence.gap_at_visible_offset(2, TextGapBias::After);
+    assert_eq!(sequence.visible_offset_of_gap(&gap), Some(2));
+    sequence.tokens[1].tombstoned = true;
+    assert_eq!(sequence.visible_text(), "ab");
+    // The old gap remains at a truthful boundary rather than being rewritten
+    // to a neighbour as an offset anchor would be.
+    assert_eq!(sequence.visible_offset_of_gap(&gap), Some(1));
+
+    let same = TextSequence::materialize_legacy(&uuid, &inline, "a😀b");
+    assert_eq!(same.tokens[1].id, sequence.tokens[1].id);
+}
+
+#[test]
+fn text_sequence_rejects_duplicate_and_forward_predecessor_tokens() {
+    let uuid = DocumentUuid::parse("doc-sequence-invalid").unwrap();
+    let inline = StableId::parse("inline-sequence-invalid").unwrap();
+    let mut sequence = TextSequence::materialize_legacy(&uuid, &inline, "ab");
+    sequence.tokens[1].id = sequence.tokens[0].id.clone();
+    assert!(matches!(
+        sequence.validate(),
+        Err(ModelError::InvalidDocument("duplicate text token id"))
+    ));
+
+    let mut sequence = TextSequence::materialize_legacy(&uuid, &inline, "ab");
+    sequence.tokens[0].predecessor = Some(sequence.tokens[1].id.clone());
+    assert!(matches!(
+        sequence.validate(),
+        Err(ModelError::InvalidDocument(
+            "text token predecessor is not earlier in sequence"
+        ))
+    ));
+}
+
+#[test]
 fn structured_nodes_reject_empty_or_invalid_payloads() {
     let mut doc = Document::new("Structured payloads");
     doc.blocks.push(Block {
@@ -154,6 +195,24 @@ fn structured_nodes_reject_empty_or_invalid_payloads() {
 }
 
 #[test]
+fn dropdown_requires_a_canonical_selected_option() {
+    let dropdown = Inline::Dropdown {
+        id: StableId::parse("status").unwrap(),
+        options: vec![DropdownOption {
+            id: "draft".to_string(),
+            label: "Draft".to_string(),
+        }],
+        selected_option_id: "published".to_string(),
+    };
+    assert!(matches!(
+        dropdown.validate(),
+        Err(ModelError::InvalidDocument(
+            "dropdown selected option is absent"
+        ))
+    ));
+}
+
+#[test]
 fn mark_payloads_require_consistent_values() {
     let mut doc = Document::new("Marks");
     doc.blocks.push(Block::paragraph("marked"));
@@ -219,6 +278,14 @@ fn retained_inline_bodies_use_same_payload_validation() {
             created_at_ms: 1,
             deleted: false,
         }],
+        state: CommentThreadState::Open,
+        resolved_by: None,
+        resolved_at_ms: None,
+        action_assignee: None,
+        action_due_at_ms: None,
+        action_completed_by: None,
+        action_completed_at_ms: None,
+        reactions: Vec::new(),
         deleted: false,
     });
     assert!(matches!(
@@ -300,6 +367,14 @@ fn retained_record_collections_reject_duplicate_ids() {
                 created_at_ms: 1,
                 deleted: false,
             }],
+            state: CommentThreadState::Open,
+            resolved_by: None,
+            resolved_at_ms: None,
+            action_assignee: None,
+            action_due_at_ms: None,
+            action_completed_by: None,
+            action_completed_at_ms: None,
+            reactions: Vec::new(),
             deleted: false,
         });
     }

@@ -32,8 +32,43 @@ fn citation(items: Vec<CitationItem>) -> CitationGroup {
 }
 
 #[test]
+fn generated_bibliography_uses_only_live_citation_group_records() {
+    let mut database = CitationDatabase {
+        style: "numeric".to_string(),
+        ..CitationDatabase::default()
+    };
+    database.upsert_reference(reference("ref-used", "Used", "2024", "Cited work"));
+    database.upsert_reference(reference(
+        "ref-list-tail",
+        "Tail",
+        "2025",
+        "Uncited list entry",
+    ));
+    database.upsert_citation(citation(vec![CitationItem {
+        reference_id: StableId::parse("ref-used").unwrap(),
+        locator: None,
+        label: None,
+        prefix: None,
+        suffix: None,
+        suppress_author: false,
+    }]));
+
+    let rendered = render_cited_bibliography(&database);
+    assert_eq!(rendered.len(), 1);
+    assert_eq!(rendered[0].reference_id, "ref-used");
+    assert!(rendered[0].text.contains("Cited work"));
+}
+
+#[test]
 fn renders_author_year_and_numeric_labels_from_document_local_database() {
-    let mut database = CitationDatabase::default();
+    // Asked for by name rather than taken from the default. The property under
+    // test is what an *unresolvable* style does, and the default is no longer
+    // one: it moved to `apa` once `apa-7th` stopped being exempt from the
+    // not-bundled warning and every new document started tripping it.
+    let mut database = CitationDatabase {
+        style: "apa-7th".to_string(),
+        ..CitationDatabase::default()
+    };
     database.upsert_reference(reference("ref-doe", "Doe", "2020", "Example"));
     database.upsert_reference(reference("ref-smith", "Smith", "2021", "Second"));
     let group = citation(vec![
@@ -55,12 +90,32 @@ fn renders_author_year_and_numeric_labels_from_document_local_database() {
         },
     ]);
 
+    // `apa-7th` is not a CSL style and has no bundled data, so it keeps the
+    // built-in renderer — and says so, instead of being exempt from the check
+    // that reports exactly that.
     assert_eq!(
         render_citation_group(&database, &group),
         "(see Doe 2020, page 17; Smith 2021, page 22 reviewed)"
     );
+    assert_eq!(
+        vec![UNBUNDLED_STYLE_WARNING],
+        citation_support_warnings(&database)
+            .iter()
+            .map(|warning| warning.code.as_str())
+            .collect::<Vec<_>>()
+    );
 
+    // `ieee` is one of the eight bundled CSL styles, so this entry point and
+    // `render_citation` agree about it — they used to disagree, one numbering
+    // by reference-list position and the other by CSL.
     database.style = "ieee".to_string();
+    assert_eq!(
+        render_citation_group(&database, &group),
+        render::render_citation(&database, &group).unwrap().text
+    );
+
+    // `numeric` is OpenDoc's own built-in style and has no CSL data at all.
+    database.style = "numeric".to_string();
     assert_eq!(render_citation_group(&database, &group), "[1, 2]");
 
     database.style = "vancouver".to_string();
@@ -108,23 +163,47 @@ fn renders_bibliography_projection_without_deleted_references() {
     database.upsert_reference(reference("ref-smith", "Smith", "2021", "Second"));
     database.delete_reference(&StableId::parse("ref-doe").unwrap(), 2);
 
+    // Pinned, not defaulted: this test is about a deleted reference being left
+    // out, and the rendered text is only how that is observed. Letting it ride
+    // the default made it move when the default did.
+    database.style = "apa".to_string();
     let entries = render_bibliography(&database);
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].reference_id, "ref-smith");
-    assert_eq!(entries[0].text, "Smith (2021). Second.");
+    assert_eq!(entries[0].text, "Smith. (2021). Second.");
 
     database.style = "numeric".to_string();
     let entries = render_bibliography(&database);
     assert_eq!(entries[0].text, "[1] Smith. Second. 2021");
 
+    // `ieee` renders through CSL here exactly as it does through
+    // `render_bibliography_rich`; the two used to produce different text for
+    // one document.
     database.style = "ieee".to_string();
     let entries = render_bibliography(&database);
-    assert_eq!(entries[0].text, "[1] Smith. Second. 2021");
+    assert_eq!(
+        entries[0].text,
+        render_bibliography_rich(&database).unwrap()[0].text
+    );
+    assert!(entries[0].text.starts_with("[1]"), "{}", entries[0].text);
 
     database.style = "vancouver".to_string();
     let entries = render_bibliography(&database);
     assert!(entries[0].text.starts_with("1. "), "{}", entries[0].text);
     assert!(entries[0].text.contains("Second"), "{}", entries[0].text);
+}
+
+#[test]
+fn an_empty_or_all_deleted_bibliography_is_empty_without_needing_a_style_render() {
+    let empty = CitationDatabase::default();
+    assert!(render_bibliography(&empty).is_empty());
+    assert!(render_bibliography_rich(&empty).unwrap().is_empty());
+
+    let mut deleted = CitationDatabase::default();
+    deleted.upsert_reference(reference("ref-deleted", "Doe", "2020", "Example"));
+    deleted.delete_reference(&StableId::parse("ref-deleted").unwrap(), 1);
+    assert!(render_bibliography(&deleted).is_empty());
+    assert!(render_bibliography_rich(&deleted).unwrap().is_empty());
 }
 
 #[test]
@@ -888,10 +967,13 @@ mod csl {
             render_citation_group(&database, &title_only),
             "[cite-title]"
         );
-        database.style = "ieee".to_string();
-        // The legacy numeric renderer numbers by position in the reference
-        // list, which is kept sorted by id.
+        database.style = "numeric".to_string();
+        // OpenDoc's built-in numeric renderer numbers by position in the
+        // reference list, which is kept sorted by id.
         assert_eq!(render_citation_group(&database, &title_only), "[5]");
+        database.style = "ieee".to_string();
+        // CSL numbers by order of first citation instead.
+        assert_eq!(render_citation_group(&database, &title_only), "[1]");
         database.style = "vancouver".to_string();
         assert_eq!(render_citation_group(&database, &title_only), "(1)");
     }
@@ -937,27 +1019,174 @@ mod csl {
             resolve_style_name("harvard-cite-them-right").as_deref(),
             Some("harvard")
         );
-        assert_eq!(
-            resolve_style_name("american-chemical-society").as_deref(),
-            Some("american-chemical-society")
-        );
+        // Not bundled any more: the CSL data for the other 83 styles
+        // hayagriva ships was 2.97 MB of the browser module, and nothing in
+        // the product can select them. An unresolved name keeps the built-in
+        // renderer and is reported by `citation_support_warnings`.
+        assert_eq!(resolve_style_name("american-chemical-society"), None);
+        // The historical `CitationDatabase` default, and OpenDoc's own
+        // built-in numbering style: neither is a CSL style and neither has
+        // bundled data.
         assert_eq!(resolve_style_name("apa-7th"), None);
         assert_eq!(resolve_style_name("numeric"), None);
         assert!(style_uses_csl("apa"));
         assert!(style_uses_csl("vancouver"));
         assert!(!style_uses_csl("apa-7th"));
-        assert!(!style_uses_csl("ieee"), "ieee keeps legacy wrapper output");
-        assert!(is_legacy_wrapper_style("IEEE"));
-        assert!(all_style_names().len() > 8);
+        // `ieee` is bundled, so the compatibility entry points and the rich
+        // ones render it the same way. Listing it as a legacy style made two
+        // entry points disagree about the same document.
+        assert!(style_uses_csl("ieee"));
+        assert!(!is_legacy_wrapper_style("IEEE"));
+        assert!(is_legacy_wrapper_style("numeric"));
+        assert_eq!(
+            vec!["numeric"],
+            crate::LEGACY_WRAPPER_STYLES.to_vec(),
+            "the built-in styles are the ones with no CSL data, and nothing else"
+        );
+        assert_eq!(
+            bundled_style_names(),
+            vec![
+                "apa",
+                "mla",
+                "chicago-author-date",
+                "chicago-notes",
+                "ieee",
+                "vancouver",
+                "harvard",
+                "nature"
+            ]
+        );
         assert_eq!(
             load_style("made-up").unwrap_err(),
             CitationError::UnknownStyle("made-up".to_string())
         );
+        assert_eq!(
+            load_style("american-chemical-society").unwrap_err(),
+            CitationError::UnknownStyle("american-chemical-society".to_string())
+        );
+    }
+
+    /// The vendored CBOR is `citationberg`'s own serialization, so a bumped
+    /// `citationberg` could stop decoding it. That would show up as every
+    /// citation quietly falling back to the built-in renderer, so it is
+    /// asserted here instead: every bundled style decodes, and decodes to the
+    /// CSL style it was copied for.
+    #[test]
+    fn bundled_csl_assets_match_their_provenance() {
+        let expected_ids = [
+            ("apa", "apa"),
+            ("mla", "modern-language-association"),
+            ("chicago-author-date", "chicago-author-date"),
+            ("chicago-notes", "chicago-notes-bibliography"),
+            ("ieee", "ieee"),
+            ("vancouver", "nlm-citation-sequence"),
+            ("harvard", "harvard-cite-them-right"),
+            ("nature", "nature"),
+        ];
+        assert_eq!(
+            bundled_style_provenance(),
+            expected_ids.to_vec(),
+            "a bundled style's provenance changed without the table saying so"
+        );
+        for (name, archive_file) in expected_ids {
+            let info = style_info(name).unwrap_or_else(|err| {
+                panic!("bundled style {name} did not decode: {err}");
+            });
+            assert!(
+                info.csl_id.ends_with(archive_file),
+                "{name} decoded to CSL id {} rather than {archive_file}",
+                info.csl_id
+            );
+        }
+        // Every bundled locale file decodes and names itself.
+        assert_eq!(
+            available_locales(),
+            vec!["de-DE", "en-GB", "en-US", "es-ES", "fr-FR", "pt-PT", "sv-SE", "zh-CN"]
+        );
+    }
+
+    /// A document naming a style or locale the bundle does not hold must say
+    /// so — it renders with the built-in formatter, which is a real answer
+    /// but not the one asked for (ADR 0003).
+    #[test]
+    fn an_unbundled_style_or_locale_degrades_with_a_warning() {
+        let mut database = database("american-chemical-society");
+        // The built-in renderer reads the reference *summary*, so the fixture
+        // has to carry one or the fallback would render a placeholder and the
+        // assertion below would hold for the wrong reason.
+        let mut reference = bibtex_reference("zed2021");
+        reference.summary = summary_from_details(&reference_details(&reference));
+        database.upsert_reference(reference);
+        database.citations.push(group("c1", vec![item("zed2021")]));
+
+        let codes = |database: &CitationDatabase| -> Vec<String> {
+            citation_support_warnings(database)
+                .into_iter()
+                .map(|warning| warning.code)
+                .collect()
+        };
+
+        let warnings = citation_support_warnings(&database);
+        assert_eq!(
+            warnings.iter().map(|w| w.code.as_str()).collect::<Vec<_>>(),
+            vec![UNBUNDLED_STYLE_WARNING]
+        );
+        assert!(
+            warnings[0].message.contains("american-chemical-society")
+                && warnings[0].message.contains("apa"),
+            "the warning does not name the style or what is bundled: {}",
+            warnings[0].message
+        );
+        // It renders rather than failing, with the built-in formatter.
+        assert_eq!(
+            render_citation_group(&database, &database.citations[0].clone()),
+            "(Ada Zed 2021)"
+        );
+
+        // A bundled style with an unbundled locale reports the locale only,
+        // naming what it used instead.
+        database.style = "apa".to_string();
+        database.locale = "ja-JP".to_string();
+        let warnings = citation_support_warnings(&database);
+        assert_eq!(
+            warnings.iter().map(|w| w.code.as_str()).collect::<Vec<_>>(),
+            vec![UNBUNDLED_LOCALE_WARNING]
+        );
+        assert!(warnings[0].message.contains("en-US"), "{:?}", warnings[0]);
+
+        // A bundled pair is silent, and so is any request the resolver can
+        // answer in the language that was asked for.
+        database.locale = "de".to_string();
+        assert!(codes(&database).is_empty());
+        database.locale = "de-AT".to_string();
+        assert!(codes(&database).is_empty());
+        database.locale = "en-GB".to_string();
+        assert!(codes(&database).is_empty());
+        database.locale = String::new();
+        assert!(codes(&database).is_empty());
+        // The historical default is *not* silent any more. It is the style
+        // every new document starts with, it is not a CSL style, and it used
+        // to be the one degradation nobody was ever told about.
+        database.style = "apa-7th".to_string();
+        assert_eq!(vec![UNBUNDLED_STYLE_WARNING], codes(&database));
+        // OpenDoc's own built-in numbering style is silent, because a
+        // built-in style is a choice rather than a degradation.
+        database.style = "numeric".to_string();
+        assert!(codes(&database).is_empty());
+
+        // And a document that cites nothing is not affected by which styles
+        // exist, whatever its style field says.
+        let empty = CitationDatabase {
+            style: "american-chemical-society".to_string(),
+            locale: "ja-JP".to_string(),
+            ..CitationDatabase::default()
+        };
+        assert!(codes(&empty).is_empty());
     }
 
     #[test]
     fn unknown_styles_keep_legacy_rendering() {
-        let mut database = database("apa-7th");
+        let mut database = database("american-chemical-society");
         let mut reference = bibtex_reference("smitha");
         reference.summary = summary_from_details(&reference_details(&reference));
         database.upsert_reference(reference);
@@ -976,7 +1205,7 @@ mod csl {
         );
         assert_eq!(
             render_citation(&database, &citation).unwrap_err(),
-            CitationError::UnknownStyle("apa-7th".to_string())
+            CitationError::UnknownStyle("american-chemical-society".to_string())
         );
         database.style = "apa".to_string();
         assert_eq!(

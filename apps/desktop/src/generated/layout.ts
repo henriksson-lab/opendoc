@@ -15,5 +15,10 @@ export type AppDocumentLayout = {
   page_count: number;
   exact: boolean;
   style: string;
+  /** The `list-style-type` cycle for nested lists, as complete CSS rules.
+   *  Written by the layout engine from the same function the painted page
+   *  picks its markers with, so the stylesheet cannot state a different
+   *  last rule from the one the PDF cycles to. */
+  list_style: string;
   blocks: AppBlockPlacement[];
 };

@@ -2,10 +2,10 @@
 
 use crate::causal::{CausalContext, OperationId};
 use opendoc_core::{
-    BibliographyReference, Block, BlockProperty, BlockPropertyKey, CellSpan, CitationGroup,
-    CommentThread, Footnote, HeaderFooterSlot, ImageLayout, Inline, Length, ListKind, Mark,
-    MarkKind, PageSetup, StableId, Suggestion, TableCell, TableCellProperty, TableCellPropertyKey,
-    TableColumn, TableRow,
+    BibliographyReference, Block, BlockProperty, BlockPropertyKey, Bookmark, CellSpan,
+    CitationGroup, CommentThread, Footnote, HeaderFooterSlot, ImageLayout, Inline, InsertPosition,
+    Length, ListKind, Mark, MarkKind, OrderedListFormat, PageSetup, StableId, Suggestion,
+    TableCell, TableCellProperty, TableCellPropertyKey, TableColumn, TableRow,
 };
 use serde::{Deserialize, Serialize};
 
@@ -27,6 +27,8 @@ pub struct Operation {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum BlockTextStyle {
     Paragraph,
+    Title,
+    Subtitle,
     Heading {
         level: u8,
     },
@@ -48,26 +50,54 @@ pub enum OperationKind {
     SetDocumentLocale {
         locale: String,
     },
+    /// Writes a durable bookmark, including its deletion tombstone.  The
+    /// revision is the LWW value for this bookmark id; a live name collision
+    /// is resolved deterministically by the later operation's bookmark.
+    UpsertBookmark {
+        bookmark: Bookmark,
+    },
+    /// Adds a block at `position`, beside a sibling in either the document
+    /// body or a table-cell block container.
+    ///
+    /// [`InsertPosition::First`] is what makes undoing the deletion of the
+    /// *first body block* possible; [`InsertPosition::Before`] likewise makes
+    /// the first nested cell block expressible through its next sibling.
     InsertBlock {
-        after: Option<StableId>,
+        position: InsertPosition,
         block: Block,
     },
     DeleteBlock {
         block_id: StableId,
     },
+    /// Moves one existing block beside another existing block.  Unlike a
+    /// delete/insert pair, this preserves the block identity (and therefore
+    /// concurrent inline edits, comments and bookmarks) while changing only
+    /// its sibling container and order.
+    ///
+    /// `First` and `Last` address the document body.  A cell-local first or
+    /// last child is expressed relative to a sibling with `Before`/`After`;
+    /// that keeps the operation path-free and stable under table edits.
+    MoveBlock {
+        block_id: StableId,
+        position: InsertPosition,
+    },
     SetBlockTextStyle {
         block_id: StableId,
         style: BlockTextStyle,
     },
+    /// Adds an inline to a block's content at `position` — the same anchoring
+    /// [`InsertBlock`] uses, for the same reason.
+    ///
+    /// [`InsertBlock`]: OperationKind::InsertBlock
     InsertInline {
         block_id: StableId,
-        after: Option<StableId>,
+        position: InsertPosition,
         inline: Inline,
     },
     MoveInlineToBlock {
         inline_id: StableId,
         target_block_id: StableId,
-        after: Option<StableId>,
+        position: InsertPosition,
     },
     AddMark {
         text_id: StableId,
@@ -96,8 +126,39 @@ pub enum OperationKind {
         thread_id: StableId,
         comment: opendoc_core::Comment,
     },
+    ResolveCommentThread {
+        thread_id: StableId,
+        resolved_by: String,
+        resolved_at_ms: u64,
+    },
+    ReopenCommentThread {
+        thread_id: StableId,
+    },
+    SetCommentThreadAction {
+        thread_id: StableId,
+        assignee: Option<String>,
+        due_at_ms: Option<u64>,
+        completed_by: Option<String>,
+        completed_at_ms: Option<u64>,
+    },
+    /// Sets whether `actor` has this emoji reaction on the thread.  This is a
+    /// set rather than a toggle so undo and replay remain explicit.
+    SetCommentThreadReaction {
+        thread_id: StableId,
+        emoji: String,
+        actor: String,
+        present: bool,
+    },
     UpsertFootnote {
         footnote: Footnote,
+    },
+    /// Changes where an existing note is projected.  The revision shares the
+    /// note's LWW clock so a delayed placement change cannot overwrite a
+    /// newer note tombstone or body edit.
+    SetEndnotePlacement {
+        footnote_id: StableId,
+        revision: u64,
+        endnote: bool,
     },
     UpsertBibliographyReference {
         reference: BibliographyReference,
@@ -163,6 +224,18 @@ pub enum OperationKind {
         inline_id: StableId,
         label: String,
     },
+    /// Selects one existing option of an atomic dropdown.  Option definitions
+    /// are immutable in this initial slice; the id prevents a concurrent
+    /// display-label edit from changing what a choice means.
+    SelectDropdownOption {
+        inline_id: StableId,
+        option_id: String,
+    },
+    /// Replaces an atomic date chip's canonical ISO calendar date.
+    UpdateDateChip {
+        inline_id: StableId,
+        date: String,
+    },
     UpdateLinkHref {
         inline_id: StableId,
         href: String,
@@ -198,6 +271,29 @@ pub enum OperationKind {
         level: u8,
         kind: ListKind,
     },
+    /// Sets the first displayed ordinal for one ordered wrapper in a list
+    /// run. A start of one deliberately means the inherited default and is
+    /// stored by removing the map entry, so equivalent documents have one
+    /// canonical representation.
+    SetListStart {
+        list_id: StableId,
+        level: u8,
+        start: u32,
+    },
+    /// Sets the counter style for one ordered wrapper in a list run. The
+    /// inherited depth-cycle value is represented by removing the entry.
+    SetListFormat {
+        list_id: StableId,
+        level: u8,
+        format: OrderedListFormat,
+    },
+    /// Sets the glyph for one unordered wrapper in a list run. The inherited
+    /// disc/circle/square depth-cycle is represented by removing the entry.
+    SetListBulletMarker {
+        list_id: StableId,
+        level: u8,
+        marker: opendoc_core::BulletListMarker,
+    },
     /// Writes one typed block property. Concurrent writes to the same
     /// property of the same block converge last-writer-wins; see
     /// `docs/adr/0006-block-property-merge.md`.
@@ -227,6 +323,12 @@ pub enum OperationKind {
         slot: HeaderFooterSlot,
         blocks: Vec<Block>,
     },
+    /// Removes a first/even-page override, restoring inheritance from the
+    /// ordinary header or footer. This is distinct from setting an empty
+    /// vector, which deliberately suppresses inherited furniture.
+    ClearPageFurnitureOverride {
+        slot: HeaderFooterSlot,
+    },
     AcceptSuggestion {
         suggestion_id: StableId,
         accepted_by: String,
@@ -238,19 +340,42 @@ pub enum OperationKind {
     DeleteInline {
         inline_id: StableId,
     },
+    /// Adds a row at `position`. Anchoring is by identity, never by index:
+    /// an index means different things on two replicas, an identity does not.
+    /// [`InsertPosition::First`] is how "above the first row" is said — the
+    /// older `after: Option<_>` spelling could not say it, because `None`
+    /// already means *append*.
+    ///
+    /// `cell_columns` says, for each cell in `row`, **which column it was
+    /// written into** — keyed on the cell's own id, so there is no parallel
+    /// list whose length could drift from `row.cells`. The row is generated
+    /// against the columns one replica can see; by the time the merge applies
+    /// it another replica may have deleted a column before them, and without
+    /// the binding every cell silently moves one column left. ADR 0019.
+    ///
+    /// An **empty** map means the operation predates the binding. It is then
+    /// read positionally — exactly as it was written — and the merge says so
+    /// with a `legacy-table-row-binding` warning, the way a repository with a
+    /// pre-split operation sequence reports `legacy-operation-sequence-gap`.
     InsertTableRow {
         table_block_id: StableId,
-        after_row: Option<StableId>,
+        position: InsertPosition,
         row: TableRow,
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        cell_columns: std::collections::BTreeMap<StableId, StableId>,
     },
     DeleteTableRow {
         table_block_id: StableId,
         row_id: StableId,
     },
+    /// Adds a cell to one row at `position` — the same anchoring
+    /// [`InsertTableRow`] uses, for the same reason.
+    ///
+    /// [`InsertTableRow`]: OperationKind::InsertTableRow
     InsertTableCell {
         table_block_id: StableId,
         row_id: StableId,
-        after_cell: Option<StableId>,
+        position: InsertPosition,
         cell: TableCell,
     },
     DeleteTableCell {
@@ -258,10 +383,8 @@ pub enum OperationKind {
         row_id: StableId,
         cell_id: StableId,
     },
-    /// Adds a column to the right of `after_column`, or at the end of the
-    /// table when it is `None` — the same anchoring [`InsertTableRow`] uses,
-    /// for the same reason: an index means different things on two replicas,
-    /// an identity does not.
+    /// Adds a column at `position` — the same anchoring [`InsertTableRow`]
+    /// uses, for the same reason.
     ///
     /// The cells the new column needs in each row are **not** in the payload.
     /// They are derived from the row and column ids
@@ -271,7 +394,7 @@ pub enum OperationKind {
     /// [`InsertTableRow`]: OperationKind::InsertTableRow
     InsertTableColumn {
         table_block_id: StableId,
-        after_column: Option<StableId>,
+        position: InsertPosition,
         column: TableColumn,
     },
     DeleteTableColumn {
@@ -283,6 +406,37 @@ pub enum OperationKind {
         table_block_id: StableId,
         column_id: StableId,
         width: Option<Length>,
+    },
+    /// `None` returns the row to content-driven height.
+    SetTableRowHeight {
+        table_block_id: StableId,
+        row_id: StableId,
+        height: Option<Length>,
+    },
+    /// Whether this row is a semantic table header.
+    SetTableRowHeader {
+        table_block_id: StableId,
+        row_id: StableId,
+        header: bool,
+    },
+    /// Reorders every row by its stable identity. The application derives the
+    /// order from a chosen column; the replicated operation records the exact
+    /// result so replay and undo never re-run a locale-dependent comparison.
+    ReorderTableRows {
+        table_block_id: StableId,
+        row_ids: Vec<StableId>,
+    },
+    /// The inherited border for unstated table-cell edges. `None` returns to
+    /// document silence; `CellBorder::none()` is an explicit borderless table.
+    SetTableBorder {
+        table_block_id: StableId,
+        border: Option<opendoc_core::CellBorder>,
+    },
+    /// Positions a fixed-width table in its text column. `None` returns to
+    /// direction-relative start alignment.
+    SetTableAlignment {
+        table_block_id: StableId,
+        alignment: Option<opendoc_core::TableAlignment>,
     },
     /// Merges (span > 1) or splits (`CellSpan::SINGLE`) the cell. One
     /// operation for both because a merge is exactly the inverse of a split:

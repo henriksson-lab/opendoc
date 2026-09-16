@@ -152,6 +152,67 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         Some("write")
     ),
     command!(
+        "set_block_keep_with_next",
+        AppDocument,
+        [arg!("blockId", String), arg!("keepWithNext", Boolean)],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
+        "set_editor_selection_block_keep_with_next",
+        AppDocument,
+        [
+            arg!("selection", EditorSelection),
+            arg!("keepWithNext", Boolean)
+        ],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
+        "set_block_background",
+        AppDocument,
+        [arg!("blockId", String), arg!("color", String)],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
+        "set_editor_selection_block_background",
+        AppDocument,
+        [arg!("selection", EditorSelection), arg!("color", String)],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
+        "set_block_border",
+        AppDocument,
+        [
+            arg!("blockId", String),
+            arg!("style", String),
+            arg!("twips", Number),
+            arg!("color", String)
+        ],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
+        "set_editor_selection_block_border",
+        AppDocument,
+        [
+            arg!("selection", EditorSelection),
+            arg!("style", String),
+            arg!("twips", Number),
+            arg!("color", String)
+        ],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
         "clear_block_property",
         AppDocument,
         [arg!("blockId", String), arg!("key", String)],

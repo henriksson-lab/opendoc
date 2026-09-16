@@ -3,12 +3,14 @@
 use super::*;
 
 impl OpenDocApp {
-    pub fn add_paragraph(&mut self, text: impl Into<String>) -> AppDocument {
+    pub fn add_paragraph(&mut self, text: impl Into<String>) -> Result<AppDocument, AppApiError> {
         self.apply(
             "insert-block",
             "paragraph",
             OperationKind::InsertBlock {
-                after: self.document.blocks.last().map(|block| block.id.clone()),
+                position: InsertPosition::after_or_last(
+                    self.document.blocks.last().map(|block| block.id.clone()),
+                ),
                 block: Block::paragraph(text),
             },
         )
@@ -21,20 +23,79 @@ impl OpenDocApp {
     ) -> Result<AppDocument, AppApiError> {
         let after = after_block_id.map(|id| parse_id(&id)).transpose()?;
         if let Some(after) = &after {
-            if !self.document.blocks.iter().any(|block| &block.id == after) {
+            if find_block_in_blocks(&self.document.blocks, after).is_none() {
                 return Err(AppApiError::NotFound(format!(
-                    "top-level block {after} was not found"
+                    "block {after} was not found"
                 )));
             }
         }
-        Ok(self.apply(
+        self.apply(
             "insert-block",
             "paragraph after block",
             OperationKind::InsertBlock {
-                after,
+                position: InsertPosition::after_or_last(after),
                 block: Block::paragraph(text),
             },
-        ))
+        )
+    }
+
+    /// Reorders an existing block, or moves it into the sibling container of
+    /// `before_block_id`.  Both ids are tree-addressed: table-cell paragraphs
+    /// are not a special string-only editing path.
+    pub fn move_block_before(
+        &mut self,
+        block_id: impl AsRef<str>,
+        before_block_id: impl AsRef<str>,
+    ) -> Result<AppDocument, AppApiError> {
+        let block_id = parse_id(block_id.as_ref())?;
+        let before_block_id = parse_id(before_block_id.as_ref())?;
+        if find_block_in_blocks(&self.document.blocks, &block_id).is_none() {
+            return Err(AppApiError::NotFound(format!(
+                "block {block_id} was not found"
+            )));
+        }
+        if find_block_in_blocks(&self.document.blocks, &before_block_id).is_none() {
+            return Err(AppApiError::NotFound(format!(
+                "destination block {before_block_id} was not found"
+            )));
+        }
+        self.apply(
+            "move-block",
+            "move block before sibling",
+            OperationKind::MoveBlock {
+                block_id,
+                position: InsertPosition::Before(before_block_id),
+            },
+        )
+    }
+
+    /// See [`Self::move_block_before`].  This spelling is useful for keyboard
+    /// "move down" actions and avoids a caller deriving a fragile index.
+    pub fn move_block_after(
+        &mut self,
+        block_id: impl AsRef<str>,
+        after_block_id: impl AsRef<str>,
+    ) -> Result<AppDocument, AppApiError> {
+        let block_id = parse_id(block_id.as_ref())?;
+        let after_block_id = parse_id(after_block_id.as_ref())?;
+        if find_block_in_blocks(&self.document.blocks, &block_id).is_none() {
+            return Err(AppApiError::NotFound(format!(
+                "block {block_id} was not found"
+            )));
+        }
+        if find_block_in_blocks(&self.document.blocks, &after_block_id).is_none() {
+            return Err(AppApiError::NotFound(format!(
+                "destination block {after_block_id} was not found"
+            )));
+        }
+        self.apply(
+            "move-block",
+            "move block after sibling",
+            OperationKind::MoveBlock {
+                block_id,
+                position: InsertPosition::After(after_block_id),
+            },
+        )
     }
 
     pub fn split_paragraph_at_inline(
@@ -45,12 +106,12 @@ impl OpenDocApp {
         let source_block_id = find_block_id_containing_inline(&self.document.blocks, &inline_id)
             .ok_or_else(|| AppApiError::NotFound(format!("inline {inline_id} was not found")))?;
         let split_block_id = StableId::new("block");
-        Ok(self.apply_batch(vec![
+        self.apply_batch(vec![
             (
                 "insert-block",
                 "split paragraph target",
                 OperationKind::InsertBlock {
-                    after: Some(source_block_id),
+                    position: InsertPosition::After(source_block_id),
                     block: Block {
                         id: split_block_id.clone(),
                         kind: BlockKind::Paragraph,
@@ -65,10 +126,10 @@ impl OpenDocApp {
                 OperationKind::MoveInlineToBlock {
                     inline_id,
                     target_block_id: split_block_id,
-                    after: None,
+                    position: InsertPosition::Last,
                 },
             ),
-        ]))
+        ])
     }
 
     pub fn split_paragraph_at_text_offset(
@@ -79,17 +140,15 @@ impl OpenDocApp {
     ) -> Result<AppDocument, AppApiError> {
         let block_id = parse_id(block_id.as_ref())?;
         let split_inline_id = parse_id(inline_id_input.as_ref())?;
-        let block = self
-            .document
-            .blocks
-            .iter()
-            .find(|block| block.id == block_id)
-            .ok_or_else(|| {
-                AppApiError::NotFound(format!("top-level block {block_id} was not found"))
-            })?;
+        let block = find_block_in_blocks(&self.document.blocks, &block_id)
+            .ok_or_else(|| AppApiError::NotFound(format!("block {block_id} was not found")))?;
         if !matches!(
             block.kind,
-            BlockKind::Paragraph | BlockKind::Heading { .. } | BlockKind::ListItem { .. }
+            BlockKind::Paragraph
+                | BlockKind::Title
+                | BlockKind::Subtitle
+                | BlockKind::Heading { .. }
+                | BlockKind::ListItem { .. }
         ) {
             return Err(AppApiError::Format(format!(
                 "block {block_id} cannot be split at a text offset"
@@ -121,7 +180,7 @@ impl OpenDocApp {
             marks: marks.clone(),
         };
         let split_block_id = StableId::new("block");
-        Ok(self.apply_batch(vec![
+        self.apply_batch(vec![
             (
                 "update-inline-text",
                 "split paragraph leading text",
@@ -134,7 +193,7 @@ impl OpenDocApp {
                 "insert-block",
                 "split paragraph trailing text",
                 OperationKind::InsertBlock {
-                    after: Some(block_id),
+                    position: InsertPosition::After(block_id),
                     block: Block {
                         id: split_block_id,
                         kind: BlockKind::Paragraph,
@@ -143,7 +202,7 @@ impl OpenDocApp {
                     },
                 },
             ),
-        ]))
+        ])
     }
 
     pub fn join_paragraph_with_previous(
@@ -151,14 +210,9 @@ impl OpenDocApp {
         block_id: impl AsRef<str>,
     ) -> Result<AppDocument, AppApiError> {
         let block_id = parse_id(block_id.as_ref())?;
-        let Some(index) = self
-            .document
-            .blocks
-            .iter()
-            .position(|block| block.id == block_id)
-        else {
+        let Some((siblings, index)) = sibling_slice(&self.document.blocks, &block_id) else {
             return Err(AppApiError::NotFound(format!(
-                "top-level block {block_id} was not found"
+                "block {block_id} was not found"
             )));
         };
         if index == 0 {
@@ -166,12 +220,12 @@ impl OpenDocApp {
                 "paragraph {block_id} has no previous paragraph"
             )));
         }
-        if !matches!(self.document.blocks[index].kind, BlockKind::Paragraph) {
+        if !matches!(siblings[index].kind, BlockKind::Paragraph) {
             return Err(AppApiError::Format(format!(
                 "block {block_id} is not a paragraph"
             )));
         }
-        let previous = &self.document.blocks[index - 1];
+        let previous = &siblings[index - 1];
         if !matches!(previous.kind, BlockKind::Paragraph) {
             return Err(AppApiError::Format(format!(
                 "previous block {} is not a paragraph",
@@ -180,7 +234,7 @@ impl OpenDocApp {
         }
 
         let target_block_id = previous.id.clone();
-        let inline_ids = self.document.blocks[index]
+        let inline_ids = siblings[index]
             .content
             .iter()
             .map(|inline| inline_id(inline).clone())
@@ -194,7 +248,7 @@ impl OpenDocApp {
                 OperationKind::MoveInlineToBlock {
                     inline_id: inline_id_to_move.clone(),
                     target_block_id: target_block_id.clone(),
-                    after: after.clone(),
+                    position: InsertPosition::after_or_last(after.clone()),
                 },
             ));
             after = Some(inline_id_to_move);
@@ -204,7 +258,7 @@ impl OpenDocApp {
             "join paragraph source",
             OperationKind::DeleteBlock { block_id },
         ));
-        Ok(self.apply_batch(operations))
+        self.apply_batch(operations)
     }
 
     pub fn delete_block(
@@ -218,11 +272,11 @@ impl OpenDocApp {
                 "block {block_id} was not found"
             )));
         }
-        Ok(self.apply(
+        self.apply(
             "delete-block",
             "delete block",
             OperationKind::DeleteBlock { block_id },
-        ))
+        )
     }
 
     pub fn set_block_text_style(
@@ -239,7 +293,7 @@ impl OpenDocApp {
             level,
             list_kind_name.as_ref(),
         )?;
-        Ok(self.apply_batch(operations))
+        self.apply_batch(operations)
     }
 
     pub fn set_editor_selection_block_style(
@@ -257,7 +311,7 @@ impl OpenDocApp {
             .collect::<Result<Vec<_>, _>>()?;
         let operations =
             self.block_style_operations(block_ids, style.as_ref(), level, list_kind_name.as_ref())?;
-        Ok(self.apply_batch(operations))
+        self.apply_batch(operations)
     }
 
     /// Writes one typed block property. Concurrent writes to the same
@@ -272,11 +326,11 @@ impl OpenDocApp {
         property
             .validate()
             .map_err(|err| AppApiError::Format(err.to_string()))?;
-        Ok(self.apply(
+        self.apply(
             "set-block-property",
             "set block property",
             OperationKind::SetBlockProperty { block_id, property },
-        ))
+        )
     }
 
     /// Returns one block property to inheriting its default.
@@ -286,11 +340,11 @@ impl OpenDocApp {
         key: BlockPropertyKey,
     ) -> Result<AppDocument, AppApiError> {
         let block_id = self.formattable_block_id(block_id.as_ref())?;
-        Ok(self.apply(
+        self.apply(
             "clear-block-property",
             "clear block property",
             OperationKind::ClearBlockProperty { block_id, key },
-        ))
+        )
     }
 
     pub fn set_editor_selection_block_property(
@@ -312,7 +366,7 @@ impl OpenDocApp {
                 )
             })
             .collect();
-        Ok(self.apply_batch(operations))
+        self.apply_batch(operations)
     }
 
     pub fn clear_editor_selection_block_property(
@@ -331,7 +385,7 @@ impl OpenDocApp {
                 )
             })
             .collect();
-        Ok(self.apply_batch(operations))
+        self.apply_batch(operations)
     }
 
     // ---- Named block-property commands (PLAN77 B3) ----------------------
@@ -377,6 +431,82 @@ impl OpenDocApp {
     ) -> Result<AppDocument, AppApiError> {
         let property = BlockProperty::Direction(parse_direction(direction.as_ref())?);
         self.set_editor_selection_block_property(selection, property)
+    }
+
+    /// Sets the pagination relationship to this block's next sibling. This is
+    /// a real boolean rather than a one-way command so an imported/style
+    /// default can be explicitly overridden without clearing inheritance.
+    pub fn set_block_keep_with_next(
+        &mut self,
+        block_id: impl AsRef<str>,
+        keep_with_next: bool,
+    ) -> Result<AppDocument, AppApiError> {
+        self.set_block_property(block_id, BlockProperty::KeepWithNext(keep_with_next))
+    }
+
+    pub fn set_editor_selection_block_keep_with_next(
+        &mut self,
+        selection: EditorSelection,
+        keep_with_next: bool,
+    ) -> Result<AppDocument, AppApiError> {
+        self.set_editor_selection_block_property(
+            selection,
+            BlockProperty::KeepWithNext(keep_with_next),
+        )
+    }
+
+    /// Sets a flat paragraph background. The typed model accepts only an
+    /// opaque sRGB colour, so CSS names/functions cannot enter a replicated
+    /// operation payload.
+    pub fn set_block_background(
+        &mut self,
+        block_id: impl AsRef<str>,
+        color: impl AsRef<str>,
+    ) -> Result<AppDocument, AppApiError> {
+        self.set_block_property(
+            block_id,
+            BlockProperty::Background(
+                opendoc_core::Color::parse(color.as_ref())
+                    .map_err(|err| AppApiError::Format(err.to_string()))?,
+            ),
+        )
+    }
+
+    pub fn set_editor_selection_block_background(
+        &mut self,
+        selection: EditorSelection,
+        color: impl AsRef<str>,
+    ) -> Result<AppDocument, AppApiError> {
+        self.set_editor_selection_block_property(
+            selection,
+            BlockProperty::Background(
+                opendoc_core::Color::parse(color.as_ref())
+                    .map_err(|err| AppApiError::Format(err.to_string()))?,
+            ),
+        )
+    }
+
+    /// Sets one uniform frame around a paragraph. It is intentionally a
+    /// block property, not a table command: table cells retain their four
+    /// independent collapsed-grid edges.
+    pub fn set_block_border(
+        &mut self,
+        block_id: impl AsRef<str>,
+        style: impl AsRef<str>,
+        twips: i32,
+        color: impl AsRef<str>,
+    ) -> Result<AppDocument, AppApiError> {
+        self.set_block_property(block_id, paragraph_border(style, twips, color)?)
+    }
+
+    pub fn set_editor_selection_block_border(
+        &mut self,
+        selection: EditorSelection,
+        style: impl AsRef<str>,
+        twips: i32,
+        color: impl AsRef<str>,
+    ) -> Result<AppDocument, AppApiError> {
+        self.set_editor_selection_block_property(selection, paragraph_border(style, twips, color)?)
     }
 
     pub fn set_block_indent_start(
@@ -539,7 +669,7 @@ impl OpenDocApp {
                 kind.as_str()
             )));
         }
-        Ok(self.apply(
+        self.apply(
             "update-list-item",
             "set checklist item state",
             OperationKind::UpdateListItem {
@@ -547,7 +677,7 @@ impl OpenDocApp {
                 level,
                 kind: kind.with_checked(checked),
             },
-        ))
+        )
     }
 
     /// Toolbar indent / outdent over a selection.
@@ -609,7 +739,7 @@ impl OpenDocApp {
                 ));
             }
         }
-        Ok(self.apply_batch(operations))
+        self.apply_batch(operations)
     }
 
     fn formattable_block_id(&self, block_id: &str) -> Result<StableId, AppApiError> {
@@ -655,7 +785,11 @@ impl OpenDocApp {
             };
             if !matches!(
                 block.kind,
-                BlockKind::Paragraph | BlockKind::Heading { .. } | BlockKind::ListItem { .. }
+                BlockKind::Paragraph
+                    | BlockKind::Title
+                    | BlockKind::Subtitle
+                    | BlockKind::Heading { .. }
+                    | BlockKind::ListItem { .. }
             ) {
                 return Err(AppApiError::Format(format!(
                     "block {block_id} is not a paragraph, heading, or list item"
@@ -674,7 +808,7 @@ impl OpenDocApp {
                     "list item level {level} is outside 0..=8"
                 )));
             }
-            "paragraph" | "heading" | "list-item" => {}
+            "paragraph" | "title" | "subtitle" | "heading" | "list-item" => {}
             other => {
                 return Err(AppApiError::Format(format!(
                     "unsupported block text style {other}"
@@ -698,6 +832,8 @@ impl OpenDocApp {
             .map(|block_id| {
                 let style = match style {
                     "paragraph" => BlockTextStyle::Paragraph,
+                    "title" => BlockTextStyle::Title,
+                    "subtitle" => BlockTextStyle::Subtitle,
                     "heading" => BlockTextStyle::Heading { level },
                     _ => BlockTextStyle::ListItem {
                         list_id: list_ids.get(&block_id).cloned().unwrap_or_else(new_list_id),
@@ -718,12 +854,14 @@ impl OpenDocApp {
         Ok(operations)
     }
 
-    pub fn add_page_break(&mut self) -> AppDocument {
+    pub fn add_page_break(&mut self) -> Result<AppDocument, AppApiError> {
         self.apply(
             "insert-block",
             "page break",
             OperationKind::InsertBlock {
-                after: self.document.blocks.last().map(|block| block.id.clone()),
+                position: InsertPosition::after_or_last(
+                    self.document.blocks.last().map(|block| block.id.clone()),
+                ),
                 block: Block {
                     id: StableId::new("block"),
                     kind: BlockKind::PageBreak,
@@ -744,11 +882,11 @@ impl OpenDocApp {
                 "top-level block {after} was not found"
             )));
         }
-        Ok(self.apply(
+        self.apply(
             "insert-block",
             "page break after block",
             OperationKind::InsertBlock {
-                after: Some(after),
+                position: InsertPosition::After(after),
                 block: Block {
                     id: StableId::new("block"),
                     kind: BlockKind::PageBreak,
@@ -756,6 +894,126 @@ impl OpenDocApp {
                     properties: BlockProperties::default(),
                 },
             },
-        ))
+        )
+    }
+
+    pub fn add_horizontal_rule(&mut self) -> Result<AppDocument, AppApiError> {
+        self.apply(
+            "insert-block",
+            "horizontal rule",
+            OperationKind::InsertBlock {
+                position: InsertPosition::after_or_last(
+                    self.document.blocks.last().map(|block| block.id.clone()),
+                ),
+                block: horizontal_rule_block(),
+            },
+        )
+    }
+
+    pub fn insert_horizontal_rule_after(
+        &mut self,
+        after_block_id: impl AsRef<str>,
+    ) -> Result<AppDocument, AppApiError> {
+        let after = parse_id(after_block_id.as_ref())?;
+        if !self.document.blocks.iter().any(|block| block.id == after) {
+            return Err(AppApiError::NotFound(format!(
+                "top-level block {after} was not found"
+            )));
+        }
+        self.apply(
+            "insert-block",
+            "horizontal rule after block",
+            OperationKind::InsertBlock {
+                position: InsertPosition::After(after),
+                block: horizontal_rule_block(),
+            },
+        )
+    }
+
+    /// Inserts an atomic, generated table of contents.  Its entry text is a
+    /// projection of headings, so there is no separate update mutation to
+    /// race with a collaborator changing a heading.
+    pub fn insert_table_of_contents_after(
+        &mut self,
+        after_block_id: impl AsRef<str>,
+    ) -> Result<AppDocument, AppApiError> {
+        let after = parse_id(after_block_id.as_ref())?;
+        if !self.document.blocks.iter().any(|block| block.id == after) {
+            return Err(AppApiError::NotFound(format!(
+                "top-level block {after} was not found"
+            )));
+        }
+        self.apply(
+            "insert-block",
+            "table of contents after block",
+            OperationKind::InsertBlock {
+                position: InsertPosition::After(after),
+                block: table_of_contents_block(),
+            },
+        )
+    }
+
+    /// Inserts an atomic generated bibliography. Its entries are a projection
+    /// of live citation groups and the referenced metadata, so a collaborator
+    /// changing either cannot leave copied bibliography paragraphs stale.
+    pub fn insert_bibliography_after(
+        &mut self,
+        after_block_id: impl AsRef<str>,
+    ) -> Result<AppDocument, AppApiError> {
+        let after = parse_id(after_block_id.as_ref())?;
+        if !self.document.blocks.iter().any(|block| block.id == after) {
+            return Err(AppApiError::NotFound(format!(
+                "top-level block {after} was not found"
+            )));
+        }
+        self.apply(
+            "insert-block",
+            "bibliography after block",
+            OperationKind::InsertBlock {
+                position: InsertPosition::After(after),
+                block: bibliography_block(),
+            },
+        )
+    }
+}
+
+fn paragraph_border(
+    style: impl AsRef<str>,
+    twips: i32,
+    color: impl AsRef<str>,
+) -> Result<BlockProperty, AppApiError> {
+    let style = opendoc_core::BorderStyle::parse(style.as_ref().trim())
+        .map_err(|err| AppApiError::Format(err.to_string()))?;
+    let width = opendoc_core::Length::from_twips(twips)
+        .map_err(|err| AppApiError::Format(err.to_string()))?;
+    let border = opendoc_core::CellBorder::new(style, width, parse_color(color.as_ref())?)
+        .map_err(|err| AppApiError::Format(err.to_string()))?;
+    Ok(BlockProperty::Border(border))
+}
+
+fn horizontal_rule_block() -> Block {
+    Block {
+        id: StableId::new("block"),
+        kind: BlockKind::HorizontalRule,
+        content: Vec::new(),
+        properties: BlockProperties::default(),
+    }
+}
+
+fn table_of_contents_block() -> Block {
+    Block {
+        id: StableId::new("block"),
+        kind: BlockKind::TableOfContents { max_level: 3 },
+        content: Vec::new(),
+        properties: BlockProperties::default(),
+    }
+}
+
+fn bibliography_block() -> Block {
+    Block {
+        id: StableId::new("block"),
+        kind: BlockKind::Bibliography,
+        content: Vec::new(),
+        properties: BlockProperties::default(),
     }
 }

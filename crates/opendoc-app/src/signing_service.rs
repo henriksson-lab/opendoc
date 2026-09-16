@@ -1,8 +1,9 @@
+use crate::signing::asserted_image_pixels;
 use crate::{sign_fastq_profile, sign_image_pixels_profile, AppApiError, AppBlobRef};
 use opendoc_core::digest_bytes;
 use opendoc_sign::{
-    sign_blob_hash, sign_target, DecodedImagePixels, FastqFullProfile, FastqSequenceProfile,
-    OpenSshSigner, SignatureState, Signer,
+    sign_blob_hash, sign_target, FastqFullProfile, FastqSequenceProfile, OpenSshSigner,
+    SignatureState, Signer,
 };
 use std::collections::BTreeMap;
 
@@ -213,8 +214,21 @@ impl<'a> SignatureService<'a> {
             .iter()
             .position(|blob| blob.hash == hash.to_string())
             .ok_or_else(|| AppApiError::NotFound("blob was not found".to_string()))?;
-        let image = DecodedImagePixels::rgba8(width, height, pixels)
-            .map_err(|err| AppApiError::Sign(err.to_string()))?;
+        // The bytes are required, exactly as they are for the FASTQ profiles.
+        // `width`, `height` and `pixels` are the caller's word about what this
+        // blob decodes to, and the signature is only worth anything if it names
+        // the blob those pixels are claimed to come from — which means the blob
+        // has to be here to be digested.
+        let bytes = self
+            .blob_bytes
+            .get(&hash.to_string())
+            .ok_or_else(|| {
+                AppApiError::NotFound(
+                    "blob bytes are unavailable for typed image signing".to_string(),
+                )
+            })?
+            .clone();
+        let image = asserted_image_pixels(&bytes, width, height, pixels)?;
         let backend = openssh_signer(private_key_pem)?;
         let typed = sign_image_pixels_profile(
             &backend,

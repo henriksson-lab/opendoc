@@ -13,7 +13,7 @@
 // through `runSpreadsheetAction`.
 import { morphChildren } from "./editor";
 import { escapeHtml, promptDialog, toast } from "./ui";
-import { dispatch, invoke, openFile, saveFile } from "./invoke";
+import { dispatch, fetchUrlFile, invoke, isTauri, openFile } from "./invoke";
 import type { AppSpreadsheetSelection } from "./types";
 import {
   APP_DEFAULT_COLUMN_WIDTH_PX,
@@ -22,9 +22,9 @@ import {
   APP_MIN_AXIS_SIZE_PX,
 } from "./generated/spreadsheet";
 import { state } from "./state";
-import { edit, query, run, showError, textFromBase64 } from "./shared";
+import { edit, native, query, run, showError, textFromBase64 } from "./shared";
 import { renderToolbar } from "./toolbar";
-import { downloadExport } from "./files";
+import { downloadExport, fetchPublicGoogleExport, googlePublicExportUrl } from "./files";
 import { runAction } from "./actions";
 
 let workbookHtml = "";
@@ -60,16 +60,18 @@ export async function renderSheets(main: HTMLElement): Promise<void> {
     main.innerHTML = `
       <div class="workbook" data-workbook>
         <div class="formula-bar"><input class="name-box" data-name-box aria-label="Name box" value="${escapeHtml(cellFocus)}"><span class="fx">fx</span><input class="formula-input" data-formula-input aria-label="Formula"></div>
-        <div class="grid-scroll" data-grid tabindex="0"></div>
+        <div class="grid-scroll" data-grid tabindex="0" role="region" aria-describedby="spreadsheet-grid-status" aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight Enter F2 Tab Shift+Tab"></div>
         <div class="sheet-tabs" data-sheet-tabs></div>
       </div>`;
     grid = query("[data-workbook]", main) as HTMLElement;
     bindSheetEvents(grid);
   }
   const gridHost = query("[data-grid]", grid) as HTMLElement;
+  gridHost.setAttribute("aria-label", `Spreadsheet grid: ${sheet.title}`);
   const template = document.createElement("template");
   template.innerHTML = workbookHtml;
   morphChildren(gridHost, template.content);
+  positionSheetImages(gridHost);
   const tabs = query("[data-sheet-tabs]", grid) as HTMLElement;
   tabs.innerHTML = `${doc.workbook.sheets
     .map((item) => `<button type="button" class="sheet-tab${item.id === sheet.id ? " active" : ""}" data-action="select-sheet" data-id="${escapeHtml(item.id)}" data-title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</button>`)
@@ -82,6 +84,54 @@ export async function renderSheets(main: HTMLElement): Promise<void> {
   const nameBox = query<HTMLInputElement>("[data-name-box]", grid);
   if (nameBox && document.activeElement !== nameBox) nameBox.value = rangeLabel();
   renderCellEditor(gridHost);
+}
+
+/** Positions raster drawings from their durable two-cell anchors.  Rust owns
+ * the source geometry; the browser owns only the measured column/row pixels,
+ * so zoom and user CSS cannot make a second, drifting layout model. */
+function positionSheetImages(host: HTMLElement): void {
+  const table = host.querySelector<HTMLElement>(".sheet-grid");
+  if (!table) return;
+  const hostRect = host.getBoundingClientRect();
+  for (const image of host.querySelectorAll<HTMLImageElement>(".sheet-image")) {
+    if (!image.getAttribute("src")) {
+      image.hidden = true;
+      continue;
+    }
+    const startColumn = image.dataset.startColumn;
+    const startRow = image.dataset.startRow;
+    const endColumn = image.dataset.endColumn;
+    const endRow = image.dataset.endRow;
+    const start = startColumn && startRow
+      ? table.querySelector<HTMLElement>(`[data-address="${CSS.escape(startColumn + startRow)}"]`)
+      : null;
+    const end = endColumn && endRow
+      ? table.querySelector<HTMLElement>(`[data-address="${CSS.escape(endColumn + endRow)}"]`)
+      : null;
+    if (!start || !end) {
+      image.hidden = true;
+      continue;
+    }
+    const startRect = start.getBoundingClientRect();
+    const endRect = end.getBoundingClientRect();
+    const sx = Number(image.dataset.startOffsetX ?? "0");
+    const sy = Number(image.dataset.startOffsetY ?? "0");
+    const ex = Number(image.dataset.endOffsetX ?? "0");
+    const ey = Number(image.dataset.endOffsetY ?? "0");
+    const left = startRect.left - hostRect.left + host.scrollLeft + sx;
+    const top = startRect.top - hostRect.top + host.scrollTop + sy;
+    const width = endRect.left - startRect.left + ex - sx;
+    const height = endRect.top - startRect.top + ey - sy;
+    if (!Number.isFinite(left) || !Number.isFinite(top) || width <= 0 || height <= 0) {
+      image.hidden = true;
+      continue;
+    }
+    image.hidden = false;
+    image.style.left = `${left}px`;
+    image.style.top = `${top}px`;
+    image.style.width = `${width}px`;
+    image.style.height = `${height}px`;
+  }
 }
 
 function rangeLabel(): string {
@@ -680,6 +730,252 @@ function currentSpreadsheetSelectionArgs(): { sheetId: string; anchor: string; f
   return sheetId ? { sheetId, anchor: cellAnchor, focus: cellFocus } : null;
 }
 
+/** The current cell is the scope of the cell-metadata dialogs, never a guessed range. */
+function focusedCellMetadataArgs(): { sheetId: string; address: string } | null {
+  return sheetId ? { sheetId, address: cellFocus } : null;
+}
+
+/**
+ * The durable comment model permits a conversation on a cell.  A short menu
+ * action should not pretend that it is a single mutable note: choose the live
+ * comment first, then edit its body through the command that preserves its
+ * identity and audit trail.
+ */
+async function promptEditCellNote(): Promise<void> {
+  const args = focusedCellMetadataArgs();
+  const comments = focusedCell()?.comments.filter((comment) => !comment.deleted) ?? [];
+  if (!args) return;
+  if (!comments.length) {
+    toast(`Cell ${args.address} has no live notes to edit.`);
+    return;
+  }
+  const chosen = await promptDialog({
+    title: `Edit note on ${args.address}`,
+    fields: [{
+      name: "commentId",
+      label: "Note",
+      type: "select",
+      options: comments.map((comment) => ({ value: comment.id, label: `${comment.author}: ${comment.body.slice(0, 80)}` })),
+    }],
+    submit: "Continue",
+  });
+  if (!chosen?.commentId) return;
+  const comment = comments.find((item) => item.id === chosen.commentId);
+  if (!comment) return;
+  const updated = await promptDialog({
+    title: `Edit note on ${args.address}`,
+    fields: [{ name: "body", label: "Note", type: "textarea", value: comment.body }],
+    submit: "Save note",
+  });
+  if (!updated || !updated.body.trim()) return;
+  await edit("update_spreadsheet_cell_comment", { commentId: comment.id, body: updated.body });
+}
+
+async function promptCellValidation(): Promise<void> {
+  const args = focusedCellMetadataArgs();
+  if (!args) return;
+  const existing = focusedCell()?.validation;
+  const result = await promptDialog({
+    title: `Data validation for ${args.address}`,
+    body: "Enter list choices or rule inputs one per line. A strict rule rejects values that do not match.",
+    fields: [
+      {
+        name: "kind",
+        label: "Rule",
+        type: "select",
+        value: existing?.kind ?? "list",
+        options: [
+          { value: "list", label: "List of choices" },
+          { value: "number_greater", label: "Number greater than" },
+          { value: "number_less", label: "Number less than" },
+          { value: "number_between", label: "Number between" },
+          { value: "text_contains", label: "Text contains" },
+          { value: "custom_formula", label: "Custom formula" },
+        ],
+      },
+      { name: "values", label: "Choices or rule inputs", type: "textarea", value: existing?.values.join("\n") ?? "" },
+      {
+        name: "strict",
+        label: "Invalid input",
+        type: "select",
+        value: existing?.strict === false ? "allow" : "reject",
+        options: [{ value: "reject", label: "Reject input" }, { value: "allow", label: "Allow with warning" }],
+      },
+    ],
+    submit: "Apply validation",
+  });
+  if (!result) return;
+  const values = result.values.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
+  await edit("set_spreadsheet_cell_validation", {
+    ...args,
+    kind: result.kind,
+    values,
+    strict: result.strict === "reject",
+  });
+}
+
+/**
+ * Named ranges are document metadata, not a formatting shortcut. Keep their
+ * manager deliberately sheet-local: the range picker is then honest about
+ * which cells it can show and an update never accidentally moves a name across
+ * sheets.
+ */
+async function promptNamedRanges(): Promise<void> {
+  const sheet = currentSheet();
+  if (!sheet) return;
+  const ranges = state.doc?.workbook.named_ranges.filter((range) => range.sheet_id === sheet.id) ?? [];
+  const choice = await promptDialog({
+    title: "Named ranges",
+    body: "Names refer to a rectangular range on this sheet. They are not access controls.",
+    fields: [{
+      name: "operation",
+      label: "Action",
+      type: "select",
+      options: [
+        { value: "add", label: "Add a named range" },
+        { value: "update", label: "Change an existing range" },
+        { value: "delete", label: "Delete an existing range" },
+      ],
+    }],
+    submit: "Continue",
+  });
+  if (!choice) return;
+
+  if (choice.operation === "add") {
+    await refreshSpreadsheetSelection();
+    const selectedRange = spreadsheetSelection?.range ?? cellFocus;
+    const result = await promptDialog({
+      title: "Add named range",
+      fields: [
+        { name: "name", label: "Name", placeholder: "QuarterlySales" },
+        { name: "range", label: "Cell range", value: selectedRange },
+      ],
+      submit: "Add named range",
+    });
+    if (!result || !result.name.trim() || !result.range.trim()) return;
+    await edit("add_spreadsheet_named_range", { sheetId: sheet.id, name: result.name, range: result.range });
+    toast(`Named range ${result.name.trim()} added.`);
+    return;
+  }
+
+  if (!ranges.length) {
+    toast(`Sheet ${sheet.title} has no named ranges.`);
+    return;
+  }
+  const selected = await promptDialog({
+    title: choice.operation === "update" ? "Change named range" : "Delete named range",
+    fields: [{
+      name: "name",
+      label: "Named range",
+      type: "select",
+      options: ranges.map((range) => ({ value: range.name, label: `${range.name} (${range.range})` })),
+    }],
+    submit: "Continue",
+  });
+  if (!selected?.name) return;
+  const existing = ranges.find((range) => range.name === selected.name);
+  if (!existing) return;
+  if (choice.operation === "delete") {
+    await edit("delete_spreadsheet_named_range", { name: existing.name });
+    toast(`Named range ${existing.name} deleted.`);
+    return;
+  }
+  const result = await promptDialog({
+    title: `Change ${existing.name}`,
+    fields: [{ name: "range", label: "Cell range", value: existing.range }],
+    submit: "Save named range",
+  });
+  if (!result?.range.trim()) return;
+  await edit("update_spreadsheet_named_range", { sheetId: sheet.id, name: existing.name, range: result.range });
+  toast(`Named range ${existing.name} updated.`);
+}
+
+/**
+ * Protection has a deliberately much narrower UI than a sharing surface.  The
+ * v0 model records an advisory annotation only; it cannot prevent any local or
+ * remote writer from changing a cell.  Make that fact the first sentence of
+ * both dialogs, keep creation tied to the Rust-derived current selection, and
+ * only offer edits that the existing command can faithfully make (the
+ * description, not a misleading access policy or range move).
+ */
+async function promptProtectedRanges(): Promise<void> {
+  const sheet = currentSheet();
+  if (!sheet) return;
+  const ranges = sheet.protected_ranges;
+  const choice = await promptDialog({
+    title: "Advisory protected ranges",
+    body: "These ranges are warnings only. They do not restrict editing or grant access to anyone.",
+    fields: [{
+      name: "operation",
+      label: "Action",
+      type: "select",
+      options: [
+        { value: "add", label: "Add a warning range" },
+        { value: "edit", label: "Edit a warning description" },
+        { value: "delete", label: "Delete a warning range" },
+      ],
+    }],
+    submit: "Continue",
+  });
+  if (!choice) return;
+  if (choice.operation === "add") {
+    await refreshSpreadsheetSelection();
+    const range = spreadsheetSelection?.range ?? cellFocus;
+    const added = await promptDialog({
+      title: "Add advisory protected range",
+      body: `The selected range ${range} will remain editable; this is document metadata only.`,
+      fields: [{ name: "description", label: "Warning description", placeholder: "Check before changing" }],
+      submit: "Add warning range",
+    });
+    if (!added?.description.trim()) return;
+    await edit("add_spreadsheet_protected_range", {
+      sheetId: sheet.id,
+      range,
+      description: added.description,
+      warningOnly: true,
+    });
+    toast(`Advisory warning range ${range} added.`);
+    return;
+  }
+  if (!ranges.length) {
+    toast(`Sheet ${sheet.title} has no advisory protected ranges.`);
+    return;
+  }
+  const picked = await promptDialog({
+    title: choice.operation === "edit" ? "Edit advisory protected range" : "Delete advisory protected range",
+    body: "This is warning metadata, not an access-control rule.",
+    fields: [{
+      name: "range",
+      label: "Range",
+      type: "select",
+      options: ranges.map((range) => ({ value: range.range, label: `${range.range}: ${range.description}` })),
+    }],
+    submit: "Continue",
+  });
+  if (!picked?.range) return;
+  const existing = ranges.find((range) => range.range === picked.range);
+  if (!existing) return;
+  if (choice.operation === "delete") {
+    await edit("delete_spreadsheet_protected_range", { sheetId: sheet.id, range: existing.range });
+    toast(`Advisory warning range ${existing.range} deleted.`);
+    return;
+  }
+  const updated = await promptDialog({
+    title: `Edit warning for ${existing.range}`,
+    body: "The range stays editable. Only its warning description is changed.",
+    fields: [{ name: "description", label: "Warning description", value: existing.description }],
+    submit: "Save warning",
+  });
+  if (!updated?.description.trim()) return;
+  await edit("update_spreadsheet_protected_range", {
+    sheetId: sheet.id,
+    range: existing.range,
+    description: updated.description,
+    warningOnly: true,
+  });
+  toast(`Advisory warning range ${existing.range} updated.`);
+}
+
 /** The cell the toolbar's format controls act on. */
 export function focusedCell() {
   return currentSheet()?.cells.find((item) => item.address === cellFocus) ?? null;
@@ -695,6 +991,10 @@ export async function runSpreadsheetAction(action: string, data: DOMStringMap): 
   if (action.startsWith("cell-format:")) {
     const property = action.slice("cell-format:".length);
     const cell = focusedCell();
+    if (property === "wrap") {
+      await setCellFormat("wrap_strategy", cell?.format.wrap_strategy === "wrap" ? "" : "wrap");
+      return true;
+    }
     const current = property === "bold" ? cell?.format.bold : cell?.format.italic;
     await setCellFormat(property, current ? "false" : "true");
     return true;
@@ -709,6 +1009,102 @@ export async function runSpreadsheetAction(action: string, data: DOMStringMap): 
     case "add-sheet": {
       const result = await promptDialog({ title: "Add sheet", fields: [{ name: "title", label: "Sheet name", value: `Sheet${(state.doc?.workbook.sheets.length ?? 0) + 1}` }], submit: "Add" });
       if (result?.title) await edit("add_spreadsheet_sheet", { title: result.title });
+      break;
+    }
+    case "add-cell-note": {
+      const args = focusedCellMetadataArgs();
+      if (!args) return true;
+      const result = await promptDialog({
+        title: `Add note to ${args.address}`,
+        fields: [
+          { name: "author", label: "Author", value: state.authorName || "Local user" },
+          { name: "body", label: "Note", type: "textarea" },
+        ],
+        submit: "Add note",
+      });
+      if (!result || !result.author.trim() || !result.body.trim()) return true;
+      await edit("add_spreadsheet_cell_comment", { ...args, author: result.author, body: result.body });
+      await renderSheets(query("[data-main]") as HTMLElement);
+      break;
+    }
+    case "edit-cell-note":
+      await promptEditCellNote();
+      await renderSheets(query("[data-main]") as HTMLElement);
+      break;
+    case "cell-validation":
+      await promptCellValidation();
+      await renderSheets(query("[data-main]") as HTMLElement);
+      break;
+    case "clear-cell-validation": {
+      const args = focusedCellMetadataArgs();
+      if (!args) return true;
+      if (!focusedCell()?.validation) {
+        toast(`Cell ${args.address} has no data validation.`);
+        return true;
+      }
+      await edit("clear_spreadsheet_cell_validation", args);
+      await renderSheets(query("[data-main]") as HTMLElement);
+      break;
+    }
+    case "named-ranges":
+      await promptNamedRanges();
+      await renderSheets(query("[data-main]") as HTMLElement);
+      break;
+    case "protected-ranges":
+      await promptProtectedRanges();
+      await renderSheets(query("[data-main]") as HTMLElement);
+      break;
+    case "set-print-area": {
+      const args = currentSpreadsheetSelectionArgs();
+      if (!args) return true;
+      // The selection is cached for painting, but the command must capture
+      // the canonical range Rust derives from the current anchors.
+      await refreshSpreadsheetSelection();
+      if (!spreadsheetSelection) return true;
+      await edit("set_spreadsheet_print_area", {
+        sheetId: args.sheetId,
+        range: spreadsheetSelection.range,
+      });
+      toast(`Print area set to ${spreadsheetSelection.range}.`);
+      break;
+    }
+    case "clear-print-area": {
+      const sheet = currentSheet();
+      if (!sheet) return true;
+      const area = sheet.print_settings.print_area;
+      if (!area) {
+        toast("This sheet has no print area.");
+        return true;
+      }
+      await edit("clear_spreadsheet_print_area", { sheetId: sheet.id });
+      toast(`Cleared print area ${area}.`);
+      break;
+    }
+    case "print-orientation": {
+      const sheet = currentSheet();
+      if (!sheet) return true;
+      const result = await promptDialog({
+        title: "Print orientation",
+        fields: [
+          {
+            name: "orientation",
+            label: "Letter paper orientation",
+            type: "select",
+            value: sheet.print_settings.orientation,
+            options: [
+              { value: "landscape", label: "Landscape" },
+              { value: "portrait", label: "Portrait" },
+            ],
+          },
+        ],
+        submit: "Set orientation",
+      });
+      if (!result) return true;
+      await edit("set_spreadsheet_print_orientation", {
+        sheetId: sheet.id,
+        orientation: result.orientation,
+      });
+      toast(`Print orientation set to ${result.orientation}.`);
       break;
     }
     case "add-row":
@@ -729,6 +1125,23 @@ export async function runSpreadsheetAction(action: string, data: DOMStringMap): 
     case "column-width":
       await promptAxisSize("column");
       break;
+    case "hide-rows":
+    case "unhide-rows":
+    case "hide-columns":
+    case "unhide-columns": {
+      const args = currentSpreadsheetSelectionArgs();
+      if (!args) return true;
+      // Unhiding works because a hidden row is still inside a selection that
+      // spans it: select across the gap and reveal. Which rows the range
+      // covers is Rust's answer, not one worked out here.
+      const hidden = action.startsWith("hide-");
+      const command = action.endsWith("-rows")
+        ? "set_spreadsheet_selection_rows_hidden"
+        : "set_spreadsheet_selection_columns_hidden";
+      await edit(command, { ...args, hidden });
+      await renderSheets(query("[data-main]") as HTMLElement);
+      break;
+    }
     case "merge-cells": {
       const args = currentSpreadsheetSelectionArgs();
       if (args) await edit("merge_spreadsheet_selection", args);
@@ -777,7 +1190,9 @@ export async function runSpreadsheetAction(action: string, data: DOMStringMap): 
     }
     case "import-csv": {
       if (!sheetId) return true;
-      const file = await openFile(["csv", "tsv", "txt"]);
+      const file = await native("Could not read that CSV file", () => openFile(["csv", "tsv", "txt"]));
+      // No file chosen: the dialog was closed, so there is nothing to import
+      // and nothing to report.
       if (!file) return true;
       await edit("import_spreadsheet_csv", {
         sheetId,
@@ -789,7 +1204,7 @@ export async function runSpreadsheetAction(action: string, data: DOMStringMap): 
       break;
     }
     case "import-xlsx": {
-      const file = await openFile(["xlsx"]);
+      const file = await native("Could not read that workbook", () => openFile(["xlsx"]));
       if (!file) return true;
       // `run` raises the discard prompt: replacing the workbook is guarded in
       // Rust like every other document-replacing command.
@@ -800,22 +1215,54 @@ export async function runSpreadsheetAction(action: string, data: DOMStringMap): 
       await renderSheets(query("[data-main]") as HTMLElement);
       break;
     }
+    case "import-google-sheet-url": {
+      const answer = await promptDialog({
+        title: "Import public Google Sheet",
+        fields: [{ name: "url", label: "Google Sheets sharing URL", value: "" }],
+      });
+      if (!answer) return true;
+      const exportUrl = googlePublicExportUrl(answer.url, "spreadsheets", "xlsx");
+      if (!exportUrl) {
+        toast("Enter a public docs.google.com/spreadsheets/d/<id> sharing URL.");
+        return true;
+      }
+      const file = isTauri()
+        ? await native("Could not download that public Google Sheet", () => fetchUrlFile(exportUrl))
+        : await fetchPublicGoogleExport(exportUrl);
+      if (!file) return true;
+      await edit("import_spreadsheet_xlsx", { title: "Google Sheet", base64: file.base64 });
+      sheetId = null;
+      cellAnchor = "A1";
+      cellFocus = "A1";
+      await renderSheets(query("[data-main]") as HTMLElement);
+      break;
+    }
     case "export-sheets-json":
       await downloadExport("export_google_sheets_json", "Google Sheets JSON");
       break;
+    // Both of these go through `downloadExport` for the same reason every
+    // other export does: the media type, the extension, the encoding and
+    // what the format could not carry are facts the exporter states, and a
+    // table here could disagree with it. This one used to — it wrote a
+    // tab-delimited file as `.csv`, and it had nowhere to put a warning
+    // because the command handed back a bare string.
     case "export-csv": {
       if (!sheetId) return true;
-      const text = await run("export_spreadsheet_csv", { sheetId, delimiter: "," });
-      await saveFile({ defaultName: `${currentSheet()?.title ?? "sheet"}.csv`, extensions: ["csv"], text, mediaType: "text/csv" });
+      await downloadExport("export_spreadsheet_csv", "CSV", {
+        args: { sheetId, delimiter: "," },
+        defaultBaseName: currentSheet()?.title ?? "sheet",
+      });
       break;
     }
     case "export-xlsx": {
-      const base64 = await run("export_spreadsheet_xlsx");
-      await saveFile({
-        defaultName: `${state.doc?.workbook.title || state.doc?.title || "workbook"}.xlsx`,
-        extensions: ["xlsx"],
-        base64,
-        mediaType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      await downloadExport("export_spreadsheet_xlsx", "Excel workbook", {
+        defaultBaseName: state.doc?.workbook.title || state.doc?.title || "workbook",
+      });
+      break;
+    }
+    case "export-spreadsheet-pdf": {
+      await downloadExport("export_spreadsheet_pdf", "spreadsheet PDF", {
+        defaultBaseName: state.doc?.workbook.title || state.doc?.title || "workbook",
       });
       break;
     }

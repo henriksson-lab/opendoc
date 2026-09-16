@@ -4,12 +4,13 @@ use crate::causal::{ActorId, OperationId};
 use crate::inline_ops::inline_id;
 use crate::merge::merge_operations;
 use crate::operation::{Operation, OperationKind};
-use crate::test_support::{table_cell, table_row};
+use crate::test_support::{cell_columns, table_cell, table_row};
 use opendoc_core::{
     Anchor, BibliographyReference, Block, BlockKind, BlockProperties, CitationGroup, CitationItem,
     CitationPlacement, CitationSource, CitationSourceFormat, CitationSummary, Comment,
-    CommentThread, Document, Equation, EquationSourceFormat, Inline, Mark, MarkExpand, MarkKind,
-    StableId, Suggestion, SuggestionKind, SuggestionState, TableRow, TextRange,
+    CommentThread, Document, Equation, EquationSourceFormat, Inline, InsertPosition, Mark,
+    MarkExpand, MarkKind, StableId, Suggestion, SuggestionKind, SuggestionState, TableRow,
+    TextRange,
 };
 
 #[test]
@@ -28,7 +29,7 @@ fn deterministic_fuzz_like_replay_keeps_document_valid() {
                 },
                 kind: OperationKind::InsertInline {
                     block_id: block_id.clone(),
-                    after: None,
+                    position: InsertPosition::Last,
                     inline: Inline::text(format!("{actor}-{seq};")),
                 },
                 context: None,
@@ -37,8 +38,29 @@ fn deterministic_fuzz_like_replay_keeps_document_valid() {
         streams.push(stream);
     }
     let result = merge_operations(&base, &streams).unwrap();
-    result.document.validate().unwrap();
-    assert!(result.document.visible_text().contains("2-7;"));
+    // The oracle. "It still validates" is true of a merge that drops every
+    // operation, and `contains("2-7;")` is true of one that drops all but the
+    // last. The answer here is fully determined: no operation carries a causal
+    // context, so `causal_order` degenerates to `(actor, seq)`; `seq: 0` is
+    // refused outright as a malformed operation id; and `InsertPosition::Last`
+    // appends. So the runs must read in actor-then-sequence order, with each
+    // actor's first (seq-0) operation missing. PLAN88 §7.
+    let mut expected = String::from("seed");
+    for actor in 0..3 {
+        for seq in 1..8 {
+            expected.push_str(&format!("{actor}-{seq};"));
+        }
+    }
+    assert_eq!(result.document.visible_text(), format!("{expected}\n"));
+    assert_eq!(
+        result
+            .warnings
+            .iter()
+            .map(|warning| warning.code.as_str())
+            .collect::<Vec<_>>(),
+        vec!["invalid-operation-id"],
+        "the seq-0 operation from each actor is refused, once per distinct message"
+    );
 }
 
 #[test]
@@ -69,6 +91,14 @@ fn shuffled_mixed_rich_document_streams_converge_with_warnings() {
             created_at_ms: 1,
             deleted: false,
         }],
+        state: opendoc_core::CommentThreadState::Open,
+        resolved_by: None,
+        resolved_at_ms: None,
+        action_assignee: None,
+        action_due_at_ms: None,
+        action_completed_by: None,
+        action_completed_at_ms: None,
+        reactions: Vec::new(),
         deleted: false,
     };
     let suggestion = Suggestion {
@@ -150,7 +180,7 @@ fn shuffled_mixed_rich_document_streams_converge_with_warnings() {
             },
             kind: OperationKind::InsertInline {
                 block_id: block_id.clone(),
-                after: Some(second_id.clone()),
+                position: InsertPosition::After(second_id.clone()),
                 inline: inserted,
             },
             context: None,
@@ -162,7 +192,7 @@ fn shuffled_mixed_rich_document_streams_converge_with_warnings() {
             },
             kind: OperationKind::InsertInline {
                 block_id,
-                after: Some(second_id.clone()),
+                position: InsertPosition::After(second_id.clone()),
                 inline: equation,
             },
             context: None,
@@ -191,23 +221,80 @@ fn shuffled_mixed_rich_document_streams_converge_with_warnings() {
     )
     .unwrap();
 
+    // Grouping agreement is true by construction — the merge folds every
+    // stream into one `BTreeMap<OperationId, Operation>` before any semantics
+    // run — so it is kept as documentation, not as the check. PLAN88 §7.
     assert_eq!(reference.document, batched_by_actor.document);
     assert_eq!(reference.document, reversed_batches.document);
     assert_eq!(reference.warnings, batched_by_actor.warnings);
     assert_eq!(reference.warnings, reversed_batches.warnings);
-    assert!(reference
-        .warnings
+
+    // The oracle. Every one of the six operations has a determined outcome
+    // here, so name all of them rather than asking whether three warning
+    // codes are somewhere in the list — which they were for a merge that lost
+    // the mark, the equation and the insert as well.
+    //
+    // `actor-c` deleted "alpha ", so: the run is gone; `actor-d`'s mark range
+    // started on it and can only reach as far as its surviving end, "gamma";
+    // `actor-e`'s and `actor-f`'s inserts both anchored after "beta " and land
+    // in operation-id order, the equation (e) before the text (f).
+    assert_eq!(
+        reference.document.visible_text(),
+        "beta x+yinserted gamma\n"
+    );
+    let described: Vec<(String, Vec<MarkKind>)> = reference.document.blocks[0]
+        .content
         .iter()
-        .any(|warning| warning.code == "comment-anchor-degraded"));
-    assert!(reference
-        .warnings
-        .iter()
-        .any(|warning| warning.code == "suggestion-range-degraded"));
-    assert!(reference
-        .warnings
-        .iter()
-        .any(|warning| warning.code == "mark-range-degraded"));
-    reference.document.validate().unwrap();
+        .map(|inline| match inline {
+            Inline::Text { text, marks, .. } => (
+                text.clone(),
+                marks.iter().map(|mark| mark.kind.clone()).collect(),
+            ),
+            Inline::Equation { equation, .. } => {
+                (format!("equation:{}", equation.source), Vec::new())
+            }
+            other => (format!("{other:?}"), Vec::new()),
+        })
+        .collect();
+    let expected: Vec<(String, Vec<MarkKind>)> = vec![
+        ("beta ".to_string(), Vec::new()),
+        ("equation:x+y".to_string(), Vec::new()),
+        ("inserted ".to_string(), Vec::new()),
+        ("gamma".to_string(), vec![MarkKind::Bold]),
+    ];
+    assert_eq!(described, expected);
+
+    assert_eq!(
+        reference
+            .warnings
+            .iter()
+            .map(|warning| warning.code.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "comment-anchor-orphaned",
+            "mark-range-degraded",
+            "suggestion-range-degraded"
+        ]
+    );
+    // …and the two anchors degraded to something specific, not merely to
+    // "something that warned".
+    let thread = &reference.document.comments[0];
+    assert!(
+        matches!(&thread.anchor, Anchor::Orphaned { quote, context, warning }
+            if quote == "alpha " && context == "alpha beta gamma"
+                && warning == "comment anchor source was deleted"),
+        "{:?}",
+        thread.anchor
+    );
+    let suggestion = &reference.document.suggestions[0];
+    match &suggestion.kind {
+        SuggestionKind::Format { range, .. } => assert_eq!(
+            range.start, range.end,
+            "the suggestion range kept an endpoint that no longer exists"
+        ),
+        other => panic!("expected a format suggestion, got {other:?}"),
+    }
+    assert_eq!(suggestion.provenance, vec!["auto-degraded:partial-range"]);
 }
 
 #[test]
@@ -287,6 +374,8 @@ fn shuffled_structured_document_batches_converge_with_citations_and_tables() {
         id: table_block_id.clone(),
         kind: BlockKind::table(vec![TableRow {
             id: row_id.clone(),
+            height: None,
+            header: false,
             cells: vec![table_cell(&cell_id, "base cell")],
         }]),
         content: Vec::new(),
@@ -313,6 +402,14 @@ fn shuffled_structured_document_batches_converge_with_citations_and_tables() {
                         created_at_ms: 1,
                         deleted: false,
                     }],
+                    state: opendoc_core::CommentThreadState::Open,
+                    resolved_by: None,
+                    resolved_at_ms: None,
+                    action_assignee: None,
+                    action_due_at_ms: None,
+                    action_completed_by: None,
+                    action_completed_at_ms: None,
+                    reactions: Vec::new(),
                     deleted: false,
                 },
             },
@@ -388,13 +485,17 @@ fn shuffled_structured_document_batches_converge_with_citations_and_tables() {
                 actor: ActorId("actor-f".to_string()),
                 seq: 1,
             },
-            kind: OperationKind::InsertTableRow {
-                table_block_id: table_block_id.clone(),
-                after_row: Some(row_id.clone()),
-                row: table_row(
+            kind: {
+                let row = table_row(
                     &StableId::parse("row-inserted-structured").unwrap(),
                     "row inserted",
-                ),
+                );
+                OperationKind::InsertTableRow {
+                    cell_columns: cell_columns(&base, &table_block_id, &row),
+                    table_block_id: table_block_id.clone(),
+                    position: InsertPosition::After(row_id.clone()),
+                    row,
+                }
             },
             context: None,
         },
@@ -406,7 +507,7 @@ fn shuffled_structured_document_batches_converge_with_citations_and_tables() {
             kind: OperationKind::InsertTableCell {
                 table_block_id,
                 row_id,
-                after_cell: Some(cell_id),
+                position: InsertPosition::After(cell_id),
                 cell: table_cell(
                     &StableId::parse("cell-inserted-structured").unwrap(),
                     "cell inserted",
@@ -450,26 +551,57 @@ fn shuffled_structured_document_batches_converge_with_citations_and_tables() {
     )
     .unwrap();
 
+    // As above: the three groupings agree by construction, so the assertions
+    // that can fail are the ones that name the answer. PLAN88 §7.
     assert_eq!(reference.document, interleaved_batches.document);
     assert_eq!(reference.document, reversed_batches.document);
     assert_eq!(reference.warnings, interleaved_batches.warnings);
     assert_eq!(reference.warnings, reversed_batches.warnings);
-    for expected in [
-        "comment-anchor-degraded",
-        "suggestion-range-degraded",
-        "mark-range-degraded",
-        "citation-reference-missing",
-    ] {
-        assert!(reference
+
+    // `contains("y=2")` is satisfied by a merge that applied the equation
+    // update and dropped everything else; this is the whole document. The tab
+    // is the cell separator and the trailing one is the cell the row insert
+    // never knew about, filled in so the grid stays rectangular.
+    assert_eq!(
+        reference.document.visible_text(),
+        "[citation-structured]omega\ny=2\nbase cell\tcell inserted\nrow inserted\t\n"
+    );
+    assert_eq!(
+        reference
             .warnings
             .iter()
-            .any(|warning| warning.code == expected));
+            .map(|warning| warning.code.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "comment-anchor-orphaned",
+            "mark-range-degraded",
+            "suggestion-range-degraded",
+            "citation-reference-missing"
+        ]
+    );
+    // The deleted reference invalidated the rendered label rather than leaving
+    // a cached string that nothing backs any more.
+    match &reference.document.blocks[0].content[0] {
+        Inline::Citation { rendered_cache, .. } => assert_eq!(
+            rendered_cache.as_deref(),
+            None,
+            "the citation kept a cache for a reference that was deleted"
+        ),
+        other => panic!("expected the citation inline first, got {other:?}"),
     }
-    let visible = reference.document.visible_text();
-    assert!(visible.contains("y=2"));
-    assert!(visible.contains("row inserted"));
-    assert!(visible.contains("cell inserted"));
-    reference.document.validate().unwrap();
+    // The concurrent row insert and cell insert crossed: two rows, two
+    // columns, and every row the same width.
+    let BlockKind::Table { columns, rows, .. } = &reference.document.blocks[2].kind else {
+        panic!(
+            "expected a table, got {:?}",
+            reference.document.blocks[2].kind
+        );
+    };
+    assert_eq!(columns.len(), 2);
+    assert_eq!(rows.len(), 2);
+    for row in rows {
+        assert_eq!(row.cells.len(), 2, "row {} is ragged", row.id);
+    }
 }
 
 #[test]
@@ -500,7 +632,7 @@ fn deterministic_multi_replica_pseudo_fuzz_converges() {
         let kind = match step % 6 {
             0 => OperationKind::InsertInline {
                 block_id: block_id.clone(),
-                after: Some(first),
+                position: InsertPosition::After(first),
                 inline: Inline::text(format!("i{step} ")),
             },
             1 => OperationKind::UpdateInlineText {
@@ -536,6 +668,14 @@ fn deterministic_multi_replica_pseudo_fuzz_converges() {
                         created_at_ms: step,
                         deleted: false,
                     }],
+                    state: opendoc_core::CommentThreadState::Open,
+                    resolved_by: None,
+                    resolved_at_ms: None,
+                    action_assignee: None,
+                    action_due_at_ms: None,
+                    action_completed_by: None,
+                    action_completed_at_ms: None,
+                    reactions: Vec::new(),
                     deleted: false,
                 },
             },
@@ -588,5 +728,54 @@ fn deterministic_multi_replica_pseudo_fuzz_converges() {
         .warnings
         .iter()
         .any(|warning| warning.code == "missing-inline"));
-    reference.document.validate().unwrap();
+
+    // The oracle. Everything above compares the merge against itself under
+    // three groupings of one operation set, and those agree by construction —
+    // `merge_operations` folds every stream into one `BTreeMap<OperationId,
+    // Operation>` before a line of semantics runs. A `merge_operations` that
+    // returned `base.clone()` passed all four of them. PLAN88 §7.
+    //
+    // The script is seeded, so its answer is a constant. It is recorded rather
+    // than derived — deriving it would mean reimplementing `apply` — so it is
+    // a change detector, but one with teeth: it pins the surviving text, the
+    // inline count, the annotations that stayed anchored and the exact warning
+    // sequence, and no trivial merge satisfies it. A diff here means the
+    // merge's answer to this script changed, which has to be explained before
+    // the constant is updated.
+    assert_eq!(
+        reference.document.visible_text(),
+        "u19 gamma i18 i12 i24 epsiloni30 i0 i6 \n"
+    );
+    assert_eq!(reference.document.blocks[0].content.len(), 9);
+    assert_eq!(reference.document.comments.len(), 6);
+    assert_eq!(reference.document.suggestions.len(), 6);
+    assert_eq!(
+        reference
+            .warnings
+            .iter()
+            .map(|warning| warning.code.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "missing-inline",
+            "missing-inline",
+            "missing-inline",
+            "comment-anchor-degraded",
+            "missing-inline",
+            "comment-anchor-degraded",
+            "missing-inline",
+            "inline-anchor-degraded",
+            "comment-anchor-degraded",
+            "missing-inline",
+            "comment-anchor-degraded",
+            "mark-range-degraded",
+            "mark-range-degraded",
+            "mark-range-degraded",
+            "mark-range-degraded",
+            "suggestion-range-degraded",
+            "suggestion-range-degraded",
+            "suggestion-range-degraded",
+            "suggestion-range-degraded",
+            "suggestion-range-missing",
+        ]
+    );
 }

@@ -48,9 +48,37 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         Some("write")
     ),
     command!(
+        "insert_date_chip_after",
+        AppDocument,
+        [
+            arg!("blockId", String),
+            arg!("afterInlineId", NullableString),
+            arg!("date", String)
+        ],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
         "update_mention_label",
         AppDocument,
         [arg!("inlineId", String), arg!("label", String)],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
+        "select_dropdown_option",
+        AppDocument,
+        [arg!("inlineId", String), arg!("optionId", String)],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
+        "update_date_chip",
+        AppDocument,
+        [arg!("inlineId", String), arg!("date", String)],
         true,
         false,
         Some("write")
@@ -64,7 +92,26 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         Some("write")
     ),
     command!(
+        "add_endnote_ref",
+        AppDocument,
+        [],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
         "insert_footnote_ref_after",
+        AppDocument,
+        [
+            arg!("blockId", String),
+            arg!("afterInlineId", NullableString)
+        ],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
+        "insert_endnote_ref_after",
         AppDocument,
         [
             arg!("blockId", String),
@@ -151,6 +198,30 @@ pub(crate) const SPECS: &[CommandSpec] = &[
             arg!("level", Number),
             arg!("listKind", String)
         ],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
+        "set_ordered_list_start",
+        AppDocument,
+        [arg!("blockId", String), arg!("start", Number)],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
+        "set_ordered_list_format",
+        AppDocument,
+        [arg!("blockId", String), arg!("format", String)],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
+        "set_bullet_list_marker",
+        AppDocument,
+        [arg!("blockId", String), arg!("marker", String)],
         true,
         false,
         Some("write")

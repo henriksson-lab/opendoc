@@ -61,10 +61,10 @@ and a WOFF2 file that `apps/desktop/src/fonts/` ships and the stylesheet loads
 through `@font-face`. WOFF2's transform is lossless for `hmtx`, so the two
 encodings carry the same advance widths *by construction*, not by agreement.
 
-Sizes: **148 KB of TrueType** compiled into the WebAssembly binary, **71.7 KB of
-WOFF2** served to the browser (13.9–14.9 KB per face). The subset is Basic
+Sizes: **149.1 kB of TrueType** compiled into the WebAssembly binary, **72.0 kB
+of WOFF2** served to the browser (14.0–14.9 kB per face). The subset is Basic
 Latin, Latin-1, Latin Extended-A, the modifier letters, General Punctuation,
-currency, and the handful of symbols a word processor emits — 452 glyphs.
+currency, and the handful of symbols a word processor emits — 453 glyphs.
 
 The frontend is deliberately bundler-less, and this is the first binary asset it
 has. It needs no pipeline: the stylesheet's `url("./fonts/…")` resolves next to
@@ -79,7 +79,9 @@ to **OpenDoc Sans** / **OpenDoc Mono**. The licence travels with the files.
 
 ### 2. The subsets carry no shaping tables
 
-`generate.py` drops `GSUB`, `GPOS` and `kern`. There is therefore no kerning and
+`generate.py` drops `kern` outright and empties `GSUB`, `GPOS` and `GDEF` — the
+table shells survive, but with **zero lookups and zero features**, so nothing in
+them is applicable. There is therefore no kerning and
 no ligature for the browser to apply that Rust has not accounted for: a run's
 width **is** the sum of its glyphs' advances, which is what `opendoc-layout`
 computes. The stylesheet also declares `font-kerning: none`,
@@ -158,9 +160,58 @@ Two things ADR 0009 got right are kept unchanged. The editable body stays **one
 continuous `contenteditable` flow** — it is not split into per-page DOM, because
 `editor.ts` maps the DOM selection through that single host. And the only thing
 written into the flow is still inert: a `margin-top`, plus a `data-page-index`
-attribute carrying Rust's page assignment (no structure changes, nothing the
-selection mapping or the block ids can see; `morphChildren` strips both on the
-next render and `applyLayout` puts them back).
+attribute carrying Rust's page assignment — no structure changes, and nothing
+the selection mapping or the block ids can see.
+
+### Amendment, 2026-09-12: placement is a function, not a repair
+
+As first written, this placement depended on the render having just happened:
+`morphChildren` stripped the margin and the attribute on every render, and
+`applyLayout` put them back. That made a block's DOM a function of the render
+*and* of pagination having re-run since, which is why the frontend could not
+skip re-morphing a block whose markup had not changed — and re-morphing every
+block was the single largest cost on the typing path.
+
+Two changes make the placement independent of the render, so the two can be
+applied separately:
+
+- **The owners no longer share a CSS property.** `opendoc-render` projects the
+  model's space-before and space-after as the *logical* `margin-block-start`
+  and `margin-block-end` — which is what the model means anyway, in flow order
+  — and the physical `margin-top` is pagination's alone. A later declaration in
+  the same inline style wins, so the placement overrides while it is set and
+  the document's own spacing stands when it is cleared. While both used
+  `margin-top`, applying a layout *deleted* every space-before in the document:
+  a real, visible bug, measured in Chrome before it was fixed, and now guarded
+  by an e2e check that reads the computed margin after pagination has run.
+- **Pagination writes the placement of every block**, the ones the layout names
+  and the ones it does not, rather than only the ones it was given. A block's
+  placement after `applyPlacement` is exactly what the layout says, including
+  the absence of one, whatever it was before — so a break that has moved
+  cannot be left behind on a block nobody re-rendered.
+
+`editor.ts` then updates only the blocks whose markup changed, comparing the
+new markup against the markup it last applied rather than against the live
+DOM. On a 1 500-block document that took the DOM leg of one keystroke from
+30-43 ms to 9-12 ms, and an update that changes nothing from 31-42 ms to
+0.1 ms. `opendoc-render` also gained a per-fragment projection of the body
+(`render_document_body`), whose fragments compose to exactly the whole-body
+string, and the projection now **carries those instead of the 389 KB string**
+(`AppDocument::body_fragments`; `body_html()` reassembles it for the callers
+that want it whole). `editor.ts` compares markup *strings* per block id, so
+the fragment that changed is the only one parsed: on the same 1,500-block
+document the DOM leg of a keystroke went from 9-12 ms to **0.9 ms**, and the
+`innerHTML` parse of the whole body — 5-6 ms of it — is gone rather than
+reduced. The detached copy of the body the previous scheme kept in memory to
+compare against is gone too: a string per block id needs no tree.
+
+Node identity comes from the live DOM, keyed on `data-block-id`, which is
+sound because a fragment's key is also the first `data-block-id` written
+inside it — on the element itself for every block kind, and on the first
+`<li>` for a list run, whose wrapper carries none. `opendoc-render` pins that
+(`every_fragments_first_block_id_is_its_key`), and an e2e check catches the
+frontend end of it: mis-keying a list run rebuilds it on every keystroke
+while leaving its content correct, so only node identity shows it.
 
 ## What is laid out exactly, and what is estimated
 
@@ -234,15 +285,166 @@ projected type scale is what Chrome computes with.
 - `.doc-table`'s cell padding and borders are still literals in the stylesheet
   rather than projected. They match the scale's values exactly today; projecting
   them belongs with the next table change.
-- **Cost, measured:** a 1 500-paragraph, 100-page document lays out in 25 ms in
-  a native release build, and the whole document is laid out again on every
-  keystroke. That is fine for the documents this prototype handles and it runs
-  off the typing path (the command is awaited, the editor has already applied
-  the edit), but it is linear in the document and it will need to become
-  incremental — relaying only from the first changed block — before very long
-  documents are comfortable. Printable ASCII advances are cached per face at
-  load, which is what makes the constant small enough to defer that.
+- **Cost, measured — and then measured again.** The first pass through this
+  crate laid a 1 500-paragraph, 150-page document out in 20 ms natively and
+  37 ms in the browser, and the whole document is laid out again on every
+  keystroke. That number was not a property of the algorithm: **two thirds of
+  it was spent asking the `cmap` a question the ASCII cache already knew.**
+  `Fonts::covers` — which the line breaker calls for *every* character, to
+  decide whether the height is exact — went to the face's `cmap` even for
+  printable ASCII, so the cache saved one binary search per character and the
+  coverage test paid it straight back. Coverage is cached beside the advance
+  now. The other third was a `String` allocated per character to describe a
+  piece that the pagination path, which does not capture pieces, dropped
+  unread; the piece is built lazily. Same arithmetic, same breaks — 180
+  documents of the two paths' output compared byte for byte — at **2.9 ms
+  natively and 4.7 ms in the browser**, 6.8x and 7.8x faster, with a 500-page
+  document at 10.6 ms.
+- **Incremental layout is therefore not worth doing yet**, and that is a
+  measurement rather than a deferral. A cache keyed on anything less than
+  everything that decides a fragment — the block, the frame width, the list
+  run state, the type scale — would trade this crate's one guarantee for a
+  few milliseconds it no longer costs. Pagination itself, the part that cannot
+  be cached per block, is 0.3 ms of those 2.9 ms for 1 500 blocks; the rest is
+  measuring, and measuring is now cheap enough that the honest linear pass
+  wins. Revisit at documents an order of magnitude larger than 500 pages.
 - The document is now drawn in a bundled font rather than in whatever the
   platform calls Arial. That is a visible change, and it is the point: the
   document looks the same on every machine because it is laid out the same on
   every machine.
+
+### Amendment, 2026-09-13: incremental layout, by comparison rather than by key
+
+The consequence above — "incremental layout is therefore not worth doing yet"
+— is now **superseded**. Not because its arithmetic was wrong, but because the
+premise it rested on has gone: it was written when the browser's DOM work
+dominated a keystroke, and the per-fragment DOM work since (see the 2026-09-12
+amendment) took the DOM leg to 0.9 ms. The layout pass then became the larger
+of the two, and "a few milliseconds it no longer costs" stopped being true.
+
+The objection itself was about the **key**, and it was right:
+
+> A cache keyed on anything less than everything that decides a fragment — the
+> block, the frame width, the list run state, the type scale — would trade
+> this crate's one guarantee for a few milliseconds.
+
+`opendoc_layout::cache::LayoutCache` answers it by **not having a key**. A
+stored entry keeps the inputs themselves — the whole `Block`, by value, and
+the `Frame` it was measured in — and is reused only when those compare *equal*
+to the inputs of the pass asking. `Block` is `Eq`, so the comparison is the
+whole block: kind, content, marks, properties. There is no digest to collide
+and no field a future `Block` variant could add without this noticing. The
+list run state, which the ADR named as the hard part, is not in the key
+because it is not in the memoized unit: `FragmentSource` memoizes exactly
+`text_fragment`/`block_fragment`, and everything a *run* decides — the marker
+glyph, the ordinal, the bottom margin a finished run inherits — is applied by
+the caller to the value that comes back, so it is recomputed on every pass
+whether the fragment was reused or not. The two remaining inputs are
+document-wide (the type scale and whether the document carries suggestions),
+so they are stored once and the whole table is dropped when either differs.
+
+**What made this cheap enough to be worth having**, measured on a 1,500-block
+document in release native code: a full pass is 1.23 ms and comparing every
+block of that document for equality is 0.037 ms — 33x cheaper than measuring
+it. So a keystroke measures one block and compares 1,500.
+
+| one keystroke, native | 750 blocks | 1,500 | 3,000 |
+| --- | --- | --- | --- |
+| uncached | 0.54 ms | 1.05 ms | 2.17 ms |
+| cached | **0.13 ms** | **0.25 ms** | **0.52 ms** |
+
+In the browser, `layout_document`'s WASM dispatch went from 2.35 ms to 1.4 ms
+on 1,501 blocks (medians of four runs of twelve). The gap between 4.2x
+natively and 1.7x in the browser is the wire: the command serialises 178 KB of
+placements per keystroke, which the cache does not touch and which is now the
+larger half of that dispatch. Trimming it is a contract change — `top_twips`,
+`height_twips`, `lines` and the per-block `exact` have no consumer outside the
+DTO, since `opendoc-pdf` reads `opendoc_layout::BlockPlacement` directly — and
+it was left undone deliberately, being 2.5% of a keystroke.
+
+`layout_painted_document` does **not** consult a cache; the PDF path runs the
+same uncached pass it always did, so ADR 0014's "the PDF and the screen agree
+by construction" is untouched.
+
+The evidence is the only kind that counts for this:
+`a_cached_layout_is_identical_to_an_uncached_one` generates 180 documents (60
+seeds x 3 page setups) carrying every block kind, every inline kind, marks,
+properties, nesting and text outside the bundled subset, drives each through
+20 edits — typing, insertion, deletion, reordering, property changes and page
+resizes — and compares the cached `DocumentLayout` against a freshly computed
+one after **every single edit**: 3,600 whole-layout comparisons, field for
+field. Six more tests pin the cases a wrong cache would get wrong (a changed
+frame, a moved block, two documents sharing block ids, a document that gains
+suggestions) and count the work rather than the answer, because a cache that
+silently stopped hitting would still be correct.
+
+### Amendment, 2026-09-13: a line box is a union, not a leading
+
+The "exact" list above said a block's height is "a line count times a
+leading". That was wrong, and PLAN88 P1-1 is the measurement that shows it: an
+18pt-marked run in an 11pt paragraph is **36px per line in Chrome and was
+22px here**, reported as `exact: true`, which put 8 of 41 blocks outside the
+page this crate assigned them. A monospace run was worth another pixel per
+line. Both are the same mistake — taking the leading from the *block* when CSS
+takes it from each *inline box*.
+
+A line box is the **union of the strut and every inline box on the line**, and
+Chrome computes that union on a grid this crate now computes on too. Three
+quantisations are load-bearing and each is worth a pixel or more:
+
+- a face's ascent and descent are rounded to **whole pixels** (Blink calls
+  `lroundf`), which is what makes `OpenDoc Mono` one pixel taller than
+  `OpenDoc Sans` at the same size;
+- the used `line-height` is quantised to `LayoutUnit`, **1/64 px**;
+- the half-leading is added to the ascent and the sum **floored to a whole
+  pixel**, with the descent taking whatever is left of the line height
+  (`FontHeight::AddLeading`).
+
+`Fonts::line_extent` reproduces all three in integer arithmetic, and
+`text::Breaker` carries an extent beside every width it accumulates — the same
+mirroring discipline the capture already used, so the extent of a word carried
+onto the next line is carried with it. Vertical lengths stay milli-twips; the
+line-box arithmetic is done in layout units and converted once per fragment.
+
+The expected numbers are not this crate's own: they were **measured in Chrome
+147** against the bundled WOFF2 faces, by reading a paragraph's height and the
+position of a zero-height inline-block sitting on its baseline, over sizes from
+8pt to 48pt, both families, and unitless and stated line heights. The tests
+name them.
+
+Two consequences:
+
+- **Superscripts and subscripts are no longer estimated.** Blink derives their
+  baseline shift from the *parent's* font size alone — not from the raised
+  run's size and not from any font metric — as `LayoutUnit(size)/3 + 1px` and
+  `LayoutUnit(size)/5 + 1px`. That integer form reproduces twenty measurements
+  exactly, so the shift and the taller line box it causes are modelled and
+  `EstimateReason::RaisedText` is gone. A footnote reference is measured the
+  same way, and it now carries its **number** rather than a placeholder `0`.
+- **Inline padding is not modelled; it is removed.** `.mark-code`,
+  `.citation-label` and `.mention` carried 2px, 2px and 6px of horizontal
+  padding that made this ADR's central guarantee — a run's width *is* the sum
+  of its advances — false, and changed a real paragraph's line count. The
+  padding is gone from `styles.css` rather than projected through `TypeScale`,
+  because it is a **skin**: nothing in the document model says a code run is
+  four twips wider, and a theme must not decide where the pages break. The
+  HTML export never had it, so removing it makes the three surfaces agree
+  rather than adding a fourth copy of a number. An e2e check reads the
+  computed padding, border and margin of every such run back out of Chrome.
+
+The `.doc-list` wrapper margin is fixed in the same pass: `ListWriter` closes
+the outermost wrapper and opens another whenever a list run *changes marker*,
+and the closed wrapper's `margin-bottom` — 13.33px, measured — was not in the
+flow. `open_list_levels` now reports that case and the run walk pays it.
+
+Finally, **the agreement fixture is widened**, which is the part that matters.
+PLAN88 §7 is right that widening it would have caught these on the day they
+landed, and that is now demonstrated rather than asserted: with the old
+one-leading-per-block arithmetic restored, the original plain-paragraph check
+still **passes** and the widened one **fails**. The widened fixture carries
+every inline kind (code, size, superscript, underline, strike, colour, link,
+mention, citation, footnote reference) and every block kind (heading, bulleted,
+ordered and checklist runs with a marker change inside one run, an explicit
+page break, a table), and a separate check asserts the fixture actually
+contains all of them before any geometry is measured — a fixture that silently
+failed to build would be the same failure over again.

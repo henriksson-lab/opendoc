@@ -1,0 +1,182 @@
+{
+  "client": [
+    {
+      "batch_id": "batch-9",
+      "operations": [
+        {
+          "context": {
+            "lamport": 5,
+            "observed": {
+              "actor-alice": 4
+            }
+          },
+          "id": {
+            "actor": "actor-alice",
+            "seq": 5
+          },
+          "kind": {
+            "InsertText": {
+              "inline_id": "inl-wire-0001",
+              "offset": 4,
+              "text": "Z"
+            }
+          }
+        }
+      ],
+      "type": "submit"
+    },
+    {
+      "cursor_anchor": "blk-wire-0001:5",
+      "display_name": "Alice",
+      "selection_anchor": "blk-wire-0001:2",
+      "type": "presence"
+    },
+    {
+      "type": "ping"
+    }
+  ],
+  "default_max_operations_per_submit": 512,
+  "protocol_version": 2,
+  "server": [
+    {
+      "actor": "actor-alice",
+      "base_document": "sGNkb2n2ZHV1aWR4JDExMTExMTExLTIyMjItMzMzMy00NDQ0LTU1NTU1NTU1NTU1NWV0aXRsZWxXaXJlIGZpeHR1cmVmYmxvY2tzgaRiaWRtYmxrLXdpcmUtMDAwMWRraW5kaVBhcmFncmFwaGdjb250ZW50gaFkVGV4dKNiaWRtaW5sLXdpcmUtMDAwMWR0ZXh0aGFiY2RlZmdoZW1hcmtzgGpwcm9wZXJ0aWVzoGZmb290ZXKAZmhlYWRlcoBmbG9jYWxlZWVuLVVTaGNvbW1lbnRzgGh3YXJuaW5nc4BpYm9va21hcmtzgGlmb290bm90ZXOAanBhZ2Vfc2V0dXCpZXdpZHRoGS/QZmhlaWdodBk94GptYXJnaW5fZW5kGQWgam1hcmdpbl90b3AZBaBsbWFyZ2luX3N0YXJ0GQWgbW1hcmdpbl9ib3R0b20ZBaBtbWFyZ2luX2Zvb3RlchkC0G1tYXJnaW5faGVhZGVyGQLQcXBhZ2VfbnVtYmVyX3N0YXJ0AWtzdWdnZXN0aW9uc4BvY29tbWVudF9oaXN0b3J5gHBjb21tZW50X2FjdGl2aXR5gHFjaXRhdGlvbl9kYXRhYmFzZaRlc3R5bGVjYXBhZmxvY2FsZWVlbi1VU2ljaXRhdGlvbnOAanJlZmVyZW5jZXOA",
+      "commit_seq": 2,
+      "document_uuid": "11111111-2222-3333-4444-555555555555",
+      "max_operations_per_submit": 512,
+      "operations": [
+        {
+          "context": {
+            "lamport": 1,
+            "observed": {}
+          },
+          "id": {
+            "actor": "actor-alice",
+            "seq": 1
+          },
+          "kind": {
+            "InsertText": {
+              "inline_id": "inl-wire-0001",
+              "offset": 0,
+              "text": "X"
+            }
+          }
+        },
+        {
+          "context": {
+            "lamport": 2,
+            "observed": {
+              "actor-alice": 1
+            }
+          },
+          "id": {
+            "actor": "actor-alice",
+            "seq": 2
+          },
+          "kind": {
+            "InsertText": {
+              "inline_id": "inl-wire-0001",
+              "offset": 1,
+              "text": "Y"
+            }
+          }
+        }
+      ],
+      "peers": [
+        {
+          "actor": "actor-alice",
+          "connections": 1,
+          "cursor_anchor": "blk-wire-0001:3",
+          "display_name": "alice",
+          "last_seen_ms": 1700000000000,
+          "role": "editor",
+          "selection_anchor": "blk-wire-0001:1",
+          "subject": "alice"
+        },
+        {
+          "actor": "actor-bob",
+          "connections": 1,
+          "cursor_anchor": null,
+          "display_name": "bob",
+          "last_seen_ms": 1700000000000,
+          "role": "viewer",
+          "selection_anchor": "blk-wire-0001:1",
+          "subject": "bob"
+        }
+      ],
+      "protocol_version": 2,
+      "role": "editor",
+      "subject": "alice",
+      "type": "welcome"
+    },
+    {
+      "batch_id": "batch-7",
+      "commit_seq": 3,
+      "operation_ids": [
+        {
+          "actor": "actor-alice",
+          "seq": 3
+        },
+        {
+          "actor": "actor-alice",
+          "seq": 4
+        }
+      ],
+      "type": "accepted"
+    },
+    {
+      "batch_id": "batch-8",
+      "code": "forbidden",
+      "message": "viewer may not write",
+      "type": "rejected"
+    },
+    {
+      "actor": "actor-bob",
+      "commit_seq": 4,
+      "operations": [
+        {
+          "context": {
+            "lamport": 3,
+            "observed": {}
+          },
+          "id": {
+            "actor": "actor-bob",
+            "seq": 1
+          },
+          "kind": {
+            "InsertText": {
+              "inline_id": "inl-wire-0001",
+              "offset": 2,
+              "text": "B"
+            }
+          }
+        }
+      ],
+      "subject": "bob",
+      "type": "committed"
+    },
+    {
+      "peers": [
+        {
+          "actor": "actor-bob",
+          "connections": 1,
+          "cursor_anchor": "blk-wire-0001:1",
+          "display_name": "bob",
+          "last_seen_ms": 1700000000000,
+          "role": "commenter",
+          "selection_anchor": "blk-wire-0001:1",
+          "subject": "bob"
+        }
+      ],
+      "type": "presence"
+    },
+    {
+      "code": "forbidden",
+      "message": "read access was revoked",
+      "type": "closed"
+    },
+    {
+      "type": "pong"
+    }
+  ]
+}

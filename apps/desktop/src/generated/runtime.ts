@@ -9,10 +9,14 @@ export type OpenDocRuntimeMode =
 
 export type OpenDocStorageBackend = "local" | "flat" | "opendal-fs";
 
+export type OpenDocPermissionAuthority = "local-advisory" | "service";
+
+export type OpenDocServiceRole = "viewer" | "commenter" | "editor" | "owner";
+
 export type OpenDocRuntimeProfile = {
   mode: OpenDocRuntimeMode;
   label: string;
-  permissions_enabled: boolean;
+  permission_authority: OpenDocPermissionAuthority;
   signing_enabled: boolean;
   browser_signing_deferred: boolean;
   default_repository_root: string;
@@ -20,36 +24,47 @@ export type OpenDocRuntimeProfile = {
   storage_backends: OpenDocStorageBackend[];
 };
 
-export type OpenDocRuntimeSession = {
-  profile: OpenDocRuntimeProfile;
-  authenticated_subject: string | null;
-  document_uuid: string | null;
-  permissions: OpenDocPermissionGrant[];
-  presence: OpenDocPresencePeer[];
-  warnings: string[];
+// The collaboration service's answers about this client's session, exactly as
+// they arrived. Nothing here can be supplied by a command argument.
+export type OpenDocServiceSession = {
+  subject: string;
+  actor: string;
+  document_uuid: string;
+  role: OpenDocServiceRole;
+  peers: OpenDocPresencePeer[];
+  acknowledged_seq: number;
 };
 
-export type OpenDocPermissionGrant = {
-  subject: string;
-  action: string;
-  scope: string;
-  document_uuid: string | null;
+export type OpenDocRuntimeSession = {
+  profile: OpenDocRuntimeProfile;
+  service_session: OpenDocServiceSession | null;
+  warnings: string[];
 };
 
 export type OpenDocPresencePeer = {
   subject: string;
+  actor: string;
   display_name: string;
-  role: string;
+  role: OpenDocServiceRole;
   cursor_anchor: string | null;
+  selection_anchor: string | null;
   last_seen_ms: number;
+  connections: number;
 };
+
+export type OpenDocAuthorizationSource =
+  | "runtime-capability"
+  | "service-answer"
+  | "service-answer-missing";
 
 export type OpenDocAuthorizationDecision = {
   mode: OpenDocRuntimeMode;
   command: string;
   required_action: string;
+  decided_by: OpenDocAuthorizationSource;
   subject: string | null;
   document_uuid: string | null;
+  role: OpenDocServiceRole | null;
   allowed: boolean;
   reason: string;
   warnings: string[];
@@ -60,26 +75,29 @@ export type OpenDocShareInvite = {
   issuer: string | null;
   target_subject: string | null;
   document_uuid: string | null;
-  grants: OpenDocPermissionGrant[];
+  requested_role: OpenDocServiceRole | null;
   created_at_ms: number;
   warnings: string[];
 };
 
 export type OpenDocRelayOperation = {
-  id: string;
   actor: string;
   seq: number;
   kind: string;
-  base_manifest: string | null;
 };
+
+// A batch is accepted, refused, or a byte-identical retry. There is no
+// deferred state: a batch the service cannot place is refused and nothing is
+// stored.
+export type OpenDocSyncBatchOutcome = "accepted" | "refused" | "retried";
 
 export type OpenDocSyncRelayResult = {
   authorization: OpenDocAuthorizationDecision;
   document_uuid: string | null;
-  base_manifest: string | null;
+  outcome: OpenDocSyncBatchOutcome;
   accepted_operations: string[];
-  deferred_operations: string[];
-  rejected_operations: string[];
+  retried_operations: string[];
+  refused_operations: string[];
   presence: OpenDocPresencePeer[];
   warnings: string[];
 };

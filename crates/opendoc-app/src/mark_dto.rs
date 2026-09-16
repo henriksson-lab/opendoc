@@ -9,6 +9,10 @@ pub(crate) fn inline_id(inline: &Inline) -> &StableId {
         | Inline::Citation { id, .. }
         | Inline::FootnoteRef { id, .. }
         | Inline::Mention { id, .. }
+        | Inline::GooglePersonChip { id, .. }
+        | Inline::GoogleRichLinkChip { id, .. }
+        | Inline::Dropdown { id, .. }
+        | Inline::DateChip { id, .. }
         | Inline::Equation { id, .. }
         | Inline::PageNumber { id, .. } => id,
     }
@@ -48,8 +52,13 @@ pub(crate) fn mark_label(mark: &Mark) -> String {
 /// instead of being indistinguishable from a bullet.
 pub(crate) fn block_style_value(kind: &BlockKind) -> String {
     match kind {
+        BlockKind::Title => "title".to_string(),
+        BlockKind::Subtitle => "subtitle".to_string(),
         BlockKind::Heading { level } => format!("heading:{level}"),
         BlockKind::ListItem { kind, .. } => format!("list:{}", kind.as_str()),
+        BlockKind::HorizontalRule => "horizontal-rule".to_string(),
+        BlockKind::TableOfContents { .. } => "table-of-contents".to_string(),
+        BlockKind::Bibliography => "bibliography".to_string(),
         _ => "paragraph".to_string(),
     }
 }
@@ -158,6 +167,37 @@ pub(crate) fn validate_mark_removal_payload(
         (Some(_), false) => Err(AppApiError::Format("boolean mark has value".to_string())),
         _ => Ok(()),
     }
+}
+
+pub(crate) fn validate_format_replacement_payload(
+    kind: &MarkKind,
+    expected_value: &str,
+    value: &str,
+) -> Result<(), AppApiError> {
+    if !matches!(
+        kind,
+        MarkKind::Color | MarkKind::Background | MarkKind::Font | MarkKind::Size
+    ) {
+        return Err(AppApiError::Format(
+            "format replacement kind is not value-bearing".to_string(),
+        ));
+    }
+    for (label, candidate) in [
+        ("expected format value", expected_value),
+        ("format value", value),
+    ] {
+        if candidate.trim().is_empty() || candidate.trim() != candidate {
+            return Err(AppApiError::Format(format!(
+                "{label} is empty or has surrounding whitespace"
+            )));
+        }
+    }
+    if expected_value == value {
+        return Err(AppApiError::Format(
+            "format replacement value equals expected value".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn parse_mark_kind(kind: &str) -> Result<MarkKind, AppApiError> {

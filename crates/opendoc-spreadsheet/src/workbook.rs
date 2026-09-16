@@ -21,9 +21,9 @@ use super::model::{
 };
 use super::recalc::SpreadsheetEvaluationContext;
 use super::structure::{
-    add_sheet_protected_range, copy_sheet_range, delete_axis, insert_axis, merge_sheet_cells,
-    set_sheet_basic_filter, set_sheet_basic_filter_options, set_sheet_cell, set_sheet_cell_format,
-    sort_range, upsert_sheet_cell, Axis,
+    add_sheet_protected_range, copy_sheet_range, delete_axis, insert_axis, merge_cover_anchor,
+    merge_sheet_cells, set_sheet_basic_filter, set_sheet_basic_filter_options, set_sheet_cell,
+    set_sheet_cell_format, sort_range, upsert_sheet_cell, Axis,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -235,31 +235,155 @@ impl SpreadsheetWorkbook {
     /// stale.
     pub fn evaluated(&self) -> Self {
         let mut workbook = self.clone();
-        for sheet in &mut workbook.sheets {
-            sheet.ensure_axis_metadata();
-        }
-        super::recalc::evaluate_workbook(&mut workbook);
-        workbook.dependency_graph =
-            super::recalc::build_dependency_graph(&workbook.sheets, &workbook.named_ranges);
+        workbook.evaluate();
         workbook
     }
 
+    /// Evaluates in place, on the same terms as [`SpreadsheetWorkbook::evaluated`].
+    ///
+    /// The two are one function: `evaluated` is this one applied to a copy.
+    /// Callers that already hold a workbook they own — a staged mutation about
+    /// to be committed, for instance — would otherwise clone it a second time
+    /// only to throw the original away.
+    ///
+    /// The dependency graph is rebuilt only when evaluation reports that some
+    /// formula source or the sheet structure changed. It is derived from
+    /// formula source alone, so an evaluation that changed no source — the
+    /// second `evaluate()` of a commit, a projection re-evaluating what a
+    /// render already evaluated — leaves a graph that is still exact, and
+    /// rebuilding it re-parsed every formula in the workbook for nothing.
+    pub fn evaluate(&mut self) {
+        for sheet in &mut self.sheets {
+            sheet.ensure_axis_metadata();
+        }
+        let outcome = super::recalc::evaluate_workbook(self);
+        if outcome.dependency_graph_stale {
+            self.dependency_graph =
+                super::recalc::build_dependency_graph(&self.sheets, &self.named_ranges);
+        }
+    }
+
+    /// The raw first-sheet writer: no validation rule and no merge is
+    /// consulted.
+    ///
+    /// It exists for fixtures that stage a workbook directly — a render test
+    /// wanting a formula cell that was never evaluated, say. **Every path a
+    /// user's keystroke can reach must use
+    /// [`SpreadsheetWorkbook::set_cell_in_sheet`] instead**, which is the one
+    /// that refuses a write a strict rule rejects or a merge would hide.
     pub fn set_cell(&mut self, address: &str, value: String) {
+        let locale = Locale::for_tag(&self.locale);
         let Some(sheet) = self.sheets.first_mut() else {
             return;
         };
-        set_sheet_cell(sheet, address, value);
+        set_sheet_cell(sheet, address, value, &locale);
     }
 
+    /// Writes one cell from text the user typed, refusing the two writes
+    /// that would otherwise land somewhere the user cannot see or did not
+    /// agree to.
+    ///
+    /// **A cell a merge covers is not writable.** Only the anchor of a merged
+    /// block is drawn, so a value stored on a covered cell is invisible,
+    /// uneditable and still signed into the document. The refusal names the
+    /// anchor, which is the cell the caller meant.
+    ///
+    /// **A `strict` validation rule is enforced.** A rule marked strict is the
+    /// sheet saying *reject this entry*; storing the value anyway made the
+    /// rule worse than no rule at all, because the dropdown, the export and
+    /// the audit view all went on advertising it. See [`super::validation`]
+    /// for exactly which rules are decidable here and which deliberately are
+    /// not.
     pub fn set_cell_in_sheet(
         &mut self,
         sheet_id: &str,
         address: &str,
         value: String,
-    ) -> Option<()> {
-        let sheet = self.sheets.iter_mut().find(|sheet| sheet.id == sheet_id)?;
-        set_sheet_cell(sheet, address, value);
-        Some(())
+    ) -> Result<(), SpreadsheetError> {
+        let locale = Locale::for_tag(&self.locale);
+        self.refuse_hidden_or_invalid_cell_write(sheet_id, address, &value, &locale)?;
+        let sheet = self
+            .sheets
+            .iter_mut()
+            .find(|sheet| sheet.id == sheet_id)
+            .ok_or_else(|| SpreadsheetError::NotFound(format!("sheet {sheet_id} was not found")))?;
+        set_sheet_cell(sheet, address, value, &locale);
+        Ok(())
+    }
+
+    /// The two refusals [`SpreadsheetWorkbook::set_cell_in_sheet`] documents,
+    /// taken before anything is borrowed mutably — a `one_of_range` rule has
+    /// to read the rest of the workbook to decide.
+    fn refuse_hidden_or_invalid_cell_write(
+        &self,
+        sheet_id: &str,
+        address: &str,
+        value: &str,
+        locale: &Locale,
+    ) -> Result<(), SpreadsheetError> {
+        let sheet = self
+            .sheets
+            .iter()
+            .find(|sheet| sheet.id == sheet_id)
+            .ok_or_else(|| SpreadsheetError::NotFound(format!("sheet {sheet_id} was not found")))?;
+        if let Some(anchor) = merge_cover_anchor(sheet, address) {
+            return Err(SpreadsheetError::Conflict(format!(
+                "cell {sheet_id}!{address} is covered by a merge and is never drawn; write to its anchor {anchor} instead"
+            )));
+        }
+        let Some(validation) = sheet
+            .cells
+            .iter()
+            .find(|cell| cell.address == address)
+            .and_then(|cell| cell.validation.as_ref())
+        else {
+            return Ok(());
+        };
+        if !validation.strict {
+            return Ok(());
+        }
+        let range_values = super::validation::range_reference(validation)
+            .and_then(|reference| self.range_literal_values(sheet_id, reference));
+        match super::validation::refusal(validation, value, locale, range_values.as_deref()) {
+            Some(reason) => Err(SpreadsheetError::Conflict(format!(
+                "cell {sheet_id}!{address} rejects this entry: {reason}"
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    /// The non-empty user values of the cells `reference` names, for a
+    /// `one_of_range` validation rule. `None` when the reference does not
+    /// resolve, which makes the rule undecidable rather than refusing.
+    fn range_literal_values(&self, sheet_id: &str, reference: &str) -> Option<Vec<String>> {
+        let reference = reference.trim().trim_start_matches('=').replace('$', "");
+        let (sheet, range) = match reference.rsplit_once('!') {
+            Some((prefix, range)) => {
+                let prefix = prefix.trim().trim_matches('\'');
+                let sheet = self
+                    .sheets
+                    .iter()
+                    .find(|sheet| sheet.id == prefix || sheet.title == prefix)?;
+                (sheet, range)
+            }
+            None => (
+                self.sheets.iter().find(|sheet| sheet.id == sheet_id)?,
+                reference.as_str(),
+            ),
+        };
+        let range = parse_cell_range(&normalize_cell_range(range).ok()?).ok()?;
+        let mut values = Vec::new();
+        for row in range.start_row..range.start_row + range.height {
+            for column in range.start_column..range.start_column + range.width {
+                let address = cell_address(column, row).ok()?;
+                if let Some(cell) = sheet.cells.iter().find(|cell| cell.address == address) {
+                    if !cell.computed_value.is_empty() {
+                        values.push(cell.computed_value.clone());
+                    }
+                }
+            }
+        }
+        Some(values)
     }
 
     pub fn set_cell_format(
@@ -357,6 +481,18 @@ impl SpreadsheetWorkbook {
     pub fn from_xlsx_base64(base64: &str, title: &str) -> Result<Self, SpreadsheetError> {
         let bytes = io::decode_base64(base64)?;
         io::import_xlsx(&bytes, title)
+    }
+
+    /// Reads an XLSX workbook and reports package features that could not be
+    /// represented by the spreadsheet model. UI import paths use this form so
+    /// a successful cell-grid import never implies that floating drawings
+    /// arrived too.
+    pub fn from_xlsx_base64_with_warnings(
+        base64: &str,
+        title: &str,
+    ) -> Result<io::XlsxImportReport, SpreadsheetError> {
+        let bytes = io::decode_base64(base64)?;
+        io::import_xlsx_with_warnings(&bytes, title)
     }
 
     /// Writes the workbook as a base64-encoded XLSX file (SH-47).
@@ -570,6 +706,27 @@ impl SpreadsheetWorkbook {
         sheet.frozen_rows = frozen_rows;
         sheet.frozen_columns = frozen_columns;
         Some((frozen_rows, frozen_columns))
+    }
+
+    /// Sets or clears a sheet's durable inclusive print area.
+    pub fn set_print_area(
+        &mut self,
+        sheet_id: &str,
+        print_area: Option<&str>,
+    ) -> Option<Result<(), SpreadsheetError>> {
+        let sheet = self.sheets.iter_mut().find(|sheet| sheet.id == sheet_id)?;
+        Some(sheet.set_print_area(print_area))
+    }
+
+    /// Sets a sheet's durable PDF paper orientation.
+    pub fn set_print_orientation(
+        &mut self,
+        sheet_id: &str,
+        orientation: crate::SheetPrintOrientation,
+    ) -> Option<()> {
+        let sheet = self.sheets.iter_mut().find(|sheet| sheet.id == sheet_id)?;
+        sheet.set_print_orientation(orientation);
+        Some(())
     }
 
     pub fn set_cell_validation(
@@ -889,6 +1046,56 @@ impl SpreadsheetWorkbook {
         }
         sheet.column_widths.insert(column.to_string(), width);
         Some(Ok(()))
+    }
+
+    /// Hides or reveals one row.
+    ///
+    /// Hiding is not a size of zero: a hidden row keeps whatever height it was
+    /// given, so revealing it restores that height rather than a default, and
+    /// a formula that reads the row still reads it — only `SUBTOTAL(101..)`
+    /// and the projection care that it is hidden. `None` means the sheet or
+    /// the row was not found.
+    pub fn set_row_hidden(&mut self, sheet_id: &str, row: &str, hidden: bool) -> Option<()> {
+        let sheet = self.sheets.iter_mut().find(|sheet| sheet.id == sheet_id)?;
+        if !sheet.rows.iter().any(|item| item == row) {
+            return None;
+        }
+        set_axis_hidden(&mut sheet.hidden_rows, row, hidden, |label| {
+            label.parse::<u32>().unwrap_or(0)
+        });
+        Some(())
+    }
+
+    /// Hides or reveals one column, on the same terms as
+    /// [`SpreadsheetWorkbook::set_row_hidden`].
+    pub fn set_column_hidden(&mut self, sheet_id: &str, column: &str, hidden: bool) -> Option<()> {
+        let sheet = self.sheets.iter_mut().find(|sheet| sheet.id == sheet_id)?;
+        if !sheet.columns.iter().any(|item| item == column) {
+            return None;
+        }
+        set_axis_hidden(&mut sheet.hidden_columns, column, hidden, |label| {
+            column_to_number(label).unwrap_or(0)
+        });
+        Some(())
+    }
+
+    /// Whether a row is hidden. `None` means the sheet or the row was not
+    /// found, which is a different answer from "not hidden".
+    pub fn row_hidden(&self, sheet_id: &str, row: &str) -> Option<bool> {
+        let sheet = self.sheets.iter().find(|sheet| sheet.id == sheet_id)?;
+        if !sheet.rows.iter().any(|item| item == row) {
+            return None;
+        }
+        Some(sheet.hidden_rows.iter().any(|item| item == row))
+    }
+
+    /// Whether a column is hidden.
+    pub fn column_hidden(&self, sheet_id: &str, column: &str) -> Option<bool> {
+        let sheet = self.sheets.iter().find(|sheet| sheet.id == sheet_id)?;
+        if !sheet.columns.iter().any(|item| item == column) {
+            return None;
+        }
+        Some(sheet.hidden_columns.iter().any(|item| item == column))
     }
 
     /// The effective row height in pixels: the explicit height when one is
@@ -1289,5 +1496,26 @@ impl SpreadsheetWorkbook {
                 ))
         });
         deleted
+    }
+}
+
+/// Adds or removes one label from a hidden-axis list, keeping it in axis order
+/// and free of duplicates so two replicas that hid the same row serialize the
+/// same bytes.
+fn set_axis_hidden(
+    hidden: &mut Vec<String>,
+    label: &str,
+    should_hide: bool,
+    order: impl Fn(&str) -> u32,
+) {
+    let present = hidden.iter().any(|item| item == label);
+    match (should_hide, present) {
+        (true, false) => {
+            hidden.push(label.to_string());
+            hidden.sort_by_key(|item| order(item));
+            hidden.dedup();
+        }
+        (false, true) => hidden.retain(|item| item != label),
+        _ => {}
     }
 }

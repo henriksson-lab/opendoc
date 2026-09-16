@@ -55,49 +55,32 @@ export type DesktopCommandArgs = {
     mode: OpenDocRuntimeMode;
     storageBackends: unknown[];
     signingEnabled: boolean | null;
-    subject: string | null;
-    documentUuid: string | null;
-    presence: unknown[];
-    permissions: unknown[];
   };
   authorize_runtime_command: {
     mode: OpenDocRuntimeMode;
     storageBackends: unknown[];
     signingEnabled: boolean | null;
-    subject: string | null;
-    documentUuid: string | null;
     commandName: string;
-    permissions: unknown[];
   };
   create_runtime_share_invite: {
     mode: OpenDocRuntimeMode;
     storageBackends: unknown[];
     signingEnabled: boolean | null;
-    subject: string | null;
-    documentUuid: string | null;
     targetSubject: string | null;
-    actions: string[];
-    permissions: unknown[];
+    role: string | null;
   };
   relay_runtime_sync: {
     mode: OpenDocRuntimeMode;
     storageBackends: unknown[];
     signingEnabled: boolean | null;
-    subject: string | null;
-    documentUuid: string | null;
-    baseManifest: string | null;
     operations: unknown[];
-    permissions: unknown[];
-    presence: unknown[];
   };
   resolve_runtime_document_lookup: {
     mode: OpenDocRuntimeMode;
     storageBackends: unknown[];
     signingEnabled: boolean | null;
-    subject: string | null;
     documentUuid: string | null;
     doi: string | null;
-    permissions: unknown[];
     serviceIndex: unknown[];
     scannedDocuments: unknown[];
   };
@@ -112,6 +95,10 @@ export type DesktopCommandArgs = {
   };
   export_google_docs_json: Record<string, never>;
   export_docx: Record<string, never>;
+  export_odt: Record<string, never>;
+  export_pdf: Record<string, never>;
+  export_html: Record<string, never>;
+  export_text: Record<string, never>;
   import_google_sheets_json: {
     jsonText: string;
   };
@@ -134,6 +121,9 @@ export type DesktopCommandArgs = {
     afterBlockId: string;
     blobHash: string;
     altText: string;
+  };
+  export_image_blob: {
+    blobHash: string;
   };
   sign_blob_with_openssh_private_key: {
     blobHash: string;
@@ -177,6 +167,14 @@ export type DesktopCommandArgs = {
   set_document_locale: {
     locale: string;
   };
+  set_bookmark: {
+    bookmarkId: string | null;
+    name: string;
+    blockId: string;
+  };
+  delete_bookmark: {
+    bookmarkId: string;
+  };
   add_paragraph: {
     text: string;
   };
@@ -197,6 +195,11 @@ export type DesktopCommandArgs = {
   };
   delete_block: {
     blockId: string;
+  };
+  move_block: {
+    blockId: string;
+    anchorBlockId: string;
+    placement: string;
   };
   set_block_text_style: {
     blockId: string;
@@ -228,7 +231,14 @@ export type DesktopCommandArgs = {
     field: string;
     alignment: string;
   };
+  set_page_furniture_html: {
+    slot: string;
+    html: string;
+  };
   clear_page_furniture: {
+    slot: string;
+  };
+  clear_page_furniture_override: {
     slot: string;
   };
   set_block_alignment: {
@@ -297,6 +307,34 @@ export type DesktopCommandArgs = {
     selection: EditorSelection;
     direction: string;
   };
+  set_block_keep_with_next: {
+    blockId: string;
+    keepWithNext: boolean;
+  };
+  set_editor_selection_block_keep_with_next: {
+    selection: EditorSelection;
+    keepWithNext: boolean;
+  };
+  set_block_background: {
+    blockId: string;
+    color: string;
+  };
+  set_editor_selection_block_background: {
+    selection: EditorSelection;
+    color: string;
+  };
+  set_block_border: {
+    blockId: string;
+    style: string;
+    twips: number;
+    color: string;
+  };
+  set_editor_selection_block_border: {
+    selection: EditorSelection;
+    style: string;
+    twips: number;
+    color: string;
+  };
   clear_block_property: {
     blockId: string;
     key: string;
@@ -354,12 +392,30 @@ export type DesktopCommandArgs = {
     afterInlineId: string | null;
     label: string;
   };
+  insert_date_chip_after: {
+    blockId: string;
+    afterInlineId: string | null;
+    date: string;
+  };
   update_mention_label: {
     inlineId: string;
     label: string;
   };
+  select_dropdown_option: {
+    inlineId: string;
+    optionId: string;
+  };
+  update_date_chip: {
+    inlineId: string;
+    date: string;
+  };
   add_footnote_ref: Record<string, never>;
+  add_endnote_ref: Record<string, never>;
   insert_footnote_ref_after: {
+    blockId: string;
+    afterInlineId: string | null;
+  };
+  insert_endnote_ref_after: {
     blockId: string;
     afterInlineId: string | null;
   };
@@ -398,6 +454,18 @@ export type DesktopCommandArgs = {
     level: number;
     listKind: string;
   };
+  set_ordered_list_start: {
+    blockId: string;
+    start: number;
+  };
+  set_ordered_list_format: {
+    blockId: string;
+    format: string;
+  };
+  set_bullet_list_marker: {
+    blockId: string;
+    marker: string;
+  };
   adjust_editor_selection_list_indent: {
     selection: EditorSelection;
     delta: number;
@@ -406,6 +474,16 @@ export type DesktopCommandArgs = {
     afterBlockId: string;
   };
   add_page_break: Record<string, never>;
+  insert_horizontal_rule_after: {
+    afterBlockId: string;
+  };
+  add_horizontal_rule: Record<string, never>;
+  insert_table_of_contents_after: {
+    afterBlockId: string;
+  };
+  insert_bibliography_after: {
+    afterBlockId: string;
+  };
   insert_table_after: {
     afterBlockId: string;
     rows?: number;
@@ -449,6 +527,41 @@ export type DesktopCommandArgs = {
     tableBlockId: string;
     columnId: string;
   };
+  set_table_row_height: {
+    tableBlockId: string;
+    rowId: string;
+    twips: number;
+  };
+  clear_table_row_height: {
+    tableBlockId: string;
+    rowId: string;
+  };
+  set_table_row_header: {
+    tableBlockId: string;
+    rowId: string;
+    header: boolean;
+  };
+  sort_table_rows: {
+    tableBlockId: string;
+    columnId: string;
+    descending: boolean;
+  };
+  set_table_border: {
+    tableBlockId: string;
+    style: string;
+    twips: number;
+    color: string;
+  };
+  clear_table_border: {
+    tableBlockId: string;
+  };
+  set_table_alignment: {
+    tableBlockId: string;
+    alignment: string;
+  };
+  clear_table_alignment: {
+    tableBlockId: string;
+  };
   merge_table_cells: {
     cellId: string;
     rowSpan: number;
@@ -471,6 +584,10 @@ export type DesktopCommandArgs = {
   set_table_cell_vertical_alignment: {
     cellId: string;
     alignment: string;
+  };
+  set_table_cell_row_header: {
+    cellId: string;
+    rowHeader: boolean;
   };
   set_table_cell_padding: {
     cellId: string;
@@ -547,6 +664,20 @@ export type DesktopCommandArgs = {
     author: string;
     text: string;
   };
+  add_block_delete_suggestion: {
+    blockId: string;
+    author: string;
+  };
+  add_block_insert_suggestion: {
+    blockId: string;
+    author: string;
+    text: string;
+  };
+  add_block_replace_suggestion: {
+    blockId: string;
+    author: string;
+    text: string;
+  };
   add_delete_suggestion: {
     author: string;
     inlineId: string;
@@ -568,6 +699,31 @@ export type DesktopCommandArgs = {
     author: string;
     markKind: string;
     value: string | null;
+  };
+  add_text_range_format_removal_suggestion: {
+    startInlineId: string;
+    endInlineId: string;
+    author: string;
+    markKind: string;
+    value: string | null;
+  };
+  add_text_range_format_replacement_suggestion: {
+    startInlineId: string;
+    endInlineId: string;
+    author: string;
+    markKind: string;
+    expectedValue: string;
+    value: string;
+  };
+  add_link_change_suggestion: {
+    inlineId: string;
+    author: string;
+    href: string | null;
+  };
+  add_paragraph_style_suggestion: {
+    blockId: string;
+    author: string;
+    style: string;
   };
   update_suggestion: {
     suggestionId: string;
@@ -598,6 +754,26 @@ export type DesktopCommandArgs = {
   };
   delete_inline: {
     inlineId: string;
+  };
+  resolve_comment_thread: {
+    threadId: string;
+    resolvedBy: string;
+  };
+  reopen_comment_thread: {
+    threadId: string;
+  };
+  set_comment_thread_action: {
+    threadId: string;
+    assignee: string | null;
+    dueAtMs: number | null;
+    completed: boolean;
+    completedBy: string | null;
+  };
+  set_comment_thread_reaction: {
+    threadId: string;
+    emoji: string;
+    actor: string;
+    present: boolean;
   };
   delete_comment_thread: {
     threadId: string;
@@ -685,6 +861,45 @@ export type DesktopCommandArgs = {
   set_image_block_placement: {
     blockId: string;
     placement: string;
+  };
+  set_image_block_wrap_clearance: {
+    blockId: string;
+    topTwips: number;
+    endTwips: number;
+    bottomTwips: number;
+    startTwips: number;
+  };
+  set_image_block_positioned: {
+    blockId: string;
+    anchorBlockId?: string | null;
+    horizontalOffsetTwips: number;
+    verticalOffsetTwips: number;
+    layer: string;
+  };
+  clear_image_block_positioned: {
+    blockId: string;
+  };
+  set_image_block_effects: {
+    blockId: string;
+    rotationDegrees: number;
+    opacityPercent: number;
+  };
+  set_image_block_crop: {
+    blockId: string;
+    topPercent: number;
+    rightPercent: number;
+    bottomPercent: number;
+    leftPercent: number;
+  };
+  set_image_block_caption: {
+    blockId: string;
+    caption: string;
+  };
+  set_image_block_border: {
+    blockId: string;
+    style: string;
+    twips: number;
+    color: string;
   };
   set_spreadsheet_cell: {
     address: string;
@@ -858,6 +1073,17 @@ export type DesktopCommandArgs = {
     sheetId: string;
     range: string;
   };
+  set_spreadsheet_print_area: {
+    sheetId: string;
+    range: string;
+  };
+  clear_spreadsheet_print_area: {
+    sheetId: string;
+  };
+  set_spreadsheet_print_orientation: {
+    sheetId: string;
+    orientation: string;
+  };
   set_spreadsheet_basic_filter_options: {
     sheetId: string;
     criteria: unknown[];
@@ -914,6 +1140,18 @@ export type DesktopCommandArgs = {
     column: string;
     width: number;
   };
+  set_spreadsheet_selection_rows_hidden: {
+    sheetId: string;
+    anchor: string;
+    focus: string;
+    hidden: boolean;
+  };
+  set_spreadsheet_selection_columns_hidden: {
+    sheetId: string;
+    anchor: string;
+    focus: string;
+    hidden: boolean;
+  };
   copy_spreadsheet_range: {
     sheetId: string;
     sourceRange: string;
@@ -946,6 +1184,7 @@ export type DesktopCommandArgs = {
     base64: string;
   };
   export_spreadsheet_xlsx: Record<string, never>;
+  export_spreadsheet_pdf: Record<string, never>;
   add_spreadsheet_named_range: {
     sheetId: string;
     name: string;
@@ -961,6 +1200,9 @@ export type DesktopCommandArgs = {
   };
   restore_spreadsheet_named_range: {
     name: string;
+  };
+  import_bibtex: {
+    source: string;
   };
   update_bibliography_reference: {
     referenceId: string;
@@ -1076,6 +1318,10 @@ export type DesktopCommandArgs = {
     privateKeyPem: string;
     signerDisplay: string;
   };
+  sign_current_repository_version_with_openssh_private_key: {
+    privateKeyPem: string;
+    signerDisplay: string;
+  };
   verify_current_signature: {
     privateKeyPem: string;
   };
@@ -1109,6 +1355,10 @@ export type DesktopCommandArgs = {
     html: string | null;
   };
   render_document_html: Record<string, never>;
+  render_suggestion_preview_html: {
+    suggestionId: string;
+    resolution: string;
+  };
   apply_editor_mark: {
     selection: EditorSelection;
     mark_kind: string;
@@ -1127,11 +1377,10 @@ export type DesktopCommandArgs = {
 export type DesktopCommandName = keyof DesktopCommandArgs;
 export type TextCommandName =
   | "copy_spreadsheet_selection_tsv"
-  | "export_spreadsheet_csv"
-  | "export_spreadsheet_xlsx"
   | "verify_current_signature"
   | "verify_current_signatures"
   | "render_document_html"
+  | "render_suggestion_preview_html"
   | "render_workbook_html";
 export type EditorCommandName =
   | "select_all_editor_content"
@@ -1166,7 +1415,15 @@ export type VersionViewCommandName =
 export type ExportCommandName =
   | "export_google_docs_json"
   | "export_docx"
-  | "export_google_sheets_json";
+  | "export_odt"
+  | "export_pdf"
+  | "export_html"
+  | "export_text"
+  | "export_google_sheets_json"
+  | "export_image_blob"
+  | "export_spreadsheet_csv"
+  | "export_spreadsheet_xlsx"
+  | "export_spreadsheet_pdf";
 export type DocumentLayoutCommandName =
   | "layout_document";
 export type DocumentCommandName = Exclude<

@@ -56,7 +56,9 @@ the entry and restores the default.
 Sheet viewport metadata includes `frozen_rows` and `frozen_columns`, mapped to
 Google Sheets `gridProperties.frozenRowCount` and `frozenColumnCount` during
 API-shaped import/export. Counts are signed source state and are clamped to the
-current visible row/column counts.
+current visible row/column counts. In PDF export, the visible leading frozen
+rows are repeated on each vertical page (ADR 0041); frozen columns remain a
+viewport-only feature until horizontal print repetition has durable semantics.
 
 Cell comments are signed source state on sparse cells. Each comment has a
 stable comment ID, author, body, and deleted flag. Normal views hide deleted
@@ -80,6 +82,13 @@ semantics, and a `show_dropdown` projection hint. The validation `kind` remains
 explicit so number, text, range, and formula validations can use the same cell
 operation shape later. Clearing a validation removes it from current state while
 the operation history retains the change.
+
+Cell format v0 includes sparse `wrap_strategy: "wrap"` and
+`vertical_align: "top" | "middle" | "bottom"` declarations (ADR 0042).
+Absent wrapping remains the prior clipped single-line projection; absent
+vertical alignment uses each renderer's normal cell baseline. This deliberately
+does not imply overflow/spill, shrink-to-fit, rotation, rich text or automatic
+row growth.
 
 Merged cell ranges are signed sheet source state. Each merge has a stable ID and
 an A1 range. v0 rejects single-cell and overlapping merge ranges during

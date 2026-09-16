@@ -22,6 +22,14 @@ fn imports_google_docs_comment_and_suggestion_extensions_as_source_state() {
             }],
             "deleted": false
         }],
+        "opendocCommentHistory": [{
+            "threadId": " thread-one ",
+            "commentId": " comment-one ",
+            "kind": "edited",
+            "actor": "Grace",
+            "atMs": 18,
+            "previousBody": [{ "textRun": { "content": "Earlier text", "textStyle": { "italic": true } } }]
+        }],
         "opendocSuggestions": [{
             "id": " suggest-one ",
             "author": "Grace",
@@ -42,6 +50,10 @@ fn imports_google_docs_comment_and_suggestion_extensions_as_source_state() {
     assert!(report
         .warnings
         .iter()
+        .any(|warning| { warning.code == "opendoc-google-comment-history-extension" }));
+    assert!(report
+        .warnings
+        .iter()
         .any(|warning| warning.code == "opendoc-google-suggestions-extension"));
     let thread = &report.document.comments[0];
     assert_eq!(thread.id.as_str(), "thread-one");
@@ -56,6 +68,18 @@ fn imports_google_docs_comment_and_suggestion_extensions_as_source_state() {
         }
         other => panic!("expected comment text body, got {other:?}"),
     }
+    assert_eq!(report.document.comment_history.len(), 1);
+    let history = &report.document.comment_history[0];
+    assert_eq!(history.thread_id.as_str(), "thread-one");
+    assert_eq!(history.comment_id.as_str(), "comment-one");
+    assert_eq!(history.kind, "edited");
+    assert_eq!(history.actor, "Grace");
+    assert_eq!(history.at_ms, 18);
+    assert!(matches!(
+        history.previous_body.as_deref(),
+        Some([Inline::Text { text, marks, .. }])
+            if text == "Earlier text" && marks.iter().any(|mark| mark.kind == MarkKind::Italic)
+    ));
     let suggestion = &report.document.suggestions[0];
     assert_eq!(suggestion.id.as_str(), "suggest-one");
     assert_eq!(suggestion.author, "Grace");
@@ -69,6 +93,29 @@ fn imports_google_docs_comment_and_suggestion_extensions_as_source_state() {
         }
         other => panic!("expected format suggestion, got {other:?}"),
     }
+}
+
+#[test]
+fn imports_google_structural_block_delete_suggestion_extension() {
+    let input = json!({
+        "body": { "content": [{
+            "paragraph": { "elements": [
+                { "textRun": { "content": "Reviewed block", "textStyle": {} } }
+            ] }
+        }] },
+        "opendocSuggestions": [{
+            "id": "delete-block-suggestion",
+            "author": "Grace",
+            "kind": { "type": "block_delete", "blockId": "paragraph-0" },
+            "state": "proposed",
+            "provenance": ["imported fixture"]
+        }]
+    });
+    let report = import_google_docs_json("Google", input.to_string().as_bytes()).unwrap();
+    assert!(matches!(
+        report.document.suggestions[0].kind,
+        SuggestionKind::BlockDelete { ref block_id } if block_id.as_str() == "paragraph-0"
+    ));
 }
 
 #[test]

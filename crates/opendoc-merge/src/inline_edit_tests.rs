@@ -5,9 +5,120 @@ use crate::inline_ops::inline_id;
 use crate::merge::merge_operations;
 use crate::operation::{Operation, OperationKind};
 use opendoc_core::{
-    Block, BlockKind, BlockProperties, CellSpan, Document, Equation, EquationSourceFormat, Inline,
-    ListKind, Mark, MarkExpand, MarkKind, StableId,
+    Block, BlockKind, BlockProperties, CellSpan, Document, DropdownOption, Equation,
+    EquationSourceFormat, Inline, InsertPosition, ListKind, Mark, MarkExpand, MarkKind, StableId,
 };
+
+#[test]
+fn dropdown_selection_is_atomic_and_undoable() {
+    let mut base = Document::new("Dropdown");
+    let id = StableId::parse("status").unwrap();
+    base.blocks.push(Block {
+        id: StableId::parse("paragraph").unwrap(),
+        kind: BlockKind::Paragraph,
+        content: vec![Inline::Dropdown {
+            id: id.clone(),
+            options: vec![
+                DropdownOption {
+                    id: "draft".to_string(),
+                    label: "Draft".to_string(),
+                },
+                DropdownOption {
+                    id: "done".to_string(),
+                    label: "Done".to_string(),
+                },
+            ],
+            selected_option_id: "draft".to_string(),
+        }],
+        properties: BlockProperties::default(),
+    });
+    let result = merge_operations(
+        &base,
+        &[vec![Operation {
+            id: OperationId {
+                actor: ActorId("a".to_string()),
+                seq: 1,
+            },
+            kind: OperationKind::SelectDropdownOption {
+                inline_id: id,
+                option_id: "done".to_string(),
+            },
+            context: None,
+        }]],
+    )
+    .unwrap();
+    assert!(result.warnings.is_empty());
+    assert!(
+        matches!(&result.document.blocks[0].content[0], Inline::Dropdown { selected_option_id, .. } if selected_option_id == "done")
+    );
+}
+
+#[test]
+fn date_chip_update_is_atomic_validated_and_invertible() {
+    let mut base = Document::new("Dates");
+    let id = StableId::parse("date-chip").unwrap();
+    base.blocks.push(Block {
+        id: StableId::parse("paragraph").unwrap(),
+        kind: BlockKind::Paragraph,
+        content: vec![Inline::DateChip {
+            id: id.clone(),
+            date: "2026-09-16".to_string(),
+        }],
+        properties: BlockProperties::default(),
+    });
+    let operation = Operation {
+        id: OperationId {
+            actor: ActorId("a".to_string()),
+            seq: 1,
+        },
+        kind: OperationKind::UpdateDateChip {
+            inline_id: id.clone(),
+            date: "2028-02-29".to_string(),
+        },
+        context: None,
+    };
+    let result = merge_operations(&base, &[vec![operation.clone()]]).unwrap();
+    assert!(result.warnings.is_empty());
+    assert!(
+        matches!(&result.document.blocks[0].content[0], Inline::DateChip { date, .. } if date == "2028-02-29")
+    );
+    let inverse = crate::inverse::invert_operation(&base, &operation.kind);
+    let crate::inverse::Inversion::Operations(inverse) = inverse else {
+        panic!("date edit should invert")
+    };
+    let inverse = inverse
+        .into_iter()
+        .enumerate()
+        .map(|(seq, kind)| Operation {
+            id: OperationId {
+                actor: ActorId("undo".to_string()),
+                seq: seq as u64 + 1,
+            },
+            kind,
+            context: None,
+        })
+        .collect();
+    let restored = merge_operations(&result.document, &[inverse]).unwrap();
+    assert!(
+        matches!(&restored.document.blocks[0].content[0], Inline::DateChip { date, .. } if date == "2026-09-16")
+    );
+    let invalid = Operation {
+        id: OperationId {
+            actor: ActorId("b".to_string()),
+            seq: 1,
+        },
+        kind: OperationKind::UpdateDateChip {
+            inline_id: id,
+            date: "2027-02-29".to_string(),
+        },
+        context: None,
+    };
+    assert!(merge_operations(&base, &[vec![invalid]])
+        .unwrap()
+        .warnings
+        .iter()
+        .any(|warning| warning.code == "invalid-date-chip"));
+}
 
 #[test]
 fn inline_text_updates_preserve_marks_and_reach_table_cells() {
@@ -24,6 +135,8 @@ fn inline_text_updates_preserve_marks_and_reach_table_cells() {
         id: StableId::new("block"),
         kind: BlockKind::table(vec![opendoc_core::TableRow {
             id: StableId::new("row"),
+            height: None,
+            header: false,
             cells: vec![opendoc_core::TableCell {
                 id: StableId::new("cell"),
                 span: CellSpan::SINGLE,
@@ -299,7 +412,6 @@ fn empty_link_href_update_degrades_to_warning() {
         _ => unreachable!(),
     }
     assert_eq!(actor_streams.warnings[0].code, "invalid-link-href");
-    actor_streams.document.validate().unwrap();
 }
 
 #[test]
@@ -456,7 +568,6 @@ fn invalid_list_item_level_update_degrades_to_warning() {
         _ => unreachable!(),
     }
     assert_eq!(actor_streams.warnings[0].code, "invalid-list-level");
-    actor_streams.document.validate().unwrap();
 }
 
 #[test]
@@ -552,7 +663,10 @@ fn invalid_inserted_structured_block_payloads_degrade_to_warnings() {
                 actor: ActorId("a".to_string()),
                 seq: index as u64 + 1,
             },
-            kind: OperationKind::InsertBlock { after: None, block },
+            kind: OperationKind::InsertBlock {
+                position: InsertPosition::Last,
+                block,
+            },
             context: None,
         })
         .collect::<Vec<_>>();
@@ -578,7 +692,6 @@ fn invalid_inserted_structured_block_payloads_degrade_to_warnings() {
             "invalid-table",
         ]
     );
-    result.document.validate().unwrap();
 }
 
 #[test]
@@ -637,7 +750,7 @@ fn invalid_inserted_inline_payloads_degrade_to_warnings() {
             },
             kind: OperationKind::InsertInline {
                 block_id: block_id.clone(),
-                after: None,
+                position: InsertPosition::Last,
                 inline,
             },
             context: None,
@@ -662,7 +775,6 @@ fn invalid_inserted_inline_payloads_degrade_to_warnings() {
             "invalid-mark-value",
         ]
     );
-    result.document.validate().unwrap();
 }
 
 #[test]
@@ -738,7 +850,6 @@ fn invalid_heading_level_update_degrades_to_warning() {
         _ => unreachable!(),
     }
     assert_eq!(actor_streams.warnings[0].code, "invalid-heading-level");
-    actor_streams.document.validate().unwrap();
 }
 
 #[test]

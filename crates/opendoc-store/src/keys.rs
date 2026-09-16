@@ -166,6 +166,58 @@ pub(crate) fn version_label_path(manifest: &HashRef) -> String {
     )
 }
 
+/// Sidecar path for the coverage record a version signature is taken over,
+/// keyed by the manifest hash exactly as `version_label_path` is.
+///
+/// The record is fully derived from the manifest, so writing it twice writes
+/// the same bytes. It is stored anyway because it is the only form in which a
+/// signed version's *claim about its own history* survives the loss of the
+/// manifest — which is precisely the case a truncation audit has to report on.
+pub(crate) fn version_coverage_path(manifest: &HashRef) -> String {
+    let digest = manifest.digest();
+    let prefix = &digest[..digest.len().min(2)];
+    format!(
+        "objects/{}/{}/{}.coverage",
+        manifest.algorithm(),
+        prefix,
+        digest
+    )
+}
+
+/// Prefix holding every version signature over one manifest.
+///
+/// ADR 0003: "A version may have multiple signatures." Blob signatures get one
+/// sidecar per blob and a second signer overwrites the first; version
+/// signatures are keyed by signer as well, so they accumulate.
+pub(crate) fn version_signature_prefix(manifest: &HashRef) -> String {
+    let digest = manifest.digest();
+    let prefix = &digest[..digest.len().min(2)];
+    format!(
+        "signatures/versions/{}/{}/{}",
+        manifest.algorithm(),
+        prefix,
+        digest
+    )
+}
+
+pub(crate) fn version_signature_path(
+    manifest: &HashRef,
+    signer: &str,
+) -> Result<String, StoreError> {
+    if signer.trim().is_empty() {
+        return Err(StoreError::InvalidPath);
+    }
+    let signer_digest = digest_bytes("sha256", signer.as_bytes())
+        .map_err(|_| StoreError::UnsupportedHash)?
+        .digest()
+        .to_string();
+    Ok(format!(
+        "{}/{}.vsig",
+        version_signature_prefix(manifest),
+        signer_digest
+    ))
+}
+
 pub(crate) fn clean_relative_path(path: &str) -> Result<&Path, StoreError> {
     let path = Path::new(path);
     if path.is_absolute()

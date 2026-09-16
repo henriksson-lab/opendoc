@@ -1,6 +1,10 @@
 # ADR 0005: Crash Recovery Journal and the Unsaved-Work Guard
 
-Status: accepted.
+Status: accepted. Amended 2026-09-12: the segment header carries the two
+sequence watermarks. Amended 2026-09-13: the header also declares its base
+snapshot's format and carries the unsaved signatures, and a failed journal
+write heals itself; the format string is `opendoc.recovery-segment.v2`. See the
+amendments at the end.
 
 Supersedes nothing. Implements FS-6 and FS-7 of
 `docs/GOOGLE_DOCS_PARITY_TODO.md` (PLAN77 phase A6).
@@ -148,6 +152,114 @@ adapter), which has to solve durable local storage for repositories anyway.
   segment's operations. The repository still holds the earlier segments and
   the chain is written correctly on the next save, but the in-memory audit
   list starts at the base snapshot.
-- **One session at a time.** Two concurrent windows over the same store would
-  each offer the other's live segment as a crash. OpenDoc is single-window;
-  revisit with F2/F3.
+- **One session at a time.** Two concurrent windows over the same store each
+  offer the other's live segment as a crash, and discarding one deletes a file
+  the other is appending to. The appending window now heals itself rather than
+  losing crash protection for the rest of the session — see the amendment
+  below, which also says why ADR 0008 §6's Web Lock does not transfer here.
+  OpenDoc is single-window; revisit with F2/F3.
+
+## Amendment: the header carries the numbering watermarks
+
+Dated 2026-09-12, with the separation of envelope identity from operation
+identity (`docs/adr/0015`, amendment).
+
+The invariant in §2 — the segment replays to exactly the current in-memory state
+— covers the numbering counters, because a replica that resumed below one would
+re-mint an identity the repository already holds. They cannot be reconstructed
+from the segment's frames: the frames begin at the base snapshot, and everything
+issued before it is behind that snapshot rather than in front of it.
+
+`RecoverySegmentHeader` therefore carries `next_envelope_seq` and
+`next_operation_seq` as they stood when the base snapshot was taken, and the
+replay takes the larger of the header's watermark and anything the appended
+frames show. The header's `format` is now `opendoc.recovery-segment.v1`. The
+frame layout did not change, so the file magic did not either.
+
+A `v0` segment is still read and is not guessed at: in `v0` a single counter
+numbered envelopes and operations alike, so that actor's highest envelope number
+is exactly what both counters stood at. The replay reports
+`recovery-journal-legacy-numbering` naming the segment, because a file written
+by an older build is a fact the user is entitled to see rather than something to
+read silently. Any other format string is refused.
+
+## Amendment: the header declares its base format and carries the signatures
+
+Dated 2026-09-13, with the crash-recovery data-integrity pass.
+
+Two things a `v1` header could not say about itself, both of which cost the
+user work:
+
+**The base snapshot's format.** §4 made `RecoverySegmentHeader` embed a whole
+`AppDocument` as `base` while the file declared only *its own* format, so one
+`recovery-segment.v1` file could carry either `app-document` shape and nothing
+inside the segment could tell them apart. The next `AppDocument` bump would
+have decoded into whichever fields happened to line up and replayed a document
+nobody wrote. The header now carries `base_format` — the same string a
+repository snapshot declares — and a segment naming a format this build cannot
+replay is refused by name. A `v0`/`v1` segment carries no declaration; it is
+still replayed, and says so with `recovery-journal-undeclared-base-format`,
+because an assumption the reader cannot check is a fact the user is entitled to
+see.
+
+**The unsaved signatures.** Signing is not a typed operation and it makes the
+document dirty, so a segment exists *precisely* when a just-minted signature
+has not reached the repository. The header had nowhere to carry one, so
+`recover_session` could only `self.signatures.clear()`: signing, crashing and
+recovering returned an `unsigned` document with an empty warning list and
+nothing anywhere to say a signature had been discarded. The header now carries
+`signatures`, the replay restores them, and — because a recovered signature
+covers the base snapshot — a replay that moved past it reports
+`recovery-journal-broken-signature` rather than presenting a signature as
+covering state it does not.
+
+The *offer* had the same blind spot from the other side. `AppRecoverySession`
+counts operations, and signing is not one, so a crash that caught a signature
+and nothing else was offered as a session with zero changes and an empty
+operation list — and the user was asked whether to discard "nothing" when a
+signature was what discarding destroys. `refresh_recovery_sessions` now emits
+`recovery-journal-unsaved-signature` naming the session and the count. The
+warning belongs to the set of segments currently *on offer* rather than
+accumulating: refreshing rebuilds it, so recovering or discarding a session
+takes its warning with it. The offer DTO would be the better home for this, but
+its TypeScript shape is a hand-written literal in the contract generator rather
+than a projection of the Rust struct, so a field added on the Rust side would
+not reach the client and no gate would notice; see the report accompanying this
+change.
+
+The header's `format` is therefore `opendoc.recovery-segment.v2`. The frame
+layout did not change, so the file magic did not either, and `v1` and `v0`
+segments are still read.
+
+### The "one session at a time" limitation is not permission to fail permanently
+
+The limitation above says two concurrent windows over one store would each
+offer the other's live segment as a crash. What it did *not* say, and what was
+true, is what happened next: if the second window discarded the first's live
+segment, the first's `append_segment` failed for ever, `sync_recovery_journal`
+never reset `self.recovery.cursor`, and `push_model_warning` deduped the
+warning after the first one. Crash protection was over for the rest of the
+session, silently.
+
+`sync_recovery_journal` now drops the cursor whenever a sync fails, so the next
+dispatched command re-snapshots under a fresh session id and journalling heals
+itself. This is only the difference between a limitation and a permanent,
+non-self-healing failure; ownership remains unsolved for the native shell.
+
+The browser half of the same theme *is* solved, and differently: ADR 0008 §6
+gives one tab the `opendoc-volume` Web Lock and makes every other tab
+memory-only and say so. That shape does not transfer to the native journal as
+it stands, and the difference is worth stating rather than papering over. Two
+tabs contend for *one* set of keys — the volume — so exactly one writer is the
+correct answer. Two native runtimes write *disjoint* segment files, one per
+session id, and each is a legitimate editor with its own unsaved work that
+deserves its own journal; making the second memory-only would lose work rather
+than protect it. What collides is not the writes but the *offer*: a segment
+whose owner is still alive is indistinguishable from one whose owner died, so
+window B is offered window A's live journal and may delete it.
+
+Closing that needs liveness in the segment, not a lock over the store — a
+heartbeat frame appended alongside the operation frames, and a
+`refresh_recovery_sessions` that declines to offer a segment whose heartbeat is
+younger than the crash-detection threshold. That is a format bump (`v3`) and is
+not done. Leader election (PLAN77 F2) remains the general answer.

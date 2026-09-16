@@ -23,6 +23,10 @@ export type AppEditorSelection = {
   inline_range: EditorInlineRange | null;
 };
 
+/** The one DTO here that only travels towards Rust: `editor.ts` builds it and
+ *  nothing projects it. `?` therefore means "a client may leave this out", and
+ *  it may be narrower than what serde would in fact accept — `data` is optional
+ *  to serde but every caller has one, so the type asks for it. */
 export type EditorInput = {
   selection: EditorSelection;
   input_type: string;
@@ -30,10 +34,16 @@ export type EditorInput = {
   html?: string | null;
 };
 
+/** Which part of the document a match is in. Only `"body"` is selectable in
+ *  the editor surface: page furniture and footnote bodies are not in
+ *  `document.blocks`, so their block ids are not in the editor DOM. */
+export type AppFindRegion = "body" | "header" | "footer" | "first-page-header" | "first-page-footer" | "even-page-header" | "even-page-footer" | "footnote";
+
 export type AppFindMatch = {
   start: EditorPosition;
   end: EditorPosition;
   text: string;
+  region: AppFindRegion;
 };
 
 export type AppFindMatches = {

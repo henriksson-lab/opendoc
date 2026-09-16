@@ -18,9 +18,19 @@
 //! * **One batch at a time.** A flush that is already running is not joined by
 //!   a second; it loops instead, so a later value of a key can never be
 //!   overtaken by an earlier one.
+//! * **One *tab* at a time.** Both guarantees above are per-runtime, and a
+//!   second tab on the same origin is a second runtime over the same object
+//!   store. Each hydrates its own [`MirroredVolume`] once at boot and never
+//!   sees the other's writes again, so without arbitration the two flush
+//!   divergent views of the same keys and the last writer wins — most visibly
+//!   on [`RECENT_DOCUMENTS_KEY`], which is a single key for the whole origin,
+//!   so one tab's recents list silently replaces the other's. A Web Lock
+//!   settles it: the tab holding it owns durable storage, and a tab that does
+//!   not is memory-only and *says so*, which is the same shape ADR 0008 §5
+//!   already uses for a runtime with no IndexedDB at all.
 
 use js_sys::{Array, Function, Object, Promise, Reflect, Uint8Array};
-use opendoc_app::VolumeRecoveryJournalStore;
+use opendoc_app::{VolumeRecentDocumentStore, VolumeRecoveryJournalStore};
 use opendoc_store::{install_browser_volume, MirroredVolume};
 use std::cell::{Cell, RefCell};
 use std::sync::Arc;
@@ -41,6 +51,19 @@ const DATABASE_VERSION: u32 = 1;
 /// The volume subtree the crash-recovery journal owns. Repositories live under
 /// `repositories/`, so the two cannot collide.
 const RECOVERY_PREFIX: &str = "recovery";
+/// The one volume key the recents list owns. Its own prefix, so no repository
+/// root and no recovery session id can name it.
+const RECENT_DOCUMENTS_KEY: &str = "recent/documents";
+/// The Web Lock that names ownership of the durable volume. Web Locks are
+/// scoped to the origin, which is exactly the scope of the IndexedDB database,
+/// and they are released by the browser when the tab goes away — including on
+/// a crash, which a heartbeat key in the store itself could not manage.
+const VOLUME_LOCK: &str = "opendoc-volume";
+/// How much unflushed work a memory-only tab will hold while it waits for the
+/// lock. A tab that never gets promoted would otherwise queue mutations
+/// forever. Past this, mirroring is switched off and the tab is told that its
+/// work can no longer be made durable even if the other tab closes.
+const WAITING_PENDING_BYTES_CAP: usize = 8 * 1024 * 1024;
 
 thread_local! {
     /// The volume exists from module start, before IndexedDB is reachable, so
@@ -50,6 +73,9 @@ thread_local! {
     static FLUSHING: Cell<bool> = const { Cell::new(false) };
     static LAST_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
     static PERSISTENT: Cell<bool> = const { Cell::new(false) };
+    /// Why this tab is not durable, when it is not. `None` while durable, or
+    /// when the reason is already reported through `LAST_ERROR`.
+    static NOT_OWNER: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 /// Create the volume and install it as this runtime's local storage.
@@ -71,6 +97,23 @@ pub(crate) fn volume() -> Option<MirroredVolume> {
 /// A recovery-journal store over this runtime's volume, for the app to install.
 pub(crate) fn recovery_journal_store() -> Option<Arc<VolumeRecoveryJournalStore>> {
     volume().map(|volume| Arc::new(VolumeRecoveryJournalStore::new(volume, RECOVERY_PREFIX)))
+}
+
+/// A recents store over this runtime's volume — but only once the volume is
+/// actually being mirrored into IndexedDB.
+///
+/// The gate is the difference between the two lists this module hands out.
+/// Journalling over a memory-only volume is still worth having: it costs
+/// nothing and the page has nowhere better to put a segment. A recents list
+/// is a *promise*, read back by [`opendoc_app::RecentDocuments::is_durable`]
+/// — installing one over a volume that a reload throws away would claim the
+/// next visit will remember, which it will not (ADR 0008 §5: a runtime with
+/// no IndexedDB is reported, not pretended around).
+pub(crate) fn recent_documents_store() -> Option<Arc<VolumeRecentDocumentStore>> {
+    if !PERSISTENT.with(Cell::get) {
+        return None;
+    }
+    volume().map(|volume| Arc::new(VolumeRecentDocumentStore::new(volume, RECENT_DOCUMENTS_KEY)))
 }
 
 // ---- Awaiting IndexedDB ----------------------------------------------------
@@ -141,6 +184,150 @@ fn factory() -> Result<IdbFactory, JsValue> {
     value
         .dyn_into::<IdbFactory>()
         .map_err(|_| JsValue::from_str("indexedDB is not an IDBFactory"))
+}
+
+// ---- Owning the volume ------------------------------------------------------
+
+/// A callback whose return value JS keeps — `callback` above discards it, and
+/// the Web Locks protocol reads it: the lock is held until the returned
+/// promise settles.
+fn callback_returning(handler: impl FnOnce(JsValue) -> JsValue + 'static) -> JsValue {
+    Closure::once_into_js(move |event: JsValue| handler(event))
+}
+
+/// `navigator.locks`, from whichever global this is.
+///
+/// Absent in jsdom, in a worker without the API, and in browsers older than
+/// the Web Locks shipping window. Absent is reported, not worked around: there
+/// is no second mechanism here that would arbitrate correctly, and inventing a
+/// heartbeat key inside the very store being contended for would be a worse
+/// answer than saying so.
+fn lock_manager() -> Option<JsValue> {
+    let global = js_sys::global();
+    let navigator = Reflect::get(&global, &JsValue::from_str("navigator")).ok()?;
+    if navigator.is_undefined() || navigator.is_null() {
+        return None;
+    }
+    let locks = Reflect::get(&navigator, &JsValue::from_str("locks")).ok()?;
+    if locks.is_undefined() || locks.is_null() {
+        return None;
+    }
+    Reflect::get(&locks, &JsValue::from_str("request"))
+        .ok()
+        .filter(|request| request.is_function())
+        .map(|_| locks)
+}
+
+/// Ask for the volume lock.
+///
+/// Resolves `true` once this tab holds it. With `if_available`, resolves
+/// `false` straight away when another tab does; without it, the promise simply
+/// does not settle until the holder goes away — which is how a waiting tab is
+/// promoted.
+///
+/// The lock is held for the lifetime of the tab: the callback hands JS a
+/// promise that never settles, and the browser releases the lock when the tab
+/// does, crash included.
+fn request_volume_lock(locks: &JsValue, if_available: bool) -> Result<Promise, JsValue> {
+    let request: Function = Reflect::get(locks, &JsValue::from_str("request"))?.unchecked_into();
+    let options = Object::new();
+    Reflect::set(
+        &options,
+        &JsValue::from_str("mode"),
+        &JsValue::from_str("exclusive"),
+    )?;
+    if if_available {
+        Reflect::set(&options, &JsValue::from_str("ifAvailable"), &JsValue::TRUE)?;
+    }
+    let locks = locks.clone();
+    Ok(Promise::new(&mut |resolve, reject| {
+        let resolve_for_grant = resolve.clone();
+        let held = callback_returning(move |lock: JsValue| {
+            // With `ifAvailable`, a lock held elsewhere calls back with null.
+            let granted = !lock.is_null() && !lock.is_undefined();
+            let _ = resolve_for_grant.call1(&JsValue::NULL, &JsValue::from_bool(granted));
+            if granted {
+                // Never settles: hold the lock until the tab is gone.
+                Promise::new(&mut |_, _| {}).into()
+            } else {
+                Promise::resolve(&JsValue::UNDEFINED).into()
+            }
+        });
+        let outcome = request.call3(&locks, &JsValue::from_str(VOLUME_LOCK), &options, &held);
+        match outcome {
+            Ok(promise) => {
+                // `request` itself rejecting (a SecurityError in a sandboxed
+                // frame, say) would otherwise leave the outer promise hanging.
+                let reject = reject.clone();
+                let on_rejected = callback(move |error: JsValue| {
+                    let _ = reject.call1(&JsValue::NULL, &error);
+                });
+                // `Promise::catch` wants a `ScopedClosure`, which cannot
+                // outlive this call; the rejection may arrive long after it.
+                if let Ok(catch) = Reflect::get(&promise, &JsValue::from_str("catch")) {
+                    if let Ok(catch) = catch.dyn_into::<Function>() {
+                        let _ = catch.call1(&promise, &on_rejected);
+                    }
+                }
+            }
+            Err(error) => {
+                let _ = reject.call1(&JsValue::NULL, &error);
+            }
+        }
+    }))
+}
+
+/// Take over durable storage once the owning tab has gone.
+///
+/// The hydrate filter is the same rule `ready` uses: a durable value must not
+/// overwrite a live one. Here that means this tab's own work — the whole
+/// reason it kept mirroring while it waited — outranks what the departed tab
+/// left behind, and everything this tab never touched is adopted from the
+/// store.
+async fn promote_to_owner(volume: MirroredVolume) -> Result<(), JsValue> {
+    if PERSISTENT.with(Cell::get) {
+        return Ok(());
+    }
+    if !volume.is_mirroring() {
+        // The cap was hit while waiting; the queue this would flush is gone.
+        return Ok(());
+    }
+    let database = open_database().await?;
+    let stored = read_all(&database).await?;
+    let entries = stored
+        .into_iter()
+        .filter(|(key, _)| !volume.contains(key))
+        .collect::<Vec<_>>();
+    volume.hydrate(entries);
+    DATABASE_HANDLE.with(|slot| *slot.borrow_mut() = Some(database));
+    PERSISTENT.with(|flag| flag.set(true));
+    NOT_OWNER.with(|slot| *slot.borrow_mut() = None);
+    crate::install_recovery_journal();
+    crate::install_recent_documents();
+    schedule_flush();
+    web_sys::console::info_1(&JsValue::from_str(
+        "opendoc: this tab now owns durable storage; work held in memory is being written",
+    ));
+    Ok(())
+}
+
+/// Queue the blocking lock request that promotes this tab when the owner exits.
+fn wait_to_become_owner(locks: &JsValue, volume: MirroredVolume) {
+    let Ok(promise) = request_volume_lock(locks, false) else {
+        return;
+    };
+    spawn_local(async move {
+        if JsFuture::from(promise).await.is_err() {
+            return;
+        }
+        if let Err(error) = promote_to_owner(volume).await {
+            let message = describe(&error);
+            web_sys::console::warn_1(&JsValue::from_str(&format!(
+                "opendoc: could not take over durable storage: {message}"
+            )));
+            LAST_ERROR.with(|slot| *slot.borrow_mut() = Some(message));
+        }
+    });
 }
 
 async fn open_database() -> Result<IdbDatabase, JsValue> {
@@ -231,6 +418,21 @@ pub(crate) fn schedule_flush() {
         return;
     };
     let Some(database) = DATABASE_HANDLE.with(|slot| slot.borrow().clone()) else {
+        // A tab waiting for the volume lock has no handle yet and keeps
+        // mirroring so that a promotion has something to write. That queue is
+        // unbounded work nobody may ever drain, so it is capped, and hitting
+        // the cap is reported rather than absorbed.
+        if volume.is_mirroring()
+            && NOT_OWNER.with(|slot| slot.borrow().is_some())
+            && volume.pending_bytes() > WAITING_PENDING_BYTES_CAP
+        {
+            volume.disable_mirroring();
+            let message = "too much unsaved work accumulated while another tab owned storage; \
+                           this tab can no longer be made durable"
+                .to_string();
+            web_sys::console::warn_1(&JsValue::from_str(&format!("opendoc: {message}")));
+            LAST_ERROR.with(|slot| *slot.borrow_mut() = Some(message));
+        }
         return;
     };
     if volume.pending_len() == 0 || FLUSHING.with(Cell::get) {
@@ -281,6 +483,9 @@ fn stats(persistent: bool, entries: usize, recovery_sessions: usize) -> JsValue 
         "recoverySessions",
         JsValue::from_f64(recovery_sessions as f64),
     );
+    if let Some(reason) = NOT_OWNER.with(|slot| slot.borrow().clone()) {
+        set("notOwner", JsValue::from_str(&reason));
+    }
     if let Some(error) = LAST_ERROR.with(|slot| slot.borrow().clone()) {
         set("error", JsValue::from_str(&error));
     }
@@ -315,6 +520,39 @@ pub(crate) async fn ready() -> Result<JsValue, JsValue> {
         }
     };
 
+    // Whoever holds the lock owns the object store. A second tab that skipped
+    // this would hydrate its own view, never see this one's writes again, and
+    // flush over them — `RECENT_DOCUMENTS_KEY` is one key for the origin, so
+    // its recents list would simply replace this tab's.
+    match lock_manager() {
+        Some(locks) => {
+            let granted = JsFuture::from(request_volume_lock(&locks, true)?).await?;
+            if granted != JsValue::TRUE {
+                let reason = "another tab owns durable storage for this site".to_string();
+                web_sys::console::warn_1(&JsValue::from_str(&format!(
+                    "opendoc: {reason}; work in this tab stays in memory until that tab closes"
+                )));
+                NOT_OWNER.with(|slot| *slot.borrow_mut() = Some(reason));
+                // Keep mirroring: the queue is exactly what gets written if
+                // the owner closes and this tab is promoted.
+                wait_to_become_owner(&locks, volume.clone());
+                return Ok(stats(false, volume.len(), 0));
+            }
+        }
+        None => {
+            // No arbitration available. Carrying on is what this build did
+            // before the lock existed, and it is still the best available
+            // behaviour for a single tab — but a second tab will clobber, and
+            // that is now said rather than left to be discovered.
+            let reason =
+                "this runtime has no Web Locks, so a second tab would overwrite this one's \
+                 storage"
+                    .to_string();
+            web_sys::console::warn_1(&JsValue::from_str(&format!("opendoc: {reason}")));
+            NOT_OWNER.with(|slot| *slot.borrow_mut() = Some(reason));
+        }
+    }
+
     let stored = read_all(&database).await?;
     // A command dispatched before hydration finished has already written to
     // the volume; a durable value must not overwrite a live one.
@@ -328,6 +566,7 @@ pub(crate) async fn ready() -> Result<JsValue, JsValue> {
     PERSISTENT.with(|flag| flag.set(true));
 
     let sessions = crate::install_recovery_journal();
+    crate::install_recent_documents();
     schedule_flush();
     Ok(stats(true, volume.len(), sessions))
 }
@@ -352,6 +591,9 @@ pub(crate) fn status() -> JsValue {
         JsValue::from_f64(volume.pending_bytes() as f64),
     );
     set("flushing", JsValue::from_bool(FLUSHING.with(Cell::get)));
+    if let Some(reason) = NOT_OWNER.with(|slot| slot.borrow().clone()) {
+        set("notOwner", JsValue::from_str(&reason));
+    }
     if let Some(error) = LAST_ERROR.with(|slot| slot.borrow().clone()) {
         set("error", JsValue::from_str(&error));
     }

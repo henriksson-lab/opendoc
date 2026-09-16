@@ -42,6 +42,52 @@ fn minimal_document_is_valid() {
 }
 
 #[test]
+fn horizontal_rule_is_content_free_structural_block() {
+    let mut doc = Document::new("Rules");
+    doc.blocks.push(Block {
+        id: StableId::new("block"),
+        kind: BlockKind::HorizontalRule,
+        content: Vec::new(),
+        properties: BlockProperties::default(),
+    });
+    doc.validate().unwrap();
+    doc.blocks[0].content.push(Inline::text("not allowed"));
+    assert!(matches!(
+        doc.validate(),
+        Err(ModelError::InvalidDocument(
+            "horizontal rule cannot contain inline content"
+        ))
+    ));
+}
+
+#[test]
+fn table_of_contents_is_content_free_and_has_a_bounded_heading_scope() {
+    let mut doc = Document::new("Contents");
+    doc.blocks.push(Block {
+        id: StableId::new("block"),
+        kind: BlockKind::TableOfContents { max_level: 3 },
+        content: Vec::new(),
+        properties: BlockProperties::default(),
+    });
+    doc.validate().unwrap();
+    doc.blocks[0].content.push(Inline::text("stale entry"));
+    assert!(matches!(
+        doc.validate(),
+        Err(ModelError::InvalidDocument(
+            "table of contents cannot contain inline content"
+        ))
+    ));
+    doc.blocks[0].content.clear();
+    doc.blocks[0].kind = BlockKind::TableOfContents { max_level: 7 };
+    assert!(matches!(
+        doc.validate(),
+        Err(ModelError::InvalidDocument(
+            "table of contents max level is outside 1..=6"
+        ))
+    ));
+}
+
+#[test]
 fn warning_records_require_auditable_payloads() {
     let mut doc = Document::new("Warnings");
     doc.blocks.push(Block::paragraph("body"));
@@ -207,8 +253,11 @@ fn source_model_rejects_empty_stable_ids_after_decode() {
         id: StableId::parse("table-1").unwrap(),
         kind: BlockKind::Table {
             columns: vec![TableColumn::auto()],
+            properties: Default::default(),
             rows: vec![TableRow {
                 id: StableId(String::new()),
+                height: None,
+                header: false,
                 cells: vec![TableCell {
                     id: StableId::parse("cell-1").unwrap(),
                     span: CellSpan::SINGLE,

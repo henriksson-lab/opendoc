@@ -39,7 +39,7 @@ pub(crate) fn render_text_content(text: &str, out: &mut String) {
 pub(crate) fn render_checkbox(block_id: &str, checked: bool, out: &mut String) {
     let _ = write!(
         out,
-        "<span class=\"doc-checkbox\" contenteditable=\"false\" data-action=\"toggle-checklist-item\" data-checklist-block-id=\"{}\" data-checked=\"{checked}\"><input type=\"checkbox\" tabindex=\"-1\" aria-label=\"Done\"{}></span>",
+        "<span class=\"doc-checkbox\" contenteditable=\"false\" tabindex=\"0\" role=\"checkbox\" aria-checked=\"{checked}\" aria-label=\"Done\" data-action=\"toggle-checklist-item\" data-checklist-block-id=\"{}\" data-checked=\"{checked}\"><input type=\"checkbox\" tabindex=\"-1\" aria-hidden=\"true\"{}></span>",
         attr(block_id),
         if checked { " checked" } else { "" }
     );

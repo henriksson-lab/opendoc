@@ -4,20 +4,22 @@ use crate::error::StoreError;
 use crate::keys::{
     blob_signature_path, candidate_manifest_from_path, clean_key_segment, doi_lookup_path,
     lookup_record_matches_doi_path, lookup_record_matches_index_path, tombstone_object_from_path,
-    tombstone_path, uuid_lookup_path, version_label_path,
+    tombstone_path, uuid_lookup_path, version_coverage_path, version_label_path,
+    version_signature_path, version_signature_prefix,
 };
 use crate::object_store::{ObjectStore, ObjectStoreLayout};
 use crate::repository_types::{
     BlobDependencyStatus, CandidateAdvance, CandidateHeadEntries, CandidateHeadProblem,
     CandidateHeadStatus, CandidateMergePlan, CandidateMergePlans, CandidateReconciliation,
     CandidateResolution, CandidateStatus, CommitOutcome, LookupScan, LookupScanProblem,
-    ManifestDependencyAudit, ObjectDependencyStatus, TombstoneScan, TombstoneScanProblem,
-    VersionEntry, VersionHistory, VersionHistoryProblem, VERSION_HISTORY_TRAVERSAL_LIMIT,
+    ManifestChainAudit, ManifestChainProblem, ManifestDependencyAudit, ObjectDependencyStatus,
+    SignedVersion, TombstoneScan, TombstoneScanProblem, VersionEntry, VersionHistory,
+    VersionHistoryProblem, VERSION_HISTORY_TRAVERSAL_LIMIT,
 };
 use opendoc_core::{digest_bytes, HashRef};
 use opendoc_format::{
     decode_record, encode_record, BranchHeadRecord, LookupRecord, ManifestRecord, SignatureRecord,
-    TombstoneRecord, VersionLabelRecord,
+    TombstoneRecord, VersionCoverageRecord, VersionLabelRecord,
 };
 use std::collections::BTreeSet;
 
@@ -863,6 +865,212 @@ impl<S: ObjectStore> Repository<S> {
             cursor = parent;
         }
         history
+    }
+
+    /// Store the coverage record a version signature is taken over.
+    ///
+    /// Derived from the manifest, so this writes the same bytes every time;
+    /// it exists so that a signed version's claim about its own ancestry
+    /// outlives the manifest itself.
+    pub fn write_version_coverage(
+        &self,
+        coverage: &VersionCoverageRecord,
+    ) -> Result<String, StoreError> {
+        let bytes = coverage
+            .signing_payload()
+            .map_err(|err| StoreError::Format(err.to_string()))?;
+        let path = version_coverage_path(&coverage.manifest);
+        self.store.put_named(&path, &bytes)?;
+        Ok(path)
+    }
+
+    pub fn read_version_coverage(
+        &self,
+        manifest: &HashRef,
+    ) -> Result<Option<VersionCoverageRecord>, StoreError> {
+        let Some(bytes) = self.store.get_named(&version_coverage_path(manifest))? else {
+            return Ok(None);
+        };
+        let record = VersionCoverageRecord::from_signing_payload(&bytes)
+            .map_err(|err| StoreError::Format(err.to_string()))?;
+        if &record.manifest != manifest {
+            return Err(StoreError::HashMismatch);
+        }
+        Ok(Some(record))
+    }
+
+    /// Write a version signature and the coverage record it is taken over.
+    ///
+    /// The two are written together because a signature whose payload cannot
+    /// be reconstructed is unverifiable, and the coverage record is the only
+    /// stored form of that payload.
+    pub fn write_version_signature(
+        &self,
+        coverage: &VersionCoverageRecord,
+        record: &SignatureRecord,
+    ) -> Result<String, StoreError> {
+        record
+            .validate()
+            .map_err(|err| StoreError::Format(err.to_string()))?;
+        if record.target != coverage.manifest {
+            return Err(StoreError::HashMismatch);
+        }
+        self.write_version_coverage(coverage)?;
+        let path = version_signature_path(&coverage.manifest, &record.signer)?;
+        self.store.put_named(&path, &encode_record(record))?;
+        Ok(path)
+    }
+
+    /// Every version signature stored over `manifest`, ordered by path so two
+    /// readers see the same order.
+    pub fn read_version_signatures(
+        &self,
+        manifest: &HashRef,
+    ) -> Result<Vec<SignatureRecord>, StoreError> {
+        // `list_prefix` reports paths relative to the prefix, as
+        // `list_candidate_head_entries` does; rejoin before reading.
+        let prefix = version_signature_prefix(manifest);
+        let mut paths = self.store.list_prefix(&prefix)?;
+        paths.sort();
+        let mut records = Vec::new();
+        for path in paths {
+            if !path.ends_with(".vsig") {
+                continue;
+            }
+            let Some(bytes) = self.store.get_named(&format!("{prefix}/{path}"))? else {
+                continue;
+            };
+            let record: SignatureRecord =
+                decode_record(&bytes).map_err(|err| StoreError::Format(err.to_string()))?;
+            record
+                .validate()
+                .map_err(|err| StoreError::Format(err.to_string()))?;
+            if &record.target != manifest {
+                return Err(StoreError::HashMismatch);
+            }
+            records.push(record);
+        }
+        Ok(records)
+    }
+
+    /// The signed coverage of `manifest` together with its signatures, or
+    /// `None` when this version was never signed.
+    pub fn read_signed_version(
+        &self,
+        manifest: &HashRef,
+    ) -> Result<Option<SignedVersion>, StoreError> {
+        let Some(coverage) = self.read_version_coverage(manifest)? else {
+            return Ok(None);
+        };
+        let signatures = self.read_version_signatures(manifest)?;
+        if signatures.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(SignedVersion {
+            coverage,
+            signatures,
+        }))
+    }
+
+    /// Walk the ancestry a *signed* version named and report what this
+    /// repository still holds of it.
+    ///
+    /// The signed coverage record is the authority, not the branch head: that
+    /// is what lets this detect truncation. Erase every ancestor manifest and
+    /// the head still verifies against its own snapshot, but the coverage
+    /// record still names a parent, and this walk reports it missing by hash.
+    ///
+    /// Like [`Repository::list_versions`], this never fails on a missing or
+    /// unreadable object — ADR 0003 makes those soft. They land in
+    /// [`ManifestChainAudit::problems`].
+    pub fn audit_manifest_chain(
+        &self,
+        coverage: &VersionCoverageRecord,
+    ) -> Result<ManifestChainAudit, StoreError> {
+        let mut audit = ManifestChainAudit {
+            signed_manifest: coverage.manifest.clone(),
+            chain: Vec::new(),
+            reaches_root: false,
+            problems: Vec::new(),
+        };
+        // No cycle guard: a parent link is the content hash of the parent's
+        // bytes, so a cycle would need a SHA-256 preimage, and `read_manifest`
+        // refuses bytes that do not hash to the name they were fetched under.
+        // The traversal limit alone bounds the walk, and unlike a cycle it is
+        // reachable, so it is the only stop condition here.
+        let mut visited = 0usize;
+        let mut cursor = Some((coverage.manifest.clone(), None));
+        while let Some((hash, referenced_by)) = cursor {
+            visited += 1;
+            if visited > VERSION_HISTORY_TRAVERSAL_LIMIT {
+                audit
+                    .problems
+                    .push(ManifestChainProblem::TraversalLimit { manifest: hash });
+                break;
+            }
+            let manifest = match self.read_manifest(&hash) {
+                Ok(Some(manifest)) => manifest,
+                Ok(None) => {
+                    audit.problems.push(ManifestChainProblem::ManifestMissing {
+                        manifest: hash,
+                        referenced_by,
+                    });
+                    break;
+                }
+                Err(err) => {
+                    audit
+                        .problems
+                        .push(ManifestChainProblem::ManifestUnreadable {
+                            manifest: hash,
+                            reason: err.to_string(),
+                        });
+                    break;
+                }
+            };
+            if manifest.document_uuid != coverage.document_uuid
+                || manifest.branch != coverage.branch
+            {
+                audit.problems.push(ManifestChainProblem::WrongDocument {
+                    manifest: hash.clone(),
+                    document_uuid: manifest.document_uuid.clone(),
+                    branch: manifest.branch.clone(),
+                });
+                break;
+            }
+            if !self.store.exists(&manifest.snapshot)? {
+                audit.problems.push(ManifestChainProblem::SnapshotMissing {
+                    manifest: hash.clone(),
+                    snapshot: manifest.snapshot.clone(),
+                });
+            }
+            for segment in &manifest.operation_segments {
+                if !self.store.exists(segment)? {
+                    audit
+                        .problems
+                        .push(ManifestChainProblem::OperationSegmentMissing {
+                            manifest: hash.clone(),
+                            segment: segment.clone(),
+                        });
+                }
+            }
+            for blob in &manifest.blobs {
+                if !self.store.exists(blob)? {
+                    audit.problems.push(ManifestChainProblem::BlobMissing {
+                        manifest: hash.clone(),
+                        blob: blob.clone(),
+                    });
+                }
+            }
+            audit.chain.push(hash.clone());
+            match manifest.parent.clone() {
+                Some(parent) => cursor = Some((parent, Some(hash))),
+                None => {
+                    audit.reaches_root = true;
+                    cursor = None;
+                }
+            }
+        }
+        Ok(audit)
     }
 
     /// Read a signature object referenced by a manifest's `signatures` list.

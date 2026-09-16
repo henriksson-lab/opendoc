@@ -89,6 +89,43 @@ fn imports_docx_xml_source_with_structure_and_marks_without_external_converter()
 }
 
 #[test]
+fn imports_only_whole_paragraph_docx_bookmarks_as_stable_block_targets() {
+    let bytes = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p>
+      <w:bookmarkStart w:id="1" w:name="Intro"/>
+      <w:r><w:t>whole paragraph</w:t></w:r>
+      <w:bookmarkEnd w:id="1"/>
+    </w:p>
+    <w:p>
+      <w:r><w:t>before </w:t></w:r>
+      <w:bookmarkStart w:id="2" w:name="CharacterRange"/>
+      <w:r><w:t>selected</w:t></w:r>
+      <w:bookmarkEnd w:id="2"/>
+      <w:r><w:t> after</w:t></w:r>
+    </w:p>
+  </w:body>
+</w:document>"#;
+
+    let report = import_docx_bytes("Bookmarks", bytes).unwrap();
+    assert_eq!(report.document.bookmarks.len(), 1);
+    let bookmark = &report.document.bookmarks[0];
+    assert_eq!(bookmark.name, "Intro");
+    assert_eq!(bookmark.block_id, report.document.blocks[0].id);
+    assert!(report
+        .warnings
+        .iter()
+        .any(|warning| warning.code == "docx-bookmark-range-unrepresentable"));
+    assert!(!report
+        .document
+        .bookmarks
+        .iter()
+        .any(|bookmark| bookmark.name == "CharacterRange"));
+    assert!(report.document.validate().is_ok());
+}
+
+#[test]
 fn imports_docx_office_math_as_equation_source_without_external_converter() {
     let path = std::env::temp_dir().join(format!(
         "opendoc-import-docx-math-{}.docx",

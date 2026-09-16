@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use super::address::{formula_sheet_title_prefix, number_to_column, trim_number};
 use super::format::{self, Locale};
-use super::formula::{parse_reference, Evaluator, Expr, ResolvedRange};
+use super::formula::{parse_formula_source, parse_reference, Evaluator, Expr, ResolvedRange};
 use super::lookup::{
     lookup_function, match_function, paired_numbers, percentrank_function, rank_function,
     vh_lookup, xlookup,
@@ -788,6 +788,18 @@ fn call_values(ev: &mut Evaluator<'_>, name: &str, values: Vec<FormulaValue>) ->
             Ok(FormulaValue::Bool(result.to_number()? != 0.0))
         }
         _ => {
+            // Resolve the name before coercing the arguments. `collect_numbers`
+            // turns a text argument into `#VALUE!`, so `=NOSUCHFN("a")` used to
+            // report a value problem for a function that does not exist. The
+            // probe asks the numeric core the same question it would answer at
+            // the end — only its unknown-name arm returns `#NAME?` — so the two
+            // cannot drift apart.
+            if evaluate_function(name, Vec::new())
+                .err()
+                .is_some_and(|message| message.starts_with("#NAME"))
+            {
+                return Err(FormulaError::Name);
+            }
             let numbers = collect_numbers(name, &values)?;
             match evaluate_function(name, numbers) {
                 Ok(value) if value.is_finite() => Ok(if returns_bool(name) {
@@ -846,6 +858,13 @@ fn collect_numbers(name: &str, values: &[FormulaValue]) -> Result<Vec<f64>, Form
                 for item in &array.values {
                     match item {
                         FormulaValue::Number(number) => numbers.push(*number),
+                        // COUNT counts the numbers it finds; an error cell
+                        // inside a range is simply not a number, so it is
+                        // skipped rather than propagated. Every other
+                        // aggregate propagates it, and a *direct* error
+                        // argument (`=COUNT(1/0)`) still does, because that
+                        // falls through to the scalar branch below.
+                        FormulaValue::Error(_) if name == "COUNT" => {}
                         FormulaValue::Error(error) => return Err(*error),
                         _ => {}
                     }
@@ -1215,6 +1234,36 @@ fn address_function(ev: &mut Evaluator<'_>, args: &[Expr]) -> FResult {
     }))
 }
 
+/// Whether a cell's own source calls `SUBTOTAL` anywhere in its formula.
+///
+/// The cheap substring test comes first so that a `SUBTOTAL` over a large
+/// range does not re-parse every formula it covers; only a cell whose
+/// source mentions the name at all is parsed to confirm it is a real call
+/// rather than text or a name that contains it.
+fn cell_is_subtotal(ev: &Evaluator<'_>, sheet: usize, col: u32, row: u32) -> bool {
+    let Some(cell) = ev.env.cell_meta(sheet, col, row) else {
+        return false;
+    };
+    if cell.user_kind != "formula" {
+        return false;
+    }
+    if !cell.user_value.to_ascii_uppercase().contains("SUBTOTAL") {
+        return false;
+    }
+    let Ok(expr) = parse_formula_source(&cell.user_value) else {
+        return false;
+    };
+    let mut found = false;
+    expr.visit_refs(&mut |node| {
+        if let Expr::Call { name, .. } = node {
+            if name.eq_ignore_ascii_case("SUBTOTAL") {
+                found = true;
+            }
+        }
+    });
+    found
+}
+
 fn subtotal(ev: &mut Evaluator<'_>, args: &[Expr]) -> FResult {
     arity(args, 2, usize::MAX)?;
     let code = ev.eval_number(&args[0])?.trunc() as i32;
@@ -1223,6 +1272,11 @@ fn subtotal(ev: &mut Evaluator<'_>, args: &[Expr]) -> FResult {
         101..=111 => (code - 100, true),
         _ => return Err(FormulaError::Value),
     };
+    // SUBTOTAL is the function it delegates to, error handling included:
+    // COUNT (2) skips an error cell because it is not a number, COUNTA (3)
+    // counts it because it is not blank, and every other aggregate
+    // propagates it the way SUM would.
+    let errors_propagate = !matches!(function, 2 | 3);
     let mut numbers = Vec::new();
     let mut non_blank = 0.0;
     for arg in &args[1..] {
@@ -1231,12 +1285,21 @@ fn subtotal(ev: &mut Evaluator<'_>, args: &[Expr]) -> FResult {
             if skip_hidden && ev.env.row_hidden(range.sheet, row) {
                 continue;
             }
+            // A cell that is itself a SUBTOTAL is skipped. Not doing this
+            // double-counts every group total the range happens to span,
+            // which is the one thing SUBTOTAL exists to avoid: a grand
+            // total written as `=SUBTOTAL(9, B2:B9)` over a column that
+            // already holds group subtotals must report the groups once.
+            if cell_is_subtotal(ev, range.sheet, col, row) {
+                continue;
+            }
             match ev.env.cell_value(range.sheet, col, row) {
                 FormulaValue::Number(value) => {
                     numbers.push(value);
                     non_blank += 1.0;
                 }
-                FormulaValue::Error(error) => return Err(error),
+                FormulaValue::Error(error) if errors_propagate => return Err(error),
+                FormulaValue::Error(_) => non_blank += 1.0,
                 FormulaValue::Blank => {}
                 _ => non_blank += 1.0,
             }

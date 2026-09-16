@@ -3,7 +3,8 @@
 use crate::error::ImportError;
 use crate::json::parse_imported_stable_id;
 use opendoc_core::{
-    Block, BlockKind, BlockProperties, Equation, EquationSourceFormat, Inline, StableId,
+    Block, BlockKind, BlockProperties, Equation, EquationSourceFormat, ImageLayout, Inline,
+    StableId,
 };
 use serde_json::Value;
 
@@ -126,12 +127,20 @@ pub(crate) fn import_opendoc_image(image: &Value) -> Result<Block, ImportError> 
         .map(parse_imported_stable_id)
         .transpose()?
         .unwrap_or_else(|| StableId::new("block"));
+    let layout = image
+        .get("layout")
+        .map(|layout| serde_json::from_value::<ImageLayout>(layout.clone()))
+        .transpose()
+        .map_err(|error| {
+            ImportError::UnsupportedStructure(format!("malformed OpenDoc image layout: {error}"))
+        })?
+        .unwrap_or_default();
     Ok(Block {
         id,
         kind: BlockKind::Image {
             blob_hash,
             alt_text,
-            layout: Default::default(),
+            layout,
         },
         content: Vec::new(),
         properties: BlockProperties::default(),

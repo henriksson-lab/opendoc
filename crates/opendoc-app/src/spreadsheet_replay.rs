@@ -572,6 +572,19 @@ pub(crate) fn apply_spreadsheet_envelopes(
                     ),
                 }
             }
+            // An import replaces the workbook outright. It carries its
+            // result rather than the file it came from, so replay lands on
+            // exactly what the user saw and does not re-run the importer.
+            Some(AppSpreadsheetOperation::ReplaceWorkbook {
+                workbook: replacement,
+            }) => match replacement.validate_source() {
+                Ok(()) => *workbook = (**replacement).clone(),
+                Err(err) => push_spreadsheet_warning(
+                    &mut warnings,
+                    "invalid-spreadsheet-source",
+                    format!("spreadsheet workbook replacement was ignored: {err}"),
+                ),
+            },
             Some(AppSpreadsheetOperation::MergeCells { sheet_id, range }) => {
                 let sheet_id = replay_sheet_id!(sheet_id, "merge");
                 apply_spreadsheet_result(
@@ -661,6 +674,68 @@ pub(crate) fn apply_spreadsheet_envelopes(
                     format!("spreadsheet filter {sheet_id}!{range} was ignored"),
                     |candidate| candidate.set_basic_filter(&sheet_id, range),
                 );
+            }
+            Some(AppSpreadsheetOperation::SetPrintArea { sheet_id, range }) => {
+                let sheet_id = replay_sheet_id!(sheet_id, "print area set");
+                apply_spreadsheet_result(
+                    workbook,
+                    &mut warnings,
+                    "missing-spreadsheet-sheet",
+                    format!(
+                        "spreadsheet print area {sheet_id}!{range} was ignored because the sheet was missing"
+                    ),
+                    "invalid-spreadsheet-print-area",
+                    format!("spreadsheet print area {sheet_id}!{range} was ignored"),
+                    |candidate| candidate.set_print_area(&sheet_id, Some(range)),
+                );
+            }
+            Some(AppSpreadsheetOperation::ClearPrintArea { sheet_id, range }) => {
+                let sheet_id = replay_sheet_id!(sheet_id, "print area clear");
+                let Some(sheet) = workbook.sheets.iter().find(|sheet| sheet.id == sheet_id) else {
+                    push_spreadsheet_warning(
+                        &mut warnings,
+                        "missing-spreadsheet-sheet",
+                        format!(
+                            "spreadsheet print-area clear for {sheet_id} was ignored because the sheet was missing"
+                        ),
+                    );
+                    continue;
+                };
+                if sheet.print_settings.print_area.as_deref() != Some(range) {
+                    push_spreadsheet_warning(
+                        &mut warnings,
+                        "spreadsheet-print-area-conflict",
+                        format!(
+                            "spreadsheet print-area clear for {sheet_id}!{range} was ignored because the area changed"
+                        ),
+                    );
+                    continue;
+                }
+                if let Some(Err(err)) = workbook.set_print_area(&sheet_id, None) {
+                    push_spreadsheet_warning(
+                        &mut warnings,
+                        "invalid-spreadsheet-print-area",
+                        format!("spreadsheet print-area clear for {sheet_id}!{range} was ignored: {err}"),
+                    );
+                }
+            }
+            Some(AppSpreadsheetOperation::SetPrintOrientation {
+                sheet_id,
+                orientation,
+            }) => {
+                let sheet_id = replay_sheet_id!(sheet_id, "print orientation set");
+                if workbook
+                    .set_print_orientation(&sheet_id, *orientation)
+                    .is_none()
+                {
+                    push_spreadsheet_warning(
+                        &mut warnings,
+                        "missing-spreadsheet-sheet",
+                        format!(
+                            "spreadsheet print orientation for {sheet_id} was ignored because the sheet was missing"
+                        ),
+                    );
+                }
             }
             Some(AppSpreadsheetOperation::SetBasicFilterOptions {
                 sheet_id,
@@ -894,15 +969,18 @@ pub(crate) fn apply_spreadsheet_envelopes(
                         ) {
                             continue;
                         }
-                        if workbook
-                            .set_cell_in_sheet(&sheet_id, &address, value.clone())
-                            .is_none()
+                        // A replayed edit is refused by the same rules a live
+                        // one is — a strict validation, or a merge that has
+                        // since covered the cell — and a refusal is a warning
+                        // rather than an abort, like every other replay step.
+                        if let Err(err) =
+                            workbook.set_cell_in_sheet(&sheet_id, &address, value.clone())
                         {
                             push_spreadsheet_warning(
                                 &mut warnings,
-                                "missing-spreadsheet-sheet",
+                                "refused-spreadsheet-cell-edit",
                                 format!(
-                                    "spreadsheet cell edit {sheet_id}!{address} was ignored because the sheet was missing"
+                                    "spreadsheet cell edit {sheet_id}!{address} was ignored: {err}"
                                 ),
                             );
                         }
@@ -1009,6 +1087,66 @@ pub(crate) fn apply_spreadsheet_envelopes(
                         &mut warnings,
                         "invalid-spreadsheet-column",
                         format!("spreadsheet column width {sheet_id}!{column} was ignored: {err}"),
+                    ),
+                }
+            }
+            Some(AppSpreadsheetOperation::SetRowHidden {
+                sheet_id,
+                row,
+                hidden,
+            }) => {
+                let sheet_id = replay_sheet_id!(sheet_id, "row hidden set");
+                match normalize_row_label(row) {
+                    Ok(row) => apply_spreadsheet_result(
+                        workbook,
+                        &mut warnings,
+                        "missing-spreadsheet-row",
+                        format!(
+                            "spreadsheet row visibility {sheet_id}!{row} was ignored because the row was missing"
+                        ),
+                        "invalid-spreadsheet-row-hidden",
+                        format!("spreadsheet row visibility {sheet_id}!{row} was ignored"),
+                        |candidate| {
+                            candidate
+                                .set_row_hidden(&sheet_id, &row, *hidden)
+                                .map(Ok)
+                        },
+                    ),
+                    Err(err) => push_spreadsheet_warning(
+                        &mut warnings,
+                        "invalid-spreadsheet-row",
+                        format!("spreadsheet row visibility {sheet_id}!{row} was ignored: {err}"),
+                    ),
+                }
+            }
+            Some(AppSpreadsheetOperation::SetColumnHidden {
+                sheet_id,
+                column,
+                hidden,
+            }) => {
+                let sheet_id = replay_sheet_id!(sheet_id, "column hidden set");
+                match normalize_column_label(column) {
+                    Ok(column) => apply_spreadsheet_result(
+                        workbook,
+                        &mut warnings,
+                        "missing-spreadsheet-column",
+                        format!(
+                            "spreadsheet column visibility {sheet_id}!{column} was ignored because the column was missing"
+                        ),
+                        "invalid-spreadsheet-column-hidden",
+                        format!("spreadsheet column visibility {sheet_id}!{column} was ignored"),
+                        |candidate| {
+                            candidate
+                                .set_column_hidden(&sheet_id, &column, *hidden)
+                                .map(Ok)
+                        },
+                    ),
+                    Err(err) => push_spreadsheet_warning(
+                        &mut warnings,
+                        "invalid-spreadsheet-column",
+                        format!(
+                            "spreadsheet column visibility {sheet_id}!{column} was ignored: {err}"
+                        ),
                     ),
                 }
             }
@@ -1229,24 +1367,43 @@ pub(crate) fn apply_spreadsheet_envelopes(
     Ok(warnings)
 }
 
+/// Replay order for one spreadsheet envelope.
+///
+/// `(actor, seq)` as a **typed pair**, not `format!("{actor}:{seq}")`. The
+/// string form compares the sequence number lexicographically, so
+/// `"alice:10" < "alice:2"`: an actor's tenth edit replayed before their
+/// second, and a cell ended up holding the value it was given *first*. That
+/// is the same class of bug ADR 0007 records for documents, where an
+/// operation's ordinal has to be ordered as a number.
+///
+/// Ordering actor-major is *not* the other half of that bug. It is exactly
+/// what ADR 0007 specifies for an operation with no causal context: with no
+/// context anywhere, its topological sort emits "precisely the old
+/// `BTreeMap<(actor, seq)>` order", and a spreadsheet envelope carries no
+/// `CausalContext` to sort by. Interleaving two actors properly means giving
+/// spreadsheet operations a context, not picking a different string.
+fn spreadsheet_replay_order(envelope: &AppOperationEnvelope) -> (String, u64) {
+    (envelope.record.actor.clone(), envelope.record.seq)
+}
+
 pub(crate) fn merge_spreadsheet_envelope_streams(
     mut base: AppSpreadsheetWorkbook,
     streams: &[&[AppOperationEnvelope]],
 ) -> Result<(AppSpreadsheetWorkbook, Vec<AppWarning>), AppApiError> {
-    let mut ordered: BTreeMap<String, &AppOperationEnvelope> = BTreeMap::new();
+    let mut ordered: BTreeMap<(String, u64), &AppOperationEnvelope> = BTreeMap::new();
     let mut warnings = Vec::new();
     for stream in streams {
         for envelope in *stream {
             if envelope.spreadsheet.is_none() {
                 continue;
             }
-            match ordered.get(envelope_id_key(envelope).as_str()) {
+            match ordered.get(&spreadsheet_replay_order(envelope)) {
                 Some(existing) if envelope_payload_matches(existing, envelope) => {}
                 Some(existing) => {
                     let current_key = spreadsheet_merge_payload_sort_key(envelope);
                     let existing_key = spreadsheet_merge_payload_sort_key(existing);
                     if current_key < existing_key {
-                        ordered.insert(envelope_id_key(envelope), envelope);
+                        ordered.insert(spreadsheet_replay_order(envelope), envelope);
                     }
                     push_spreadsheet_warning(
                         &mut warnings,
@@ -1258,7 +1415,7 @@ pub(crate) fn merge_spreadsheet_envelope_streams(
                     );
                 }
                 None => {
-                    ordered.insert(envelope_id_key(envelope), envelope);
+                    ordered.insert(spreadsheet_replay_order(envelope), envelope);
                 }
             }
         }

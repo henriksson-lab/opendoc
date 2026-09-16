@@ -70,6 +70,26 @@ impl AppExport {
         }
     }
 
+    /// An export whose content is *already* base64.
+    ///
+    /// `to_xlsx_base64` encodes on the way out of `opendoc-spreadsheet`, so
+    /// decoding it here only to re-encode it would be two conversions to say
+    /// the same thing. The encoding is still declared, not assumed.
+    pub(crate) fn base64_content(
+        content: impl Into<String>,
+        media_type: &str,
+        file_extension: &str,
+        warnings: Vec<AppWarning>,
+    ) -> Self {
+        Self {
+            content: content.into(),
+            encoding: AppExportEncoding::Base64,
+            media_type: media_type.to_string(),
+            file_extension: file_extension.to_string(),
+            warnings,
+        }
+    }
+
     pub(crate) fn binary(
         bytes: &[u8],
         media_type: &str,

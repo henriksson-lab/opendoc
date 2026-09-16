@@ -39,6 +39,20 @@ pub(crate) fn parse_optional_page_number_field(
     }
 }
 
+/// Reads an insert anchor off the command surface.
+///
+/// `None` or an empty string appends, the literal
+/// [`opendoc_core::InsertPosition::FIRST_KEYWORD`] goes before every sibling,
+/// and anything else is the id of the sibling to follow. The keyword exists
+/// because `None` is already spoken for: it means *append*, and that meaning
+/// is what makes a replayed insert whose anchor was deleted degrade rather
+/// than vanish.
+pub(crate) fn parse_insert_position(
+    anchor: Option<&str>,
+) -> Result<opendoc_core::InsertPosition, AppApiError> {
+    opendoc_core::InsertPosition::parse(anchor).map_err(|err| AppApiError::Format(err.to_string()))
+}
+
 pub(crate) fn parse_length(twips: i32) -> Result<opendoc_core::Length, AppApiError> {
     opendoc_core::Length::from_twips(twips).map_err(|err| AppApiError::Format(err.to_string()))
 }
@@ -49,26 +63,12 @@ pub(crate) fn parse_block_property_key(name: &str) -> Result<BlockPropertyKey, A
 
 /// `"multiple"` counts thousandths of a line, the other two rules count twips.
 /// The unit travels with the rule so a caller cannot send a line count where a
-/// height was meant.
+/// height was meant — and the pairing itself is
+/// [`opendoc_core::LineSpacing::parse`]'s, not a second reading of it here.
 pub(crate) fn parse_line_spacing(
     mode: &str,
     value: i32,
 ) -> Result<opendoc_core::LineSpacing, AppApiError> {
-    match mode.trim() {
-        "multiple" => {
-            let thousandths = u32::try_from(value).map_err(|_| {
-                AppApiError::Format("line spacing multiple is negative".to_string())
-            })?;
-            opendoc_core::LineHeightMultiple::from_thousandths(thousandths)
-                .map(opendoc_core::LineSpacing::Multiple)
-                .map_err(|err| AppApiError::Format(err.to_string()))
-        }
-        "exact" => opendoc_core::LineSpacing::exactly(parse_length(value)?)
-            .map_err(|err| AppApiError::Format(err.to_string())),
-        "at-least" => opendoc_core::LineSpacing::at_least(parse_length(value)?)
-            .map_err(|err| AppApiError::Format(err.to_string())),
-        other => Err(AppApiError::Format(format!(
-            "unknown line spacing rule {other}"
-        ))),
-    }
+    opendoc_core::LineSpacing::parse(mode, value)
+        .map_err(|err| AppApiError::Format(err.to_string()))
 }

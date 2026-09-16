@@ -1,8 +1,9 @@
 //! Style inheritance, heading detection and numbering definitions.
 
 use crate::docx::props::{overlay_para_props, parse_para_props, parse_run_props, RunProps};
+use crate::docx::table::{parse_cell_margins, parse_table_borders, TableBorders, TableDefaults};
 use crate::xml::XmlElement;
-use opendoc_core::BlockProperties;
+use opendoc_core::{BlockProperties, TableCellProperties};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -36,6 +37,16 @@ pub(super) struct StyleRecord {
     run_props: RunProps,
     para_props: BlockProperties,
     para_dropped: Vec<&'static str>,
+    /// `w:style w:type="table"` only: the `w:tblPr` a table that names this
+    /// style inherits. Word states a table style's borders here and nowhere
+    /// else — `TableGrid` *is* a `w:tblBorders` — so a reader that skipped it
+    /// would import every styled Word table borderless.
+    table_borders: TableBorders,
+    table_margins: TableCellProperties,
+    table_dropped: Vec<&'static str>,
+    /// The style carries `w:tblStylePr`: banded rows, a header row, a first
+    /// column. None of it is resolved, so a table using the style says so.
+    table_conditional: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -104,6 +115,19 @@ impl Styles {
                 None
             };
             let para = ppr.map(parse_para_props).unwrap_or_default();
+            let mut table_borders = TableBorders::default();
+            let mut table_margins = TableCellProperties::default();
+            let mut table_dropped: Vec<&'static str> = Vec::new();
+            if kind == "table" {
+                if let Some(tbl_pr) = style.child("tblPr") {
+                    if let Some(borders) = tbl_pr.child("tblBorders") {
+                        parse_table_borders(borders, &mut table_borders, &mut table_dropped);
+                    }
+                    if let Some(margins) = tbl_pr.child("tblCellMar") {
+                        parse_cell_margins(margins, &mut table_margins, &mut table_dropped);
+                    }
+                }
+            }
             by_id.insert(
                 id.to_string(),
                 StyleRecord {
@@ -120,13 +144,41 @@ impl Styles {
                         .unwrap_or_default(),
                     para_props: para.props,
                     para_dropped: para.dropped,
+                    table_borders,
+                    table_margins,
+                    table_dropped,
+                    table_conditional: kind == "table"
+                        && style.children_named("tblStylePr").next().is_some(),
                 },
             );
         }
         Self { by_id }
     }
 
-    pub(super) fn resolve(&self, style_id: &str) -> ResolvedStyle {
+    /// The `w:tblPr` a table naming `style_id` inherits, with the whole
+    /// `w:basedOn` chain resolved outermost-first so the named style wins.
+    ///
+    /// A table naming a style this package does not define inherits nothing:
+    /// there is no conventional-name fallback here the way there is for
+    /// headings, because a style id says nothing about a border.
+    pub(super) fn resolve_table(&self, style_id: &str) -> TableDefaults {
+        let mut defaults = TableDefaults::default();
+        for record in self.chain(style_id).iter().rev() {
+            defaults.borders.overlay(&record.table_borders);
+            for property in record.table_margins.iter() {
+                defaults.margins.set(property);
+            }
+            defaults
+                .dropped
+                .extend(record.table_dropped.iter().copied());
+            defaults.conditional_formatting |= record.table_conditional;
+        }
+        defaults
+    }
+
+    /// The style and everything it is `w:basedOn`, named first. Bounded
+    /// against a cycle and against a chain long enough to be an attack.
+    fn chain(&self, style_id: &str) -> Vec<&StyleRecord> {
         let mut chain: Vec<&StyleRecord> = Vec::new();
         let mut seen = BTreeSet::new();
         let mut current = Some(style_id.trim().to_string());
@@ -140,6 +192,11 @@ impl Styles {
             chain.push(record);
             current = record.based_on.clone();
         }
+        chain
+    }
+
+    pub(super) fn resolve(&self, style_id: &str) -> ResolvedStyle {
+        let chain = self.chain(style_id);
         if chain.is_empty() {
             // Unknown style id (no styles part): fall back to the conventional names.
             return ResolvedStyle {
@@ -179,6 +236,8 @@ impl Styles {
 #[derive(Clone, Debug, Default)]
 pub(super) struct AbstractNum {
     formats: BTreeMap<u8, String>,
+    texts: BTreeMap<u8, String>,
+    starts: BTreeMap<u8, u32>,
     style_link: Option<String>,
 }
 
@@ -186,6 +245,7 @@ pub(super) struct AbstractNum {
 pub(super) struct NumInstance {
     abstract_id: String,
     overrides: BTreeMap<u8, String>,
+    starts: BTreeMap<u8, u32>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -205,6 +265,27 @@ pub(super) fn level_formats(container: &XmlElement) -> BTreeMap<u8, String> {
         .collect()
 }
 
+fn level_texts(container: &XmlElement) -> BTreeMap<u8, String> {
+    container
+        .children_named("lvl")
+        .filter_map(|lvl| {
+            let level = lvl.attr("ilvl")?.trim().parse::<u8>().ok()?;
+            Some((level, lvl.child_val("lvlText")?.trim().to_string()))
+        })
+        .collect()
+}
+
+fn level_starts(container: &XmlElement) -> BTreeMap<u8, u32> {
+    container
+        .children_named("lvl")
+        .filter_map(|lvl| {
+            let level = lvl.attr("ilvl")?.trim().parse::<u8>().ok()?;
+            let start = lvl.child_val("start")?.trim().parse::<u32>().ok()?;
+            (start > 0).then_some((level, start))
+        })
+        .collect()
+}
+
 impl Numbering {
     pub(super) fn parse(root: XmlElement) -> Self {
         let mut numbering = Self::default();
@@ -216,6 +297,8 @@ impl Numbering {
                 id.trim().to_string(),
                 AbstractNum {
                     formats: level_formats(abstract_num),
+                    texts: level_texts(abstract_num),
+                    starts: level_starts(abstract_num),
                     style_link: abstract_num
                         .child_val("numStyleLink")
                         .map(|value| value.trim().to_string()),
@@ -227,15 +310,33 @@ impl Numbering {
                 continue;
             };
             let mut overrides = BTreeMap::new();
+            let mut starts = BTreeMap::new();
             for lvl_override in num.children_named("lvlOverride") {
+                let level = lvl_override
+                    .attr("ilvl")
+                    .and_then(|value| value.trim().parse::<u8>().ok());
+                if let (Some(level), Some(start)) = (
+                    level,
+                    lvl_override
+                        .child_val("startOverride")
+                        .and_then(|value| value.trim().parse::<u32>().ok()),
+                ) {
+                    if start > 0 {
+                        starts.insert(level, start);
+                    }
+                }
                 if let Some(lvl) = lvl_override.child("lvl") {
-                    if let (Some(level), Some(format)) = (
-                        lvl_override
-                            .attr("ilvl")
-                            .and_then(|value| value.trim().parse::<u8>().ok()),
-                        lvl.child_val("numFmt"),
-                    ) {
+                    if let (Some(level), Some(format)) = (level, lvl.child_val("numFmt")) {
                         overrides.insert(level, format.trim().to_string());
+                    }
+                    if let (Some(level), Some(start)) = (
+                        level,
+                        lvl.child_val("start")
+                            .and_then(|value| value.trim().parse::<u32>().ok()),
+                    ) {
+                        if start > 0 {
+                            starts.insert(level, start);
+                        }
                     }
                 }
             }
@@ -248,6 +349,7 @@ impl Numbering {
                         .trim()
                         .to_string(),
                     overrides,
+                    starts,
                 },
             );
         }
@@ -256,6 +358,34 @@ impl Numbering {
 
     fn level_format(&self, styles: &Styles, num_id: &str, level: u8) -> Option<String> {
         self.level_format_inner(styles, num_id, level, 0)
+    }
+
+    /// The first ordinal stated by an instance, falling back to its abstract
+    /// definition.  Instance overrides win for starts as they do for formats.
+    pub(super) fn start(&self, num_id: &str, level: u8) -> Option<u32> {
+        let num = self.nums.get(num_id)?;
+        num.starts.get(&level).copied().or_else(|| {
+            self.abstracts
+                .get(&num.abstract_id)
+                .and_then(|abstract_num| abstract_num.starts.get(&level).copied())
+        })
+    }
+
+    /// The raw Word counter style after instance and style-link resolution.
+    pub(super) fn format(&self, styles: &Styles, num_id: &str, level: u8) -> Option<String> {
+        self.level_format(styles, num_id, level)
+    }
+
+    /// Literal marker text for a bullet level. It is intentionally only a
+    /// raw source observation; callers decide which supported glyphs map to
+    /// durable marker vocabulary.
+    pub(super) fn level_text(&self, num_id: &str, level: u8) -> Option<&str> {
+        let num = self.nums.get(num_id)?;
+        self.abstracts
+            .get(&num.abstract_id)?
+            .texts
+            .get(&level)
+            .map(String::as_str)
     }
 
     fn level_format_inner(

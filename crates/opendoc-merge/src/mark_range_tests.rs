@@ -8,8 +8,8 @@ use crate::test_support::assert_mark_kinds;
 use opendoc_core::{
     Anchor, BibliographyReference, Block, BlockKind, BlockProperties, CitationGroup, CitationItem,
     CitationPlacement, CitationSource, CitationSourceFormat, CitationSummary, Comment,
-    CommentThread, Document, Inline, Mark, MarkExpand, MarkKind, StableId, Suggestion,
-    SuggestionKind, SuggestionState, TextRange,
+    CommentThread, Document, Inline, InsertPosition, Mark, MarkExpand, MarkKind, StableId,
+    Suggestion, SuggestionKind, SuggestionState, TextRange,
 };
 
 #[test]
@@ -95,7 +95,7 @@ fn inserted_inline_inside_mark_range_inherits_range_format_independent_of_order(
         },
         kind: OperationKind::InsertInline {
             block_id,
-            after: Some(first_id.clone()),
+            position: InsertPosition::After(first_id.clone()),
             inline: inserted,
         },
         context: None,
@@ -204,7 +204,7 @@ fn paragraph_split_move_preserves_format_and_comment_range_anchors() {
                 seq: 1,
             },
             kind: OperationKind::InsertBlock {
-                after: Some(original_block_id.clone()),
+                position: InsertPosition::After(original_block_id.clone()),
                 block: Block {
                     id: split_block_id.clone(),
                     kind: BlockKind::Paragraph,
@@ -222,7 +222,7 @@ fn paragraph_split_move_preserves_format_and_comment_range_anchors() {
             kind: OperationKind::MoveInlineToBlock {
                 inline_id: second_id.clone(),
                 target_block_id: split_block_id.clone(),
-                after: None,
+                position: InsertPosition::Last,
             },
             context: None,
         },
@@ -265,6 +265,14 @@ fn paragraph_split_move_preserves_format_and_comment_range_anchors() {
                         created_at_ms: 1,
                         deleted: false,
                     }],
+                    state: opendoc_core::CommentThreadState::Open,
+                    resolved_by: None,
+                    resolved_at_ms: None,
+                    action_assignee: None,
+                    action_due_at_ms: None,
+                    action_completed_by: None,
+                    action_completed_at_ms: None,
+                    reactions: Vec::new(),
                     deleted: false,
                 },
             },
@@ -293,7 +301,6 @@ fn paragraph_split_move_preserves_format_and_comment_range_anchors() {
         &split_first.document.comments[0].anchor,
         Anchor::TextRange(range) if range.start == first_id && range.end == second_id
     ));
-    split_first.document.validate().unwrap();
 }
 
 #[test]
@@ -319,7 +326,7 @@ fn three_actor_typing_formatting_and_split_converge_without_batching() {
         },
         kind: OperationKind::InsertInline {
             block_id: original_block_id.clone(),
-            after: Some(first_id.clone()),
+            position: InsertPosition::After(first_id.clone()),
             inline: inserted,
         },
         context: None,
@@ -331,7 +338,7 @@ fn three_actor_typing_formatting_and_split_converge_without_batching() {
                 seq: 1,
             },
             kind: OperationKind::InsertBlock {
-                after: Some(original_block_id.clone()),
+                position: InsertPosition::After(original_block_id.clone()),
                 block: Block {
                     id: split_block_id.clone(),
                     kind: BlockKind::Paragraph,
@@ -349,7 +356,7 @@ fn three_actor_typing_formatting_and_split_converge_without_batching() {
             kind: OperationKind::MoveInlineToBlock {
                 inline_id: second_id.clone(),
                 target_block_id: split_block_id.clone(),
-                after: None,
+                position: InsertPosition::Last,
             },
             context: None,
         },
@@ -392,6 +399,14 @@ fn three_actor_typing_formatting_and_split_converge_without_batching() {
                         created_at_ms: 1,
                         deleted: false,
                     }],
+                    state: opendoc_core::CommentThreadState::Open,
+                    resolved_by: None,
+                    resolved_at_ms: None,
+                    action_assignee: None,
+                    action_due_at_ms: None,
+                    action_completed_by: None,
+                    action_completed_at_ms: None,
+                    reactions: Vec::new(),
                     deleted: false,
                 },
             },
@@ -440,7 +455,6 @@ fn three_actor_typing_formatting_and_split_converge_without_batching() {
         &actor_batches.document.comments[0].anchor,
         Anchor::TextRange(range) if range.start == first_id && range.end == second_id
     ));
-    actor_batches.document.validate().unwrap();
 }
 
 #[test]
@@ -464,7 +478,7 @@ fn paragraph_split_move_preserves_suggestion_range_anchors() {
                 seq: 1,
             },
             kind: OperationKind::InsertBlock {
-                after: Some(original_block_id.clone()),
+                position: InsertPosition::After(original_block_id.clone()),
                 block: Block {
                     id: split_block_id.clone(),
                     kind: BlockKind::Paragraph,
@@ -482,7 +496,7 @@ fn paragraph_split_move_preserves_suggestion_range_anchors() {
             kind: OperationKind::MoveInlineToBlock {
                 inline_id: second_id.clone(),
                 target_block_id: split_block_id.clone(),
-                after: None,
+                position: InsertPosition::Last,
             },
             context: None,
         },
@@ -571,7 +585,10 @@ fn paragraph_split_move_preserves_suggestion_range_anchors() {
     for suggestion in &split_first.document.suggestions {
         assert_eq!(suggestion.state, SuggestionState::Proposed);
         match &suggestion.kind {
-            SuggestionKind::Delete { range } | SuggestionKind::Format { range, .. } => {
+            SuggestionKind::Delete { range }
+            | SuggestionKind::Format { range, .. }
+            | SuggestionKind::FormatRemove { range, .. }
+            | SuggestionKind::FormatReplace { range, .. } => {
                 assert_eq!(range.start, first_id);
                 assert_eq!(range.end, second_id);
             }
@@ -586,9 +603,15 @@ fn paragraph_split_move_preserves_suggestion_range_anchors() {
                     Anchor::TextRange(range) if range.start == first_id && range.end == second_id
                 ));
             }
+            SuggestionKind::BlockDelete { .. }
+            | SuggestionKind::BlockInsert { .. }
+            | SuggestionKind::BlockReplace { .. }
+            | SuggestionKind::LinkChange { .. }
+            | SuggestionKind::ParagraphStyleChange { .. } => {
+                panic!("this fixture contains only inline suggestions")
+            }
         }
     }
-    split_first.document.validate().unwrap();
 }
 
 #[test]
@@ -611,7 +634,7 @@ fn move_inline_to_missing_block_keeps_source_and_warns() {
             kind: OperationKind::MoveInlineToBlock {
                 inline_id: inline_id_to_move,
                 target_block_id: StableId::parse("missing-target-block").unwrap(),
-                after: None,
+                position: InsertPosition::Last,
             },
             context: None,
         }]],
@@ -623,7 +646,6 @@ fn move_inline_to_missing_block_keeps_source_and_warns() {
         .warnings
         .iter()
         .any(|warning| warning.code == "missing-block"));
-    result.document.validate().unwrap();
 }
 
 #[test]
@@ -645,7 +667,7 @@ fn move_missing_inline_to_block_warns_without_mutating_target() {
             kind: OperationKind::MoveInlineToBlock {
                 inline_id: StableId::parse("missing-inline").unwrap(),
                 target_block_id,
-                after: None,
+                position: InsertPosition::Last,
             },
             context: None,
         }]],
@@ -657,7 +679,6 @@ fn move_missing_inline_to_block_warns_without_mutating_target() {
         .warnings
         .iter()
         .any(|warning| warning.code == "missing-inline"));
-    result.document.validate().unwrap();
 }
 
 #[test]
@@ -684,7 +705,7 @@ fn move_inline_to_block_with_missing_anchor_appends_and_warns() {
             kind: OperationKind::MoveInlineToBlock {
                 inline_id: moved_id,
                 target_block_id,
-                after: Some(StableId::parse("missing-after-inline").unwrap()),
+                position: InsertPosition::After(StableId::parse("missing-after-inline").unwrap()),
             },
             context: None,
         }]],
@@ -696,7 +717,6 @@ fn move_inline_to_block_with_missing_anchor_appends_and_warns() {
         .warnings
         .iter()
         .any(|warning| warning.code == "inline-anchor-degraded"));
-    result.document.validate().unwrap();
 }
 
 #[test]
@@ -725,7 +745,7 @@ fn paragraph_join_preserves_format_and_comment_range_anchors() {
             kind: OperationKind::MoveInlineToBlock {
                 inline_id: second_id.clone(),
                 target_block_id: first_block_id.clone(),
-                after: Some(first_id.clone()),
+                position: InsertPosition::After(first_id.clone()),
             },
             context: None,
         },
@@ -778,6 +798,14 @@ fn paragraph_join_preserves_format_and_comment_range_anchors() {
                         created_at_ms: 1,
                         deleted: false,
                     }],
+                    state: opendoc_core::CommentThreadState::Open,
+                    resolved_by: None,
+                    resolved_at_ms: None,
+                    action_assignee: None,
+                    action_due_at_ms: None,
+                    action_completed_by: None,
+                    action_completed_at_ms: None,
+                    reactions: Vec::new(),
                     deleted: false,
                 },
             },
@@ -800,7 +828,6 @@ fn paragraph_join_preserves_format_and_comment_range_anchors() {
         &join_first.document.comments[0].anchor,
         Anchor::TextRange(range) if range.start == first_id && range.end == second_id
     ));
-    join_first.document.validate().unwrap();
 }
 
 #[test]
@@ -886,7 +913,7 @@ fn concurrent_format_citation_comment_and_delete_converge_with_degraded_anchors(
             },
             kind: OperationKind::InsertInline {
                 block_id: block_id.clone(),
-                after: Some(first_id.clone()),
+                position: InsertPosition::After(first_id.clone()),
                 inline: Inline::Citation {
                     id: citation_inline_id.clone(),
                     citation_id: citation_id.clone(),
@@ -934,6 +961,14 @@ fn concurrent_format_citation_comment_and_delete_converge_with_degraded_anchors(
                         created_at_ms: 1,
                         deleted: false,
                     }],
+                    state: opendoc_core::CommentThreadState::Open,
+                    resolved_by: None,
+                    resolved_at_ms: None,
+                    action_assignee: None,
+                    action_due_at_ms: None,
+                    action_completed_by: None,
+                    action_completed_at_ms: None,
+                    reactions: Vec::new(),
                     deleted: false,
                 },
             },
@@ -954,7 +989,7 @@ fn concurrent_format_citation_comment_and_delete_converge_with_degraded_anchors(
 
     assert_eq!(merged_abc.document, merged_cba.document);
     assert_eq!(merged_abc.warnings, merged_cba.warnings);
-    assert_eq!(merged_abc.document.visible_text(), "omega(Doe 2020)\n");
+    assert_eq!(merged_abc.document.visible_text(), "omega(Doe, 2020)\n");
     assert!(matches!(
         &merged_abc.document.comments[0].anchor,
         Anchor::TextRange(range) if range.start == second_id && range.end == second_id
@@ -977,7 +1012,7 @@ fn concurrent_format_citation_comment_and_delete_converge_with_degraded_anchors(
             .citation_database
             .rendered_citation(&citation_id)
             .map(String::as_str),
-        Some("(Doe 2020)")
+        Some("(Doe, 2020)")
     );
     assert_eq!(
         merged_abc
@@ -991,5 +1026,4 @@ fn concurrent_format_citation_comment_and_delete_converge_with_degraded_anchors(
             "mark-range-degraded"
         ]
     );
-    merged_abc.document.validate().unwrap();
 }

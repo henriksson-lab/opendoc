@@ -13,6 +13,10 @@
 //! the stored, signed document changes.
 
 use crate::causal::{CausalContext, OperationId};
+use crate::inline_ops::inline_id as inline_id_of;
+use crate::operation::{Operation, OperationKind};
+use opendoc_core::{Block, BlockKind, Inline, StableId};
+use std::collections::BTreeMap;
 
 /// One character operation, already narrowed to a single run.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -50,16 +54,24 @@ impl RunEdit {
 }
 
 #[derive(Clone, Debug)]
-struct Atom {
-    ch: char,
+pub(crate) struct Atom {
+    pub(crate) ch: char,
     /// Index into `edits` of the insert that produced this character, or
     /// `None` for a character that was already in the merge base.
-    inserted_by: Option<usize>,
+    pub(crate) inserted_by: Option<usize>,
     /// Indices into `edits` of every delete covering this character. A
     /// non-empty set is a tombstone: the character stays in the sequence so
     /// that concurrent inserts anchored on it still resolve, but it is not
     /// rendered.
-    deleted_by: Vec<usize>,
+    pub(crate) deleted_by: Vec<usize>,
+}
+
+impl Atom {
+    /// Whether this character is rendered. A tombstoned atom keeps its place
+    /// in the sequence so concurrent inserts anchored on it still resolve.
+    pub(crate) fn visible(&self) -> bool {
+        self.deleted_by.is_empty()
+    }
 }
 
 /// Resolve `base` plus every edit in `edits` into the converged run text.
@@ -73,6 +85,24 @@ pub(crate) fn resolve_run(base: &str, edits: &[RunEdit]) -> String {
     if edits.is_empty() {
         return base.to_string();
     }
+    resolve_run_atoms(base, edits)
+        .iter()
+        .filter(|atom| atom.visible())
+        .map(|atom| atom.ch)
+        .collect()
+}
+
+/// [`resolve_run`] stopping one step short of collapsing the sequence back to
+/// a `String`.
+///
+/// The atom vector is what carries the character identities ADR 0007 derives
+/// rather than stores: which edit inserted a character, and which edits
+/// tombstoned it. Collapsing it is one `filter`; *inverting* an edit needs the
+/// identities themselves, because "where is the text this operation inserted
+/// **now**" is not a question an offset can answer once other actors have
+/// edited the same run. See
+/// `docs/adr/0017-collaborative-undo-as-inverse-operations.md`.
+pub(crate) fn resolve_run_atoms(base: &str, edits: &[RunEdit]) -> Vec<Atom> {
     let mut atoms: Vec<Atom> = base
         .chars()
         .map(|ch| Atom {
@@ -155,8 +185,132 @@ pub(crate) fn resolve_run(base: &str, edits: &[RunEdit]) -> String {
     }
 
     atoms
-        .iter()
-        .filter(|atom| atom.deleted_by.is_empty())
-        .map(|atom| atom.ch)
-        .collect()
+}
+
+/// Collect every character operation in `ordered` into per-run edit lists, and
+/// note the rank at which any operation rewrote a run wholesale.
+///
+/// One pass over the causal order, shared by the merge and by the inverse
+/// computation, so the two cannot disagree about which operations are
+/// offset-addressed or about which whole-run write resets a run's base.
+///
+/// A *reset* is an operation that writes a run's whole text: `UpdateInlineText`,
+/// and every operation whose payload carries the run itself — the
+/// `InsertInline` that created it, and an `InsertBlock`/`InsertTableRow`/
+/// `InsertTableCell` whose blocks contain it. Character operations ordered
+/// before a reset lost to it, which is the same last-write-wins the sequential
+/// path had (ADR 0007, "Consequences"). Undo is what makes the block and table
+/// payloads matter: re-inserting a deleted block restores its runs' text, so
+/// the character operations that shaped that text before the delete must not
+/// be replayed against the restored copy.
+pub(crate) fn collect_text_run_edits(
+    ordered: &[&Operation],
+) -> (BTreeMap<StableId, Vec<RunEdit>>, BTreeMap<StableId, usize>) {
+    let mut edits: BTreeMap<StableId, Vec<RunEdit>> = BTreeMap::new();
+    let mut resets: BTreeMap<StableId, usize> = BTreeMap::new();
+    for (rank, operation) in ordered.iter().enumerate() {
+        match &operation.kind {
+            OperationKind::InsertText {
+                inline_id,
+                offset,
+                text,
+            } => {
+                if !text.is_empty() {
+                    edits.entry(inline_id.clone()).or_default().push(RunEdit {
+                        rank,
+                        id: operation.id.clone(),
+                        context: operation.context.clone(),
+                        kind: RunEditKind::Insert {
+                            offset: *offset,
+                            text: text.clone(),
+                        },
+                    });
+                }
+            }
+            OperationKind::DeleteText {
+                inline_id,
+                start,
+                end,
+            } => {
+                if end > start {
+                    edits.entry(inline_id.clone()).or_default().push(RunEdit {
+                        rank,
+                        id: operation.id.clone(),
+                        context: operation.context.clone(),
+                        kind: RunEditKind::Delete {
+                            start: *start,
+                            end: *end,
+                        },
+                    });
+                }
+            }
+            other => {
+                for run in runs_written_wholesale(other) {
+                    resets.insert(run, rank);
+                }
+            }
+        }
+    }
+    (edits, resets)
+}
+
+/// The runs `kind` writes wholesale — the ones whose base a merge resets at
+/// this operation's rank.
+///
+/// ADR 0007 named `UpdateInlineText` and the `InsertInline` that created a
+/// run; ADR 0017 added every payload that *carries* the run, because
+/// re-inserting a deleted block restores a snapshot of its text and the
+/// character operations that shaped that text before the delete must not be
+/// replayed onto the restored copy.
+///
+/// It is a function of one operation on purpose. Which runs a write covers is
+/// a property of its payload; *whether a particular character operation loses
+/// to it* is a property of the whole set, and that is the question
+/// [`crate::discarded_by_a_later_whole_run_write`] answers out of this.
+pub(crate) fn runs_written_wholesale(kind: &OperationKind) -> Vec<StableId> {
+    match kind {
+        OperationKind::UpdateInlineText { inline_id, .. } => vec![inline_id.clone()],
+        OperationKind::InsertInline { inline, .. } => vec![inline_id_of(inline).clone()],
+        OperationKind::InsertBlock { block, .. } => runs_in_blocks(std::slice::from_ref(block)),
+        OperationKind::InsertTableRow { row, .. } => row
+            .cells
+            .iter()
+            .flat_map(|cell| runs_in_blocks(&cell.blocks))
+            .collect(),
+        OperationKind::InsertTableCell { cell, .. } => runs_in_blocks(&cell.blocks),
+        _ => Vec::new(),
+    }
+}
+
+/// Whether `kind` addresses its target by an offset into a text run rather
+/// than by identity. True for exactly the two character operations, which is
+/// why they are the only ones whose inverse cannot be captured when the
+/// operation is written.
+pub(crate) fn is_offset_addressed(kind: &OperationKind) -> bool {
+    matches!(
+        kind,
+        OperationKind::InsertText { .. } | OperationKind::DeleteText { .. }
+    )
+}
+
+/// Every editable text run id reachable from `blocks`, including the ones
+/// nested inside table cells.
+pub(crate) fn runs_in_blocks(blocks: &[Block]) -> Vec<StableId> {
+    let mut found = Vec::new();
+    for block in blocks {
+        for inline in &block.content {
+            match inline {
+                Inline::Text { id, .. } | Inline::Link { id, .. } => found.push(id.clone()),
+                _ => {}
+            }
+        }
+        if let BlockKind::Table { rows, .. } = &block.kind {
+            for row in rows {
+                for cell in &row.cells {
+                    found.extend(runs_in_blocks(&cell.blocks));
+                }
+            }
+        }
+    }
+    found
 }

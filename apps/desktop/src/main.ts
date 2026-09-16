@@ -7,14 +7,15 @@
 // listener binding.
 import "./styles.css";
 import { escapeHtml, promptDialog, setDialogAfterClose } from "./ui";
-import { closeWindow, invoke, isTauri, onCloseRequested } from "./invoke";
+import { closeWindow, invoke, isTauri, onCloseRequested, storageReport } from "./invoke";
 import type { EditorSelection } from "./types";
 import type { AppVersionView } from "./generated/version";
 import { app, runtime, state } from "./state";
-import { applyDocument } from "./shared";
+import { adjustPendingOperationsForTest, applyDocument } from "./shared";
 import { renderAll, renderStatus } from "./shell";
 import { runAction } from "./actions";
 import { setVersionView } from "./versions";
+import { setCollaborationStatusForTest } from "./collab";
 
 setDialogAfterClose(() => state.editor?.focus());
 
@@ -103,10 +104,47 @@ function loadDocumentFaces(): void {
   }
 }
 
+/**
+ * Say out loud when this tab's work is not durable.
+ *
+ * Rust already decides and describes (`crates/opendoc-wasm/src/storage.rs`);
+ * until now the answer was thrown away at the `await`, so a user whose
+ * IndexedDB is blocked — or whose second tab does not own storage — was never
+ * told their document lives only in this tab. ADR 0008 §5 says such a runtime
+ * is reported, not pretended around, and a report nobody surfaces is the same
+ * as no report.
+ */
+function reportStorage(): void {
+  const report = storageReport();
+  // Null in the Tauri shell, which never loads the browser core and stores
+  // documents on a real filesystem.
+  if (!report || report.persistent) return;
+  const why = report.notOwner ?? report.error;
+  const message = why
+    ? `Work in this tab is not being saved to this browser: ${why}.`
+    : "This browser is not storing documents; work in this tab is lost when it closes.";
+  // A banner rather than a toast: this state lasts as long as the tab does, so
+  // a notice that erases itself after two seconds would be telling the user
+  // once about something that is still true an hour later.
+  const banner = document.createElement("div");
+  banner.className = "error-banner";
+  banner.dataset.storageNotice = report.notOwner ? "not-owner" : "no-storage";
+  banner.setAttribute("role", "status");
+  banner.textContent = message;
+  const dismiss = document.createElement("button");
+  dismiss.type = "button";
+  dismiss.textContent = "Dismiss";
+  dismiss.addEventListener("click", () => banner.remove());
+  banner.appendChild(dismiss);
+  app.prepend(banner);
+}
+
 async function boot(): Promise<void> {
   loadDocumentFaces();
   try {
     state.profile = await invoke("get_runtime_profile", { mode: runtime.mode, storageBackends: runtime.storageBackends ?? [], signingEnabled: runtime.signingEnabled });
+    state.runtimeSession = await invoke("get_runtime_session", { mode: runtime.mode, storageBackends: runtime.storageBackends ?? [], signingEnabled: runtime.signingEnabled });
+    if (state.runtimeSession.service_session?.role === "viewer") state.documentEditingMode = "view";
   } catch (error) {
     console.warn("runtime profile unavailable", error);
   }
@@ -118,6 +156,7 @@ async function boot(): Promise<void> {
     return;
   }
   renderAll();
+  reportStorage();
   await offerRecoveredSessions();
   window.setInterval(() => {
     if (!state.doc?.repository_root || !state.doc.has_unsaved_changes) return;
@@ -167,11 +206,26 @@ async function boot(): Promise<void> {
 
 export const __test = {
   runAction,
-  getState: () => ({ doc: state.doc, view: state.view, mode: state.mode, panel: state.panel, selection: state.selection, audit: state.audit }),
+  getState: () => ({
+    doc: state.doc,
+    view: state.view,
+    mode: state.mode,
+    panel: state.panel,
+    selection: state.selection,
+    audit: state.audit,
+    activeCommentThreadId: state.activeCommentThreadId,
+    activeCommentReplyThreadId: state.activeCommentReplyThreadId,
+    activeSuggestionId: state.activeSuggestionId,
+  }),
+  // Collaboration applies whole projections here; smoke uses this to exercise
+  // a valid stale-target state local commands deliberately cannot create.
+  applyDocumentForTest: applyDocument,
   setSelection: (next: EditorSelection | null) => (state.selection = next),
+  setCollaborationStatus: setCollaborationStatusForTest,
   // Lets a browser-level test render the version panel against a known view;
   // the WASM shell has no filesystem repository to read a real one from.
   setVersionView: (next: AppVersionView | null) => setVersionView(next),
+  adjustPendingOperationsForTest,
 };
 
 void boot();

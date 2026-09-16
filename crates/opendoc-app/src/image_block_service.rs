@@ -86,13 +86,17 @@ fn find_image_block<'a>(
 
 /// Parses a drawn length from the command surface.
 ///
-/// Rejected rather than clamped: a zero or negative display size is not a
-/// smaller picture, and silently turning it into a legal one would hide the
-/// caller's arithmetic bug behind an image that looks nearly right.
+/// Rejected rather than clamped: a size outside
+/// [`ImageLayout::MIN_TWIPS`]..=[`ImageLayout::MAX_TWIPS`] is not a smaller or
+/// larger picture, and silently turning it into a legal one would hide the
+/// caller's arithmetic bug behind an image that looks nearly right. The bounds
+/// are the model's, read from it rather than restated here.
 pub(crate) fn image_display_length(twips: i32) -> Result<Length, AppApiError> {
     let length = Length::from_twips(twips).map_err(|err| AppApiError::Model(err.to_string()))?;
-    if length.twips() <= 0 {
-        return Err(AppApiError::Model("image size is not positive".to_string()));
+    if !(ImageLayout::MIN_TWIPS..=ImageLayout::MAX_TWIPS).contains(&length.twips()) {
+        return Err(AppApiError::Model(
+            "image size is outside a quarter inch to 22in".to_string(),
+        ));
     }
     Ok(length)
 }
@@ -136,14 +140,18 @@ mod tests {
                 width: Some(Length::from_twips(1440).unwrap()),
                 height: None,
                 placement: Some(ImagePlacement::WrapEnd),
+                ..ImageLayout::default()
             },
         );
         let table = Block {
             id: StableId::parse("block-table").unwrap(),
             kind: BlockKind::Table {
                 columns: Vec::new(),
+                properties: Default::default(),
                 rows: vec![opendoc_core::TableRow {
                     id: StableId::parse("row-1").unwrap(),
+                    height: None,
+                    header: false,
                     cells: vec![TableCell {
                         id: StableId::parse("cell-1").unwrap(),
                         blocks: vec![inner],

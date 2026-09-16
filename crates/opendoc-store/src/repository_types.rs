@@ -2,7 +2,8 @@
 
 use opendoc_core::HashRef;
 use opendoc_format::{
-    BranchHeadRecord, LookupRecord, SignatureRecord, TombstoneRecord, VersionLabelRecord,
+    BranchHeadRecord, LookupRecord, SignatureRecord, TombstoneRecord, VersionCoverageRecord,
+    VersionLabelRecord,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -200,4 +201,109 @@ pub enum CandidateAdvance {
         current: Option<HashRef>,
         candidate: HashRef,
     },
+}
+
+/// One thing a signed version named that the repository no longer holds.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ManifestChainProblem {
+    /// A manifest in the signed ancestry is not in this store. This is the
+    /// shape truncation takes when history is deleted rather than rewritten.
+    ManifestMissing {
+        manifest: HashRef,
+        /// The manifest that named it, or `None` when the signed manifest
+        /// itself is gone.
+        referenced_by: Option<HashRef>,
+    },
+    ManifestUnreadable {
+        manifest: HashRef,
+        reason: String,
+    },
+    /// A manifest in the chain belongs to another document or branch.
+    WrongDocument {
+        manifest: HashRef,
+        document_uuid: String,
+        branch: String,
+    },
+    SnapshotMissing {
+        manifest: HashRef,
+        snapshot: HashRef,
+    },
+    OperationSegmentMissing {
+        manifest: HashRef,
+        segment: HashRef,
+    },
+    /// Blob bytes are absent. Reported, but *not* counted as truncation:
+    /// ADR 0002 makes deferring large blob downloads a supported mode, so a
+    /// shallow clone is a legitimate repository, not a tampered one.
+    BlobMissing {
+        manifest: HashRef,
+        blob: HashRef,
+    },
+    /// The walk stopped at [`VERSION_HISTORY_TRAVERSAL_LIMIT`] manifests
+    /// without reaching a root, so what lies beyond is unknown.
+    TraversalLimit {
+        manifest: HashRef,
+    },
+}
+
+/// What a repository still holds of the history a signed version named.
+///
+/// A version signature covers bytes, not availability: a manifest that has
+/// been deleted leaves every signature over it verifying. This is the other
+/// half — the walk that says whether the objects the signed coverage named are
+/// actually here.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ManifestChainAudit {
+    pub signed_manifest: HashRef,
+    /// Manifests actually read, signed manifest first, then ancestors.
+    pub chain: Vec<HashRef>,
+    /// The walk reached a manifest with no parent without being interrupted.
+    pub reaches_root: bool,
+    pub problems: Vec<ManifestChainProblem>,
+}
+
+impl ManifestChainAudit {
+    /// Does this repository still hold the history the signature named?
+    ///
+    /// Absent blob bytes do not count: see
+    /// [`ManifestChainProblem::BlobMissing`].
+    pub fn history_is_truncated(&self) -> bool {
+        !self.reaches_root
+            || self
+                .problems
+                .iter()
+                .any(|problem| !matches!(problem, ManifestChainProblem::BlobMissing { .. }))
+    }
+
+    /// Manifests the signed chain named that are not in this store.
+    pub fn missing_manifests(&self) -> Vec<HashRef> {
+        self.problems
+            .iter()
+            .filter_map(|problem| match problem {
+                ManifestChainProblem::ManifestMissing { manifest, .. }
+                | ManifestChainProblem::ManifestUnreadable { manifest, .. } => {
+                    Some(manifest.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn absent_blobs(&self) -> Vec<HashRef> {
+        self.problems
+            .iter()
+            .filter_map(|problem| match problem {
+                ManifestChainProblem::BlobMissing { blob, .. } => Some(blob.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+/// A committed version's signatures together with the coverage record they
+/// were taken over.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SignedVersion {
+    pub coverage: VersionCoverageRecord,
+    pub signatures: Vec<SignatureRecord>,
 }

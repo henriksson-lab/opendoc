@@ -7,6 +7,8 @@ mod fill;
 mod format;
 #[allow(dead_code)]
 mod formula;
+#[cfg(test)]
+mod function_tests;
 #[allow(dead_code)]
 mod functions;
 mod functions_legacy;
@@ -22,22 +24,31 @@ mod selection;
 mod structure;
 #[cfg(test)]
 mod structure_tests;
+mod validation;
 mod value;
 mod workbook;
+#[cfg(test)]
+mod workbook_tests;
 
 pub use address::{
     cell_axis_labels, normalize_cell_address, normalize_cell_range, normalize_column_label,
     normalize_merge_range, normalize_named_range_name, normalize_row_label, normalize_sheet_title,
-    validate_canonical_column_label, validate_canonical_merge_range, validate_canonical_row_label,
+    range_contains_column, range_contains_row, validate_canonical_column_label,
+    validate_canonical_merge_range, validate_canonical_row_label,
 };
 pub use format::{parse_format_bool, validate_sheet_color};
 pub use google::{export_google_sheets_workbook, import_google_sheets_workbook};
+pub use io::{
+    xlsx_filter_is_representable, xlsx_validation_is_representable, XlsxImportReport,
+    XLSX_IMPORT_MAX_COLUMNS, XLSX_IMPORT_MAX_ROWS,
+};
 pub use model::{
     normalize_protected_range_description, normalize_sheet_id, validate_canonical_cell_address,
     validate_canonical_cell_range, validate_canonical_sheet_id, validate_filter_condition,
     validate_protected_range_description, Cell, CellComment, CellDependency, CellFormat,
     CellValidation, DeletedCellComment, NamedRange, Sheet, SheetAxis, SheetFilter,
-    SheetFilterCriterion, SheetFilterSortSpec, SheetMerge, SheetProtectedRange,
+    SheetFilterCriterion, SheetFilterSortSpec, SheetImage, SheetMerge, SheetPrintOrientation,
+    SheetPrintSettings, SheetProtectedRange,
 };
 pub use model::{
     DEFAULT_COLUMN_WIDTH_PX, DEFAULT_ROW_HEIGHT_PX, MAX_AXIS_SIZE_PX, MIN_AXIS_SIZE_PX,

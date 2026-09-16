@@ -137,62 +137,62 @@ impl OpenDocApp {
             AppCommand::SetDocumentLocale(args) => Ok(AppCommandResult::Document(
                 self.set_document_locale(args.locale)?,
             )),
+            AppCommand::SetBookmark(args) => Ok(AppCommandResult::Document(self.set_bookmark(
+                args.bookmark_id.as_deref(),
+                args.name,
+                args.block_id,
+            )?)),
+            AppCommand::DeleteBookmark(args) => Ok(AppCommandResult::Document(
+                self.delete_bookmark(args.bookmark_id)?,
+            )),
             AppCommand::AddParagraph(args) => {
-                Ok(AppCommandResult::Document(self.add_paragraph(args.text)))
+                Ok(AppCommandResult::Document(self.add_paragraph(args.text)?))
             }
             AppCommand::RenderDocumentHtml => {
                 Ok(AppCommandResult::Text(self.render_document_html()))
             }
+            AppCommand::RenderSuggestionPreviewHtml(args) => Ok(AppCommandResult::Text(
+                self.render_suggestion_preview_html(args.suggestion_id, args.resolution)?,
+            )),
             AppCommand::GetRuntimeProfile(profile) => Ok(AppCommandResult::RuntimeProfile(profile)),
             AppCommand::GetRuntimeSession(args) => Ok(AppCommandResult::RuntimeSession(
-                OpenDocRuntimeSession::for_profile_with_permissions(
-                    args.profile,
-                    args.subject,
-                    args.document_uuid,
-                    args.presence,
-                    args.permissions,
-                ),
+                OpenDocRuntimeSession::for_profile(args.profile, self.service_session.clone()),
             )),
+            // The service session comes from `self`, never from `args`. That
+            // is the whole difference between asking whether you are allowed
+            // and telling the app that you are: a caller can describe the
+            // host it is running on, and nothing else.
             AppCommand::AuthorizeRuntimeCommand(args) => {
                 Ok(AppCommandResult::AuthorizationDecision(
                     OpenDocAuthorizationDecision::for_profile_command(
                         args.profile,
-                        args.subject,
-                        args.document_uuid,
                         args.command_name,
-                        args.permissions,
+                        self.service_session.as_ref(),
                     ),
                 ))
             }
             AppCommand::CreateRuntimeShareInvite(args) => Ok(AppCommandResult::ShareInvite(
                 OpenDocShareInvite::for_profile(
                     args.profile,
-                    args.subject,
-                    args.document_uuid,
                     args.target_subject,
-                    args.actions,
-                    args.permissions,
+                    args.requested_role,
+                    self.service_session.as_ref(),
                     now_ms(),
                 ),
             )),
             AppCommand::RelayRuntimeSync(args) => Ok(AppCommandResult::SyncRelay(
                 OpenDocSyncRelayResult::for_profile(
                     args.profile,
-                    args.subject,
-                    args.document_uuid,
-                    args.base_manifest,
                     args.operations,
-                    args.permissions,
-                    args.presence,
+                    self.service_session.as_ref(),
                 ),
             )),
             AppCommand::ResolveRuntimeDocumentLookup(args) => Ok(AppCommandResult::RuntimeLookup(
                 OpenDocRuntimeLookupResult::for_profile(
                     args.profile,
-                    args.subject,
                     args.document_uuid,
                     args.doi,
-                    args.permissions,
+                    self.service_session.as_ref(),
                     args.service_index,
                     args.scanned_documents,
                 ),
@@ -207,6 +207,13 @@ impl OpenDocApp {
                 Ok(AppCommandResult::Export(self.export_google_docs_json()?))
             }
             AppCommand::ExportDocx => Ok(AppCommandResult::Export(self.export_docx()?)),
+            AppCommand::ExportOdt => Ok(AppCommandResult::Export(self.export_odt()?)),
+            AppCommand::ExportPdf => Ok(AppCommandResult::Export(self.export_pdf()?)),
+            AppCommand::ExportHtml => Ok(AppCommandResult::Export(self.export_html()?)),
+            AppCommand::ExportText => Ok(AppCommandResult::Export(self.export_text()?)),
+            AppCommand::ExportImageBlob(args) => Ok(AppCommandResult::Export(
+                self.export_image_blob(args.blob_hash)?,
+            )),
             AppCommand::ImportGoogleSheetsJson(args) => Ok(AppCommandResult::Document(
                 self.import_google_sheets_json_text(args.json_text)?,
             )),
@@ -277,6 +284,14 @@ impl OpenDocApp {
             AppCommand::SignWithOpenSshPrivateKey(args) => Ok(AppCommandResult::Document(
                 self.sign_with_openssh_private_key(args.private_key_pem, args.signer_display)?,
             )),
+            AppCommand::SignCurrentRepositoryVersionWithOpenSshPrivateKey(args) => {
+                Ok(AppCommandResult::Document(
+                    self.sign_current_repository_version_with_openssh_private_key(
+                        args.private_key_pem,
+                        args.signer_display,
+                    )?,
+                ))
+            }
             AppCommand::VerifyCurrentSignature(args) => Ok(AppCommandResult::Text(
                 self.verify_current_signature(args.private_key_pem)?,
             )),
@@ -378,6 +393,18 @@ impl OpenDocApp {
             AppCommand::DeleteBlock(args) => Ok(AppCommandResult::Document(
                 self.delete_block(args.block_id)?,
             )),
+            AppCommand::MoveBlock(args) => {
+                let document = match args.placement.as_str() {
+                    "before" => self.move_block_before(args.block_id, args.anchor_block_id)?,
+                    "after" => self.move_block_after(args.block_id, args.anchor_block_id)?,
+                    other => {
+                        return Err(AppApiError::Format(format!(
+                            "move block placement must be before or after, got {other:?}"
+                        )))
+                    }
+                };
+                Ok(AppCommandResult::Document(document))
+            }
             AppCommand::SetBlockTextStyle(args) => Ok(AppCommandResult::Document(
                 self.set_block_text_style(args.block_id, args.style, args.level, args.list_kind)?,
             )),
@@ -403,8 +430,14 @@ impl OpenDocApp {
             AppCommand::SetPageFurniture(args) => Ok(AppCommandResult::Document(
                 self.set_page_furniture(args.slot, args.text, args.field, args.alignment)?,
             )),
+            AppCommand::SetPageFurnitureHtml(args) => Ok(AppCommandResult::Document(
+                self.set_page_furniture_html(args.slot, args.html)?,
+            )),
             AppCommand::ClearPageFurniture(args) => Ok(AppCommandResult::Document(
                 self.clear_page_furniture(args.slot)?,
+            )),
+            AppCommand::ClearPageFurnitureOverride(args) => Ok(AppCommandResult::Document(
+                self.clear_page_furniture_override(args.slot)?,
             )),
             AppCommand::SetBlockAlignment(args) => Ok(AppCommandResult::Document(
                 self.set_block_alignment(args.block_id, args.value)?,
@@ -460,6 +493,31 @@ impl OpenDocApp {
             AppCommand::SetEditorSelectionBlockDirection(args) => Ok(AppCommandResult::Document(
                 self.set_editor_selection_block_direction(args.selection, args.value)?,
             )),
+            AppCommand::SetBlockKeepWithNext(args) => Ok(AppCommandResult::Document(
+                self.set_block_keep_with_next(args.block_id, args.value)?,
+            )),
+            AppCommand::SetEditorSelectionBlockKeepWithNext(args) => {
+                Ok(AppCommandResult::Document(
+                    self.set_editor_selection_block_keep_with_next(args.selection, args.value)?,
+                ))
+            }
+            AppCommand::SetBlockBackground(args) => Ok(AppCommandResult::Document(
+                self.set_block_background(args.block_id, args.color)?,
+            )),
+            AppCommand::SetEditorSelectionBlockBackground(args) => Ok(AppCommandResult::Document(
+                self.set_editor_selection_block_background(args.selection, args.color)?,
+            )),
+            AppCommand::SetBlockBorder(args) => Ok(AppCommandResult::Document(
+                self.set_block_border(args.block_id, args.style, args.twips, args.color)?,
+            )),
+            AppCommand::SetEditorSelectionBlockBorder(args) => Ok(AppCommandResult::Document(
+                self.set_editor_selection_block_border(
+                    args.selection,
+                    args.style,
+                    args.twips,
+                    args.color,
+                )?,
+            )),
             AppCommand::ClearBlockProperty(args) => Ok(AppCommandResult::Document(
                 self.clear_named_block_property(args.block_id, args.key)?,
             )),
@@ -502,9 +560,16 @@ impl OpenDocApp {
             AppCommand::InsertMentionAfter(args) => Ok(AppCommandResult::Document(
                 self.insert_mention_after(args.block_id, args.after_inline_id, args.label)?,
             )),
-            AppCommand::AddFootnoteRef => Ok(AppCommandResult::Document(self.add_footnote_ref())),
+            AppCommand::InsertDateChipAfter(args) => Ok(AppCommandResult::Document(
+                self.insert_date_chip_after(args.block_id, args.after_inline_id, args.date)?,
+            )),
+            AppCommand::AddFootnoteRef => Ok(AppCommandResult::Document(self.add_footnote_ref()?)),
+            AppCommand::AddEndnoteRef => Ok(AppCommandResult::Document(self.add_endnote_ref()?)),
             AppCommand::InsertFootnoteRefAfter(args) => Ok(AppCommandResult::Document(
                 self.insert_footnote_ref_after(args.block_id, args.after_inline_id)?,
+            )),
+            AppCommand::InsertEndnoteRefAfter(args) => Ok(AppCommandResult::Document(
+                self.insert_endnote_ref_after(args.block_id, args.after_inline_id)?,
             )),
             AppCommand::UpdateFootnoteBody(args) => Ok(AppCommandResult::Document(
                 self.update_footnote_body(args.footnote_id, args.body)?,
@@ -537,13 +602,34 @@ impl OpenDocApp {
             AppCommand::UpdateListItem(args) => Ok(AppCommandResult::Document(
                 self.update_list_item(args.block_id, args.level, args.list_kind)?,
             )),
+            AppCommand::SetOrderedListStart(args) => Ok(AppCommandResult::Document(
+                self.set_ordered_list_start(args.block_id, args.start)?,
+            )),
+            AppCommand::SetOrderedListFormat(args) => Ok(AppCommandResult::Document(
+                self.set_ordered_list_format_name(args.block_id, args.format)?,
+            )),
+            AppCommand::SetBulletListMarker(args) => Ok(AppCommandResult::Document(
+                self.set_bullet_list_marker_name(args.block_id, args.marker)?,
+            )),
             AppCommand::AdjustEditorSelectionListIndent(args) => Ok(AppCommandResult::Document(
                 self.adjust_editor_selection_list_indent(args.selection, args.delta)?,
             )),
             AppCommand::InsertPageBreakAfter(args) => Ok(AppCommandResult::Document(
                 self.insert_page_break_after(args.after_block_id)?,
             )),
-            AppCommand::AddPageBreak => Ok(AppCommandResult::Document(self.add_page_break())),
+            AppCommand::AddPageBreak => Ok(AppCommandResult::Document(self.add_page_break()?)),
+            AppCommand::InsertHorizontalRuleAfter(args) => Ok(AppCommandResult::Document(
+                self.insert_horizontal_rule_after(args.after_block_id)?,
+            )),
+            AppCommand::AddHorizontalRule => {
+                Ok(AppCommandResult::Document(self.add_horizontal_rule()?))
+            }
+            AppCommand::InsertTableOfContentsAfter(args) => Ok(AppCommandResult::Document(
+                self.insert_table_of_contents_after(args.after_block_id)?,
+            )),
+            AppCommand::InsertBibliographyAfter(args) => Ok(AppCommandResult::Document(
+                self.insert_bibliography_after(args.after_block_id)?,
+            )),
             AppCommand::InsertTableAfter(args) => match args {
                 InsertTableAfterArgs::Default { after_block_id } => Ok(AppCommandResult::Document(
                     self.insert_table_after(after_block_id)?,
@@ -558,7 +644,7 @@ impl OpenDocApp {
                     columns,
                 )?)),
             },
-            AppCommand::AddTable => Ok(AppCommandResult::Document(self.add_table())),
+            AppCommand::AddTable => Ok(AppCommandResult::Document(self.add_table()?)),
             AppCommand::AddTableRow(args) => Ok(AppCommandResult::Document(self.add_table_row(
                 args.table_block_id,
                 args.after_row,
@@ -588,6 +674,30 @@ impl OpenDocApp {
             AppCommand::ClearTableColumnWidth(args) => Ok(AppCommandResult::Document(
                 self.clear_table_column_width(args.table_block_id, args.column_id)?,
             )),
+            AppCommand::SetTableRowHeight(args) => Ok(AppCommandResult::Document(
+                self.set_table_row_height(args.table_block_id, args.row_id, args.twips)?,
+            )),
+            AppCommand::ClearTableRowHeight(args) => Ok(AppCommandResult::Document(
+                self.clear_table_row_height(args.table_block_id, args.row_id)?,
+            )),
+            AppCommand::SetTableRowHeader(args) => Ok(AppCommandResult::Document(
+                self.set_table_row_header(args.table_block_id, args.row_id, args.header)?,
+            )),
+            AppCommand::SortTableRows(args) => Ok(AppCommandResult::Document(
+                self.sort_table_rows(args.table_block_id, args.column_id, args.descending)?,
+            )),
+            AppCommand::SetTableBorder(args) => Ok(AppCommandResult::Document(
+                self.set_table_border(args.table_block_id, args.style, args.twips, args.color)?,
+            )),
+            AppCommand::ClearTableBorder(args) => Ok(AppCommandResult::Document(
+                self.clear_table_border(args.table_block_id)?,
+            )),
+            AppCommand::SetTableAlignment(args) => Ok(AppCommandResult::Document(
+                self.set_table_alignment(args.table_block_id, args.alignment)?,
+            )),
+            AppCommand::ClearTableAlignment(args) => Ok(AppCommandResult::Document(
+                self.clear_table_alignment(args.table_block_id)?,
+            )),
             AppCommand::MergeTableCells(args) => Ok(AppCommandResult::Document(
                 self.merge_table_cells(args.cell_id, args.row_span, args.column_span)?,
             )),
@@ -609,13 +719,16 @@ impl OpenDocApp {
             AppCommand::SetTableCellVerticalAlignment(args) => Ok(AppCommandResult::Document(
                 self.set_table_cell_vertical_alignment(args.cell_id, args.alignment)?,
             )),
+            AppCommand::SetTableCellRowHeader(args) => Ok(AppCommandResult::Document(
+                self.set_table_cell_row_header(args.cell_id, args.row_header)?,
+            )),
             AppCommand::SetTableCellPadding(args) => Ok(AppCommandResult::Document(
                 self.set_table_cell_padding(args.cell_id, args.edge, args.twips)?,
             )),
             AppCommand::ClearTableCellProperty(args) => Ok(AppCommandResult::Document(
                 self.clear_table_cell_property(args.cell_id, args.key)?,
             )),
-            AppCommand::AddCitation => Ok(AppCommandResult::Document(self.add_sample_citation())),
+            AppCommand::AddCitation => Ok(AppCommandResult::Document(self.add_sample_citation()?)),
             AppCommand::InsertCitation(args) => {
                 Ok(AppCommandResult::Document(self.insert_citation(
                     args.reference_id,
@@ -663,6 +776,29 @@ impl OpenDocApp {
             AppCommand::AddCommentReply(args) => Ok(AppCommandResult::Document(
                 self.add_comment_reply(args.thread_id, args.author, args.body)?,
             )),
+            AppCommand::ResolveCommentThread(args) => Ok(AppCommandResult::Document(
+                self.resolve_comment_thread(args.thread_id, args.resolved_by)?,
+            )),
+            AppCommand::ReopenCommentThread(args) => Ok(AppCommandResult::Document(
+                self.reopen_comment_thread(args.thread_id)?,
+            )),
+            AppCommand::SetCommentThreadAction(args) => {
+                Ok(AppCommandResult::Document(self.set_comment_thread_action(
+                    args.thread_id,
+                    args.assignee,
+                    args.due_at_ms,
+                    args.completed,
+                    args.completed_by,
+                )?))
+            }
+            AppCommand::SetCommentThreadReaction(args) => Ok(AppCommandResult::Document(
+                self.set_comment_thread_reaction(
+                    args.thread_id,
+                    args.emoji,
+                    args.actor,
+                    args.present,
+                )?,
+            )),
             AppCommand::DeleteCommentThread(args) => Ok(AppCommandResult::Document(
                 self.delete_comment_thread(args.thread_id)?,
             )),
@@ -692,6 +828,15 @@ impl OpenDocApp {
             AppCommand::AddBlockSuggestion(args) => Ok(AppCommandResult::Document(
                 self.add_block_suggestion(args.block_id, args.author, args.text)?,
             )),
+            AppCommand::AddBlockDeleteSuggestion(args) => Ok(AppCommandResult::Document(
+                self.add_block_delete_suggestion(args.block_id, args.author)?,
+            )),
+            AppCommand::AddBlockInsertSuggestion(args) => Ok(AppCommandResult::Document(
+                self.add_block_insert_suggestion(args.block_id, args.author, args.text)?,
+            )),
+            AppCommand::AddBlockReplaceSuggestion(args) => Ok(AppCommandResult::Document(
+                self.add_block_replace_suggestion(args.block_id, args.author, args.text)?,
+            )),
             AppCommand::AddDeleteSuggestion(args) => Ok(AppCommandResult::Document(
                 self.add_delete_suggestion(args.author, args.inline_id)?,
             )),
@@ -717,6 +862,35 @@ impl OpenDocApp {
                     args.author,
                     args.mark_kind,
                     args.value,
+                )?,
+            )),
+            AppCommand::AddTextRangeFormatRemovalSuggestion(args) => Ok(
+                AppCommandResult::Document(self.add_text_range_format_removal_suggestion(
+                    args.start_inline_id,
+                    args.end_inline_id,
+                    args.author,
+                    args.mark_kind,
+                    args.value,
+                )?),
+            ),
+            AppCommand::AddTextRangeFormatReplacementSuggestion(args) => Ok(
+                AppCommandResult::Document(self.add_text_range_format_replacement_suggestion(
+                    args.start_inline_id,
+                    args.end_inline_id,
+                    args.author,
+                    args.mark_kind,
+                    args.expected_value,
+                    args.value,
+                )?),
+            ),
+            AppCommand::AddLinkChangeSuggestion(args) => Ok(AppCommandResult::Document(
+                self.add_link_change_suggestion(args.inline_id, args.author, args.href)?,
+            )),
+            AppCommand::AddParagraphStyleSuggestion(args) => Ok(AppCommandResult::Document(
+                self.add_paragraph_style_suggestion(
+                    args.block_id,
+                    args.author,
+                    parse_paragraph_style(Some(&args.style), "proposed")?,
                 )?,
             )),
             AppCommand::UpdateSuggestion(args) => Ok(AppCommandResult::Document(
@@ -745,6 +919,9 @@ impl OpenDocApp {
             }
             AppCommand::ApplyEditorMark(input) => {
                 Ok(AppCommandResult::Editor(self.apply_editor_mark(input)?))
+            }
+            AppCommand::ImportBibtex(args) => {
+                Ok(AppCommandResult::Document(self.import_bibtex(args.source)?))
             }
             AppCommand::AddBibliographyReference(args) => Ok(AppCommandResult::Document(
                 self.add_bibliography_reference(
@@ -788,6 +965,12 @@ impl OpenDocApp {
             )),
             AppCommand::UpdateMentionLabel(args) => Ok(AppCommandResult::Document(
                 self.update_mention_label(args.inline_id, args.label)?,
+            )),
+            AppCommand::SelectDropdownOption(args) => Ok(AppCommandResult::Document(
+                self.select_dropdown_option(args.inline_id, args.option_id)?,
+            )),
+            AppCommand::UpdateDateChip(args) => Ok(AppCommandResult::Document(
+                self.update_date_chip(args.inline_id, args.date)?,
             )),
             AppCommand::UpdateLinkHref(args) => Ok(AppCommandResult::Document(
                 self.update_link_href(args.inline_id, args.href)?,
@@ -845,6 +1028,49 @@ impl OpenDocApp {
             )),
             AppCommand::SetImageBlockPlacement(args) => Ok(AppCommandResult::Document(
                 self.set_image_block_placement(args.block_id, args.placement)?,
+            )),
+            AppCommand::SetImageBlockWrapClearance(args) => Ok(AppCommandResult::Document(
+                self.set_image_block_wrap_clearance(
+                    args.block_id,
+                    args.top_twips,
+                    args.end_twips,
+                    args.bottom_twips,
+                    args.start_twips,
+                )?,
+            )),
+            AppCommand::SetImageBlockPositioned(args) => Ok(AppCommandResult::Document(
+                self.set_image_block_positioned(
+                    args.block_id,
+                    args.anchor_block_id.as_deref(),
+                    args.horizontal_offset_twips,
+                    args.vertical_offset_twips,
+                    args.layer,
+                )?,
+            )),
+            AppCommand::ClearImageBlockPositioned(args) => Ok(AppCommandResult::Document(
+                self.clear_image_block_positioned(args.block_id)?,
+            )),
+            AppCommand::SetImageBlockEffects(args) => {
+                Ok(AppCommandResult::Document(self.set_image_block_effects(
+                    args.block_id,
+                    args.rotation_degrees,
+                    args.opacity_percent,
+                )?))
+            }
+            AppCommand::SetImageBlockCrop(args) => {
+                Ok(AppCommandResult::Document(self.set_image_block_crop(
+                    args.block_id,
+                    args.top_percent,
+                    args.right_percent,
+                    args.bottom_percent,
+                    args.left_percent,
+                )?))
+            }
+            AppCommand::SetImageBlockCaption(args) => Ok(AppCommandResult::Document(
+                self.set_image_block_caption(args.block_id, args.caption)?,
+            )),
+            AppCommand::SetImageBlockBorder(args) => Ok(AppCommandResult::Document(
+                self.set_image_block_border(args.block_id, args.style, args.twips, args.color)?,
             )),
             AppCommand::DescribeSpreadsheetSelection(args) => {
                 Ok(AppCommandResult::SpreadsheetSelection(
@@ -995,6 +1221,15 @@ impl OpenDocApp {
             AppCommand::SetSpreadsheetBasicFilter(args) => Ok(AppCommandResult::Document(
                 self.set_spreadsheet_basic_filter(args.sheet_id, args.range)?,
             )),
+            AppCommand::SetSpreadsheetPrintArea(args) => Ok(AppCommandResult::Document(
+                self.set_spreadsheet_print_area(args.sheet_id, args.range)?,
+            )),
+            AppCommand::ClearSpreadsheetPrintArea(args) => Ok(AppCommandResult::Document(
+                self.clear_spreadsheet_print_area(args.sheet_id)?,
+            )),
+            AppCommand::SetSpreadsheetPrintOrientation(args) => Ok(AppCommandResult::Document(
+                self.set_spreadsheet_print_orientation(args.sheet_id, args.orientation)?,
+            )),
             AppCommand::SetSpreadsheetBasicFilterOptions(args) => Ok(AppCommandResult::Document(
                 self.set_spreadsheet_basic_filter_options(
                     args.sheet_id,
@@ -1050,6 +1285,22 @@ impl OpenDocApp {
             AppCommand::SetSpreadsheetColumnWidth(args) => Ok(AppCommandResult::Document(
                 self.set_spreadsheet_column_width(args.sheet_id, args.column, args.width)?,
             )),
+            AppCommand::SetSpreadsheetSelectionRowsHidden(args) => Ok(AppCommandResult::Document(
+                self.set_spreadsheet_selection_rows_hidden(
+                    args.sheet_id,
+                    args.anchor,
+                    args.focus,
+                    args.hidden,
+                )?,
+            )),
+            AppCommand::SetSpreadsheetSelectionColumnsHidden(args) => Ok(
+                AppCommandResult::Document(self.set_spreadsheet_selection_columns_hidden(
+                    args.sheet_id,
+                    args.anchor,
+                    args.focus,
+                    args.hidden,
+                )?),
+            ),
             AppCommand::CopySpreadsheetRange(args) => Ok(AppCommandResult::Document(
                 self.copy_spreadsheet_range(args.sheet_id, args.source_range, args.target_address)?,
             )),
@@ -1073,14 +1324,17 @@ impl OpenDocApp {
                     args.delimiter.as_deref(),
                 )?))
             }
-            AppCommand::ExportSpreadsheetCsv(args) => Ok(AppCommandResult::Text(
+            AppCommand::ExportSpreadsheetCsv(args) => Ok(AppCommandResult::Export(
                 self.export_spreadsheet_csv(args.sheet_id, args.delimiter.as_deref())?,
             )),
             AppCommand::ImportSpreadsheetXlsx(args) => Ok(AppCommandResult::Document(
                 self.import_spreadsheet_xlsx(args.title, args.base64)?,
             )),
             AppCommand::ExportSpreadsheetXlsx => {
-                Ok(AppCommandResult::Text(self.export_spreadsheet_xlsx()?))
+                Ok(AppCommandResult::Export(self.export_spreadsheet_xlsx()?))
+            }
+            AppCommand::ExportSpreadsheetPdf => {
+                Ok(AppCommandResult::Export(self.export_spreadsheet_pdf()?))
             }
             AppCommand::AddSpreadsheetNamedRange(args) => Ok(AppCommandResult::Document(
                 self.add_spreadsheet_named_range(args.sheet_id, args.name, args.range)?,

@@ -7,6 +7,29 @@ use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::io::Read;
 
+/// Largest a single inflated part may be.
+///
+/// `word/document.xml` is the part that legitimately grows, and 64 MiB of
+/// WordprocessingML is a document no one has.
+const MAX_PART_BYTES: u64 = 64 * 1024 * 1024;
+/// Largest everything in the package may inflate to, together.
+const MAX_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
+/// How much larger than the file on disk the package may claim to be.
+///
+/// A zip bomb is not a large file; it is a small one that *says* it is large.
+/// DOCX XML compresses ten- to twentyfold, so a hundredfold ceiling leaves
+/// real documents alone while refusing the shape of the attack — a 1 MB
+/// `.docx` whose `word/document.xml` declares 1 GiB used to be inflated in
+/// full, for a measured 3.1 GB of resident memory.
+const MAX_INFLATION_RATIO: u64 = 100;
+/// Floor under the ratio, so a tiny but highly compressible package (an empty
+/// document is a few hundred bytes of zip) is judged by the absolute caps
+/// rather than by a ratio computed against almost nothing.
+const MIN_INFLATION_BUDGET: u64 = 16 * 1024 * 1024;
+/// How many entries a package may hold. Parts plus relationship parts plus
+/// media; a few thousand is already an extraordinary document.
+const MAX_ENTRIES: usize = 8192;
+
 pub(super) struct Package {
     archive: zip::ZipArchive<Cursor<Vec<u8>>>,
     names: Vec<String>,
@@ -14,9 +37,10 @@ pub(super) struct Package {
 
 impl Package {
     fn open(bytes: &[u8]) -> Result<Self, ImportError> {
-        let archive = zip::ZipArchive::new(Cursor::new(bytes.to_vec())).map_err(|err| {
+        let mut archive = zip::ZipArchive::new(Cursor::new(bytes.to_vec())).map_err(|err| {
             ImportError::InvalidInput(format!("DOCX package could not be opened: {err}"))
         })?;
+        screen_declared_sizes(&mut archive, bytes.len() as u64)?;
         let names = archive.file_names().map(str::to_string).collect();
         Ok(Self { archive, names })
     }
@@ -33,9 +57,17 @@ impl Package {
                     .find(|candidate| candidate.eq_ignore_ascii_case(clean))
             })?
             .clone();
-        let mut file = self.archive.by_name(&actual).ok()?;
+        let file = self.archive.by_name(&actual).ok()?;
         let mut out = Vec::new();
-        file.read_to_end(&mut out).ok()?;
+        // `screen_declared_sizes` refused a package that *says* it is too big;
+        // this refuses one that lied about it. Without the `take`, the size in
+        // the central directory is a suggestion and the decompressor writes
+        // however much it likes.
+        let mut limited = file.take(MAX_PART_BYTES + 1);
+        limited.read_to_end(&mut out).ok()?;
+        if out.len() as u64 > MAX_PART_BYTES {
+            return None;
+        }
         Some(out)
     }
 
@@ -43,6 +75,52 @@ impl Package {
         let bytes = self.part(name)?;
         parse_xml_bytes(&bytes).ok()
     }
+}
+
+/// Refuse a package whose central directory already describes more than this
+/// reader will inflate.
+///
+/// Reading the declared sizes costs nothing — the central directory is parsed
+/// when the archive is opened — and refusing here means the attack never
+/// reaches a decompressor at all. The `Read::take` in [`Package::part`] is the
+/// second half: this half trusts the header, that half does not.
+fn screen_declared_sizes(
+    archive: &mut zip::ZipArchive<Cursor<Vec<u8>>>,
+    packaged_bytes: u64,
+) -> Result<(), ImportError> {
+    if archive.len() > MAX_ENTRIES {
+        return Err(ImportError::InvalidInput(format!(
+            "DOCX package holds {} entries, over the {MAX_ENTRIES} limit",
+            archive.len()
+        )));
+    }
+    let budget = MAX_TOTAL_BYTES.min(
+        packaged_bytes
+            .saturating_mul(MAX_INFLATION_RATIO)
+            .max(MIN_INFLATION_BUDGET),
+    );
+    let mut total: u64 = 0;
+    for index in 0..archive.len() {
+        // `by_index_raw` reads the entry's header without starting a
+        // decompressor, which is the whole point of screening first.
+        let entry = archive.by_index_raw(index).map_err(|err| {
+            ImportError::InvalidInput(format!("DOCX package entry could not be read: {err}"))
+        })?;
+        let declared = entry.size();
+        if declared > MAX_PART_BYTES {
+            let name = entry.name().to_string();
+            return Err(ImportError::InvalidInput(format!(
+                "DOCX part {name} declares {declared} bytes, over the {MAX_PART_BYTES}-byte limit"
+            )));
+        }
+        total = total.saturating_add(declared);
+        if total > budget {
+            return Err(ImportError::InvalidInput(format!(
+                "DOCX package declares more than {budget} bytes of content for a {packaged_bytes}-byte file"
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -159,6 +237,14 @@ pub(super) struct DocxParts {
     /// properties refer to them by. Loaded eagerly because which one is
     /// *used* is decided by `w:sectPr`, which is read later.
     pub(super) furniture_parts: BTreeMap<String, XmlElement>,
+    /// Relationships declared by each header/footer part.  Relationship IDs
+    /// are local to their source part, so a header's `rId1` is not the main
+    /// document's `rId1` (a public Google Docs DOCX commonly uses the latter
+    /// for its theme and the former for a logo image).
+    pub(super) furniture_relationships: BTreeMap<String, BTreeMap<String, Relationship>>,
+    /// Media addressed through [`Self::furniture_relationships`], in the same
+    /// per-part relationship-ID scope.
+    pub(super) furniture_media: BTreeMap<String, BTreeMap<String, ImportedBlob>>,
 }
 
 impl DocxParts {
@@ -174,6 +260,8 @@ impl DocxParts {
             comments_extended: None,
             media: BTreeMap::new(),
             furniture_parts: BTreeMap::new(),
+            furniture_relationships: BTreeMap::new(),
+            furniture_media: BTreeMap::new(),
         }
     }
 
@@ -236,6 +324,55 @@ impl DocxParts {
                 } else if rel_type.ends_with("/header") || rel_type.ends_with("/footer") {
                     if let Some(part) = package.xml_part(path) {
                         parts.furniture_parts.insert(rel.id.clone(), part);
+                        let (furniture_dir, furniture_file) =
+                            path.rsplit_once('/').unwrap_or(("", path.as_str()));
+                        let furniture_rels_path = if furniture_dir.is_empty() {
+                            format!("_rels/{furniture_file}.rels")
+                        } else {
+                            format!("{furniture_dir}/_rels/{furniture_file}.rels")
+                        };
+                        let furniture_rels = package
+                            .part(&furniture_rels_path)
+                            .map(|bytes| parse_relationships(&bytes))
+                            .unwrap_or_default();
+                        let mut furniture_media = BTreeMap::new();
+                        for furniture_rel in &furniture_rels {
+                            if furniture_rel.external || !relationship_is_image(furniture_rel) {
+                                continue;
+                            }
+                            let Some(media_path) =
+                                resolve_part_path(furniture_dir, &furniture_rel.target)
+                            else {
+                                continue;
+                            };
+                            let Some(bytes) =
+                                package.part(&media_path).filter(|bytes| !bytes.is_empty())
+                            else {
+                                continue;
+                            };
+                            let hash = opendoc_core::digest_bytes("sha256", &bytes)
+                                .map_err(|err| ImportError::InvalidInput(err.to_string()))?
+                                .to_string();
+                            furniture_media.insert(
+                                furniture_rel.id.clone(),
+                                ImportedBlob {
+                                    name: media_name(&media_path),
+                                    media_type: media_type(&media_path).to_string(),
+                                    hash,
+                                    bytes,
+                                },
+                            );
+                        }
+                        parts.furniture_relationships.insert(
+                            rel.id.clone(),
+                            furniture_rels
+                                .into_iter()
+                                .map(|furniture_rel| (furniture_rel.id.clone(), furniture_rel))
+                                .collect(),
+                        );
+                        parts
+                            .furniture_media
+                            .insert(rel.id.clone(), furniture_media);
                     }
                 } else if relationship_is_image(&rel) {
                     if let Some(bytes) = package.part(path).filter(|bytes| !bytes.is_empty()) {

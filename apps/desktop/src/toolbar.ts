@@ -8,13 +8,27 @@
 import { morphChildren } from "./editor";
 import { escapeHtml } from "./ui";
 import { invoke } from "./invoke";
-import type { AppBlock, AppBlockProperties } from "./types";
+import type { AppBlock, AppBlockProperties, AppInline } from "./types";
+import { APP_LINE_SPACING_PRESETS, APP_TWIPS_PER_POINT } from "./generated/document";
 import type { ListKindName } from "./state";
 import { state } from "./state";
-import { edit, focusBlock, focusInline, query, showError } from "./shared";
+import { edit, findBlock, focusBlock, focusInline, query, showError } from "./shared";
 import { editorHooks } from "./shell";
 import { focusedCell, setCellFormat } from "./spreadsheet";
-import { runAction } from "./actions";
+import { runAction, setBulletMarkerPreset } from "./actions";
+
+// Native colour inputs can take focus between pointer-down and their later
+// `change` event. Preserve the selection the user saw when opening the
+// paragraph control so a focus collapse cannot colour a different paragraph.
+let paragraphBackgroundSelection: typeof state.selection = null;
+// Native selects can move focus while their popup is open. Keep the list
+// selection from pointer-down through change so a marker remains attached to
+// the list run the reader opened the picker for.
+let bulletMarkerSelection: typeof state.selection = null;
+// Paragraph-spacing selects also use a native popup. Its change must retain
+// the paragraph selected when it opened, not whichever block browser focus
+// happens to reach before it closes.
+let paragraphSpacingSelection: typeof state.selection = null;
 
 /**
  * Alignment controls. The value is the model's own name — `start`/`end` are
@@ -62,6 +76,53 @@ function listButton(kind: ListKindName, label: string, glyph: string, block: App
   return `<button type="button" class="tb${active ? " active" : ""}" data-action="style:list:${kind}" aria-pressed="${active}" title="${escapeHtml(label)}">${glyph}</button>`;
 }
 
+function orderedListStartButton(block: AppBlock | null): string {
+  if (block?.kind !== "list-item" || block.list_kind !== "ordered" || block.list_id == null || block.level == null) return "";
+  const start = state.doc?.list_properties?.[block.list_id]?.ordered_starts?.[String(block.level)] ?? 1;
+  return `<button type="button" class="tb" data-action="list-start" title="Set numbering start">${escapeHtml(`${start}.`)}</button>`;
+}
+
+function orderedListFormatButton(block: AppBlock | null): string {
+  if (block?.kind !== "list-item" || block.list_kind !== "ordered" || block.list_id == null || block.level == null) return "";
+  const format = state.doc?.list_properties?.[block.list_id]?.ordered_formats?.[String(block.level)] ?? "inherited";
+  const labels: Record<string, string> = {
+    inherited: "1 a i",
+    decimal: "1.",
+    "lower-alpha": "a.",
+    "upper-alpha": "A.",
+    "lower-roman": "i.",
+    "upper-roman": "I.",
+  };
+  return `<button type="button" class="tb" data-action="list-format" title="Set numbering format">${escapeHtml(labels[format] ?? "1.")}</button>`;
+}
+
+function bulletListMarkerButton(block: AppBlock | null): string {
+  if (block?.kind !== "list-item" || block.list_kind !== "bullet" || block.list_id == null || block.level == null) return "";
+  const marker = state.doc?.list_properties?.[block.list_id]?.bullet_markers?.[String(block.level)]
+    ?? ["disc", "circle", "square"][Number(block.level) % 3];
+  const glyphs: Record<string, string> = { disc: "•", circle: "◦", square: "■" };
+  return `<select class="tb-select narrow" data-select="bullet-marker" aria-label="Bullet marker" title="Bullet marker for this list level">
+    ${[["disc", "• Disc"], ["circle", "◦ Circle"], ["square", "■ Square"], ["custom", "Custom…"]]
+      .map(([value, label]) => `<option value="${value}"${value === marker ? " selected" : ""}>${escapeHtml(label)}</option>`)
+      .join("")}
+  </select><button type="button" class="tb" data-action="list-bullet-marker" title="Set custom bullet marker">${escapeHtml(glyphs[marker] ?? marker)}</button>`;
+}
+
+/** Paragraph direction controls, in the order Google Docs shows them. */
+const DIRECTIONS: [string, string][] = [
+  ["ltr", "Left-to-right paragraph"],
+  ["rtl", "Right-to-left paragraph"],
+];
+
+function directionButton(value: string, label: string, properties: AppBlockProperties): string {
+  // Unset means the block inherits, and the inherited default is left-to-right.
+  const active = (properties.direction ?? "ltr") === value;
+  // Spelled rather than drawn: the two icons Docs uses are a pilcrow with a
+  // small arrow, which at toolbar size are one glyph apart and unreadable.
+  const glyph = value === "rtl" ? "RTL" : "LTR";
+  return `<button type="button" class="tb${active ? " active" : ""}" data-action="direction:${value}" aria-pressed="${active}" title="${escapeHtml(label)}">${glyph}</button>`;
+}
+
 const FONT_SIZES = ["8", "9", "10", "11", "12", "14", "18", "24", "36"];
 const FONTS = ["Arial", "Georgia", "Times New Roman", "Courier New", "Verdana", "Inter"];
 
@@ -83,10 +144,14 @@ export function renderToolbar(): void {
     <select class="tb-select" data-select="style" aria-label="Paragraph style">
       ${[
         ["paragraph", "Normal text"],
+        ["title", "Title"],
+        ["subtitle", "Subtitle"],
         ["heading:1", "Heading 1"],
         ["heading:2", "Heading 2"],
         ["heading:3", "Heading 3"],
         ["heading:4", "Heading 4"],
+        ["heading:5", "Heading 5"],
+        ["heading:6", "Heading 6"],
         ["list:bullet", "Bulleted list"],
         ["list:ordered", "Numbered list"],
         ["list:checklist", "Checklist"],
@@ -107,19 +172,27 @@ export function renderToolbar(): void {
     ${toggle("strike", "<s>S</s>", "Strikethrough")}
     <label class="tb color" title="Text colour"><span style="border-bottom:3px solid ${escapeHtml(markValue("color", "#000"))}">A</span><input type="color" data-color="color" value="${escapeHtml(markValue("color", "#000000"))}"></label>
     <label class="tb color" title="Highlight"><span style="background:${escapeHtml(markValue("background", "transparent"))}">▮</span><input type="color" data-color="background" value="${escapeHtml(markValue("background", "#ffff00"))}"></label>
+    <label class="tb color" title="Paragraph background"><span style="background:${escapeHtml(properties.background ?? "transparent")}">¶</span><input type="color" data-paragraph-background value="${escapeHtml(properties.background ?? "#ffffff")}"></label>
+    <button type="button" class="tb${properties.border ? " active" : ""}" data-action="paragraph-border" aria-pressed="${!!properties.border}" title="Toggle 1 pt paragraph border">▣</button>
     <span class="sep"></span>
     <button type="button" class="tb" data-action="insert-link" title="Insert link (Ctrl+K)">🔗</button>
     <button type="button" class="tb" data-action="comment" title="Add comment (Ctrl+Alt+M)">💬</button>
     <button type="button" class="tb" data-action="insert-image" title="Insert image">🖼</button>
     <span class="sep"></span>
     ${ALIGNMENTS.map(([value, label, shortcut]) => alignButton(value, label, shortcut, properties)).join("")}
-    ${presetSelect("line-spacing", "Line spacing", lineSpacingValue(properties), LINE_SPACING_PRESETS, describeSpacing)}
+    ${DIRECTIONS.map(([value, label]) => directionButton(value, label, properties)).join("")}
+    ${presetSelect("line-spacing", "Line spacing", lineSpacingValue(properties), lineSpacingOptions(properties))}
     ${presetSelect("space-before", "Space before paragraph", properties.space_before_twips == null ? "" : String(properties.space_before_twips), paragraphSpacePresets("Before"), describeTwips)}
     ${presetSelect("space-after", "Space after paragraph", properties.space_after_twips == null ? "" : String(properties.space_after_twips), paragraphSpacePresets("After"), describeTwips)}
+    <button type="button" class="tb${properties.indent_first_line_twips ? " active" : ""}" data-action="paragraph-first-line-indent" aria-pressed="${!!properties.indent_first_line_twips}" title="Set first-line or hanging indent">↤¶</button>
+    <button type="button" class="tb${properties.keep_with_next === true ? " active" : ""}" data-action="keep-with-next" aria-pressed="${properties.keep_with_next === true}" title="Keep with next paragraph">↳¶</button>
     <span class="sep"></span>
     ${listButton("bullet", "Bulleted list", "•≡", block)}
     ${listButton("ordered", "Numbered list", "1≡", block)}
     ${listButton("checklist", "Checklist", "☑", block)}
+    ${bulletListMarkerButton(block)}
+    ${orderedListStartButton(block)}
+    ${orderedListFormatButton(block)}
     <button type="button" class="tb" data-action="outdent" title="Decrease indent (Ctrl+[)">⇤</button>
     <button type="button" class="tb" data-action="indent" title="Increase indent (Ctrl+])">⇥</button>
     <button type="button" class="tb" data-action="clear-marks" title="Clear formatting">Tx</button>
@@ -139,6 +212,10 @@ export function renderToolbar(): void {
     <select class="tb-select" data-select="align" aria-label="Alignment">
       ${["left", "center", "right"].map((value) => `<option value="${value}"${(cell?.format.horizontal_align ?? "left") === value ? " selected" : ""}>${value}</option>`).join("")}
     </select>
+    <select class="tb-select" data-select="vertical-align" aria-label="Vertical alignment">
+      ${[["top", "Top"], ["middle", "Middle"], ["bottom", "Bottom"]].map(([value, label]) => `<option value="${value}"${(cell?.format.vertical_align ?? "bottom") === value ? " selected" : ""}>${label}</option>`).join("")}
+    </select>
+    <button type="button" class="tb${cell?.format.wrap_strategy === "wrap" ? " active" : ""}" data-action="cell-format:wrap" title="Wrap text">↵</button>
     <select class="tb-select" data-select="number-format" aria-label="Number format">
       ${["general", "number", "percent", "currency", "date", "time", "text"].map((value) => `<option value="${value}"${(cell?.format.number_format ?? "general") === value ? " selected" : ""}>${value}</option>`).join("")}
     </select>
@@ -151,7 +228,7 @@ export function renderToolbar(): void {
     <button type="button" class="tb" data-action="freeze" title="Freeze rows/columns above and left of the selection">❄</button>
     <button type="button" class="tb" data-action="filter" title="Create a filter on the selection">⏷</button>
     <span class="grow"></span>
-    <span class="cell-summary" data-cell-summary></span>`;
+    <span class="cell-summary" data-cell-summary id="spreadsheet-grid-status" role="status" aria-live="polite" aria-atomic="true"></span>`;
   const template = document.createElement("template");
   template.innerHTML = state.mode === "docs" ? docsToolbar : sheetsToolbar;
   morphChildren(bar, template.content);
@@ -164,34 +241,96 @@ export function renderToolbar(): void {
     }
   };
   bar.querySelectorAll<HTMLSelectElement>("select[data-select]").forEach((select) => {
-    select.onchange = () => void onSelectChange(select.dataset.select ?? "", select.value);
+    if (select.dataset.select === "bullet-marker" || select.dataset.select === "space-before" || select.dataset.select === "space-after") {
+      select.onpointerdown = () => {
+        if (select.dataset.select === "bullet-marker") bulletMarkerSelection = state.selection;
+        else paragraphSpacingSelection = state.selection;
+      };
+    }
+    select.onchange = () => {
+      const kind = select.dataset.select ?? "";
+      if (kind === "bullet-marker") {
+        const selection = bulletMarkerSelection ?? state.selection;
+        bulletMarkerSelection = null;
+        void setBulletMarkerPreset(select.value, selection);
+      } else if (kind === "space-before" || kind === "space-after") {
+        const selection = paragraphSpacingSelection ?? state.selection;
+        paragraphSpacingSelection = null;
+        void setParagraphSpace(kind, select.value, selection);
+      } else {
+        void onSelectChange(kind, select.value);
+      }
+    };
   });
   bar.querySelectorAll<HTMLInputElement>("input[data-color]").forEach((input) => {
     input.onchange = () => void applyMark(input.dataset.color ?? "color", input.value, "set");
+  });
+  bar.querySelectorAll<HTMLInputElement>("input[data-paragraph-background]").forEach((input) => {
+    input.onpointerdown = () => {
+      paragraphBackgroundSelection = state.selection;
+    };
+    input.onchange = () => {
+      const selection = paragraphBackgroundSelection ?? state.selection;
+      paragraphBackgroundSelection = null;
+      void setParagraphBackground(input.value, selection);
+    };
   });
   bar.querySelectorAll<HTMLInputElement>("input[data-cell-color]").forEach((input) => {
     input.onchange = () => void setCellFormat(input.dataset.cellColor ?? "text_color", input.value);
   });
 }
 
+async function setParagraphBackground(color: string, selection = state.selection): Promise<void> {
+  if (!selection) return;
+  await edit("set_editor_selection_block_background", { selection, color });
+  state.editor?.setSelection(selection);
+  state.editor?.focus();
+}
+
 async function onSelectChange(kind: string, value: string): Promise<void> {
   if (kind === "style") {
-    await runAction(value.startsWith("heading:") ? `style:heading:${value.split(":")[1]}` : value.startsWith("list:") ? `style:list:${value.split(":")[1]}` : "style:paragraph");
+    await runAction(value.startsWith("heading:") ? `style:heading:${value.split(":")[1]}` : value === "title" || value === "subtitle" ? `style:${value}` : value.startsWith("list:") ? `style:list:${value.split(":")[1]}` : "style:paragraph");
   } else if (kind === "line-spacing") {
     await setLineSpacing(value);
   } else if (kind === "space-before" || kind === "space-after") {
     await setParagraphSpace(kind === "space-before" ? "space-before" : "space-after", value);
   } else if (kind === "font" || kind === "size") {
     await applyMark(kind, value, "set");
+  } else if (kind === "bullet-marker") {
+    await runAction(value === "custom" ? "list-bullet-marker" : `list-bullet-marker:${value}`);
   } else if (kind === "align") {
     await setCellFormat("horizontal_align", value);
   } else if (kind === "number-format") {
     await setCellFormat("number_format", value);
+  } else if (kind === "vertical-align") {
+    await setCellFormat("vertical_align", value);
   }
 }
 
 export async function applyMark(kind: string, value: string | null, action: "toggle" | "set" | "remove"): Promise<void> {
   if (!state.selection) return;
+  if (state.documentEditingMode === "suggest") {
+    const proposal = formatSuggestionRange(kind, value, action);
+    if (!proposal) return;
+    await edit(
+      proposal.remove
+        ? "add_text_range_format_removal_suggestion"
+        : proposal.expectedValue !== undefined
+          ? "add_text_range_format_replacement_suggestion"
+          : "add_text_range_format_suggestion",
+      {
+      startInlineId: proposal.startInlineId,
+      endInlineId: proposal.endInlineId,
+      author: state.authorName,
+      markKind: kind,
+      ...(proposal.expectedValue !== undefined ? { expectedValue: proposal.expectedValue } : {}),
+      value: proposal.remove ? null : value,
+      },
+    );
+    state.editor?.setSelection(state.selection);
+    state.editor?.focus();
+    return;
+  }
   try {
     const result = await invoke("apply_editor_mark", { selection: state.selection, mark_kind: kind, value, action });
     editorHooks.onResult(result);
@@ -201,44 +340,182 @@ export async function applyMark(kind: string, value: string | null, action: "tog
   }
 }
 
+/**
+ * The suggestion model addresses a format proposal by complete inline ids,
+ * whereas the live editor may select arbitrary character offsets.  Do not
+ * widen a character selection here: that would make "bold this word" propose
+ * bolding a larger run.  Direct formatting has a splitting pass for that;
+ * suggestion mode deliberately refuses it until suggestions can carry the
+ * same character-granular boundary.
+ */
+function formatSuggestionRange(
+  kind: string,
+  value: string | null,
+  action: "toggle" | "set" | "remove",
+): { startInlineId: string; endInlineId: string; remove: boolean; expectedValue?: string } | null {
+  const selection = state.selection;
+  if (!selection || kind === "all" || kind === "link") {
+    showError("Suggest mode can propose text-format changes on a selected whole run; it cannot change links or clear every format at once.");
+    return null;
+  }
+  // A value-bearing mark can be added or replaced whole-inline. Replacement
+  // now carries the exact displayed source value as a compare-and-set
+  // precondition, so review cannot overwrite a concurrent formatting edit.
+  const isValueReplacement = action === "set"
+    && value !== null
+    && (kind === "color" || kind === "background" || kind === "font" || kind === "size");
+  if (value !== null && action !== "remove" && !isValueReplacement) {
+    showError("Suggest mode can add or replace a font, size, text colour, or highlight on complete text runs.");
+    return null;
+  }
+  const { anchor, focus } = selection;
+  if (!anchor.inline_id || !focus.inline_id) {
+    showError("Select complete text runs before proposing a format change.");
+    return null;
+  }
+  const inlines = documentInlines();
+  const anchorIndex = inlines.findIndex((inline) => inline.id === anchor.inline_id);
+  const focusIndex = inlines.findIndex((inline) => inline.id === focus.inline_id);
+  if (anchorIndex < 0 || focusIndex < 0) {
+    showError("The selected text is no longer present.");
+    return null;
+  }
+  const anchorLength = Array.from(inlines[anchorIndex].text).length;
+  const focusLength = Array.from(inlines[focusIndex].text).length;
+  const forward = anchor.offset === 0 && focus.offset === focusLength;
+  const backward = focus.offset === 0 && anchor.offset === anchorLength;
+  if (!forward && !backward) {
+    showError("Select complete text runs before proposing a format change; partial text formatting suggestions are not representable yet.");
+    return null;
+  }
+  const start = Math.min(anchorIndex, focusIndex);
+  const end = Math.max(anchorIndex, focusIndex);
+  const selected = inlines.slice(start, end + 1);
+  if (selected.length === 0 || selected.some((inline) => !inline.text)) {
+    showError("Select text before proposing a format change.");
+    return null;
+  }
+  const existingValues = selected.map((inline) => inline.mark_values[kind]);
+  const expectedValue = isValueReplacement && existingValues.every((candidate) => candidate !== undefined)
+    && existingValues.every((candidate) => candidate === existingValues[0])
+    ? existingValues[0]
+    : undefined;
+  if (isValueReplacement && selected.some((inline) => inline.mark_kinds?.includes(kind)) && expectedValue === undefined) {
+    showError("Select complete runs with the same current font, size, text colour, or highlight before proposing its replacement.");
+    return null;
+  }
+  const remove = action === "remove" || (action === "toggle" && selected.every((inline) => inline.mark_kinds?.includes(kind)));
+  // `FormatRemove` already owns the source-preserving whole-run semantics for
+  // a value-bearing mark with no value: it removes every current value only
+  // on acceptance. Replacement remains deliberately unsupported because a
+  // `Format` add has no expected-old-value precondition. In either case every
+  // selected run must visibly have the requested mark; otherwise the proposed
+  // removal would claim to affect content the reviewer cannot see.
+  if (remove && (value !== null || !selected.every((inline) => inline.mark_kinds?.includes(kind)))) {
+    showError("Select complete runs that already have this format before proposing its removal.");
+    return null;
+  }
+  return { startInlineId: inlines[start].id, endInlineId: inlines[end].id, remove, expectedValue };
+}
+
+/** Flatten body and table-cell inlines in the stable document order. */
+function documentInlines(): AppInline[] {
+  const result: AppInline[] = [];
+  const visit = (blocks: AppBlock[]) => {
+    for (const block of blocks) {
+      result.push(...block.content);
+      for (const row of block.rows ?? []) {
+        for (const cell of row) visit(cell);
+      }
+    }
+  };
+  if (state.doc) visit(state.doc.blocks);
+  return result;
+}
+
 
 export async function setBlockStyle(
-  style: "paragraph" | "heading" | "list-item",
+  style: "paragraph" | "title" | "subtitle" | "heading" | "list-item",
   level: number,
   listKind: ListKindName,
 ): Promise<void> {
-  if (!state.selection) return;
-  await edit("set_editor_selection_block_style", { selection: state.selection, style, level, listKind });
-  state.editor?.setSelection(state.selection);
-  state.editor?.focus();
+  // Applying a block style morphs the editor while this command is in flight.
+  // Browser selection reconciliation may then clear `state.selection` before
+  // the awaited call resumes. Keep the model position the toolbar action was
+  // opened for, but only restore it if that same block survived the result.
+  const selection = state.selection;
+  if (!selection) return;
+  const restoreSelection = () => {
+    const live = findBlock(selection.focus.block_id) ? selection : null;
+    state.selection = live;
+    renderToolbar();
+    state.editor?.setSelection(live);
+    state.editor?.focus();
+  };
+  if (state.documentEditingMode === "suggest") {
+    // Lists are excluded by ADR 0039: their durable run/level state cannot be
+    // represented by changing just one block kind.  A suggestion also names
+    // exactly the focused block rather than widening an arbitrary selection.
+    if (style === "list-item") {
+      showError("Suggest mode cannot propose list conversion; list-run changes need their own review operation.");
+      return;
+    }
+    const block = focusBlock();
+    if (!block) {
+      showError("Place the caret in one paragraph before proposing its style.");
+      return;
+    }
+    const proposed = style === "heading" ? `heading:${level}` : style;
+    await edit("add_paragraph_style_suggestion", {
+      blockId: block.id,
+      author: state.authorName,
+      style: proposed,
+    });
+    restoreSelection();
+    return;
+  }
+  await edit("set_editor_selection_block_style", { selection, style, level, listKind });
+  restoreSelection();
 }
 
 /**
  * Paragraph formatting always goes through a command: the empty value clears
  * the property so the block goes back to inheriting, which is a different
  * document state from an explicit zero and must not be conflated with one.
+ *
+ * `choice` is an index into `APP_LINE_SPACING_PRESETS` — the list Rust
+ * generates — or `LINE_SPACING_INHERIT`. The mode/value pair the command takes
+ * is read straight off the preset, so this module never joins those two into a
+ * string or takes one apart again.
  */
-export async function setLineSpacing(value: string): Promise<void> {
+export async function setLineSpacing(choice: string): Promise<void> {
   if (!state.selection) return;
-  if (value === "") {
+  if (choice === LINE_SPACING_INHERIT) {
     await edit("clear_editor_selection_block_property", { selection: state.selection, key: "line-spacing" });
   } else {
-    const [spacingMode, raw] = value.split(":");
-    await edit("set_editor_selection_block_line_spacing", { selection: state.selection, spacingMode, spacingValue: Number(raw) });
+    const preset = APP_LINE_SPACING_PRESETS[Number(choice)];
+    // An index the presets do not cover is the "keep what the document has"
+    // option, which is not a change at all.
+    if (!preset) return;
+    await edit("set_editor_selection_block_line_spacing", { selection: state.selection, spacingMode: preset.mode, spacingValue: preset.value });
   }
   state.editor?.setSelection(state.selection);
   state.editor?.focus();
 }
 
-async function setParagraphSpace(key: "space-before" | "space-after", value: string): Promise<void> {
-  if (!state.selection) return;
+async function setParagraphSpace(
+  key: "space-before" | "space-after",
+  value: string,
+  selection = state.selection,
+): Promise<void> {
+  if (!selection) return;
   if (value === "") {
-    await edit("clear_editor_selection_block_property", { selection: state.selection, key });
+    await edit("clear_editor_selection_block_property", { selection, key });
   } else {
     const command = key === "space-before" ? "set_editor_selection_block_space_before" : "set_editor_selection_block_space_after";
-    await edit(command, { selection: state.selection, twips: Number(value) });
+    await edit(command, { selection, twips: Number(value) });
   }
-  state.editor?.setSelection(state.selection);
+  state.editor?.setSelection(selection);
   state.editor?.focus();
 }
 
@@ -249,16 +526,81 @@ export async function setBlockAlignment(alignment: string): Promise<void> {
   state.editor?.focus();
 }
 
+/**
+ * Paragraph direction, for the blocks the selection covers.
+ *
+ * The whole of RTL was already finished in Rust — the command, the
+ * `direction` block property, and `opendoc-render` writing `direction:rtl`
+ * on the block — and nothing in the UI could reach any of it. Alignment is
+ * already stated direction-relatively (`start`/`end`), so setting the
+ * direction is all a right-to-left paragraph needs.
+ */
+export async function setBlockDirection(direction: string): Promise<void> {
+  if (!state.selection) return;
+  await edit("set_editor_selection_block_direction", { selection: state.selection, direction });
+  state.editor?.setSelection(state.selection);
+  state.editor?.focus();
+}
+
+/** Toggle the durable pagination relationship for every selected paragraph. */
+export async function toggleKeepWithNext(): Promise<void> {
+  if (!state.selection) return;
+  const next = focusBlockProperties().keep_with_next !== true;
+  await edit("set_editor_selection_block_keep_with_next", { selection: state.selection, keepWithNext: next });
+  state.editor?.setSelection(state.selection);
+  state.editor?.focus();
+}
+
+/** A compact toolbar affordance for the bounded uniform paragraph frame.
+ * More elaborate per-edge/padding dialogs would promise semantics the model
+ * deliberately does not own. */
+export async function toggleParagraphBorder(): Promise<void> {
+  if (!state.selection) return;
+  if (focusBlockProperties().border) {
+    await edit("clear_editor_selection_block_property", { selection: state.selection, key: "border" });
+  } else {
+    await edit("set_editor_selection_block_border", { selection: state.selection, style: "solid", twips: 20, color: "#000000" });
+  }
+  state.editor?.setSelection(state.selection);
+  state.editor?.focus();
+}
+
 /** Blocks the caret covers, for showing which paragraph controls are active. */
 function focusBlockProperties(): AppBlockProperties {
   return focusBlock()?.properties ?? {};
 }
 
-/** `"multiple:1500"` and friends: the wire form of a line-spacing preset. */
+/** The `<option>` value standing for "no line spacing set; inherit". */
+const LINE_SPACING_INHERIT = "";
+/** The `<option>` value standing for a spacing no preset covers. */
+const LINE_SPACING_OTHER = "other";
+
+/** Which preset the block's spacing is, as an `<option>` value.
+ *
+ *  The spacing itself is compared as the model's own `mode`/`value` pair, so
+ *  nothing here has to know how those two would be spelled together. */
 function lineSpacingValue(properties: AppBlockProperties): string {
-  const mode = properties.line_spacing_mode;
-  const value = properties.line_spacing_value;
-  return mode && value != null ? `${mode}:${value}` : "";
+  if (properties.line_spacing_mode == null || properties.line_spacing_value == null) {
+    return LINE_SPACING_INHERIT;
+  }
+  const index = APP_LINE_SPACING_PRESETS.findIndex(
+    (preset) => preset.mode === properties.line_spacing_mode && preset.value === properties.line_spacing_value,
+  );
+  return index >= 0 ? String(index) : LINE_SPACING_OTHER;
+}
+
+/** The presets, plus the block's own spacing when no preset covers it — an
+ *  imported document, say. Rust labels that one (`line_spacing_label`), because
+ *  how a spacing reads is a projection rule and not the toolbar's. */
+function lineSpacingOptions(properties: AppBlockProperties): [string, string][] {
+  const presets: [string, string][] = [
+    // The empty value is "inherit", which is not the same document state as
+    // any explicit number — picking it clears the property.
+    [LINE_SPACING_INHERIT, "Line ⇕"],
+    ...APP_LINE_SPACING_PRESETS.map((preset, index) => [String(index), preset.label] as [string, string]),
+  ];
+  if (lineSpacingValue(properties) !== LINE_SPACING_OTHER) return presets;
+  return [...presets, [LINE_SPACING_OTHER, properties.line_spacing_label ?? "Custom"]];
 }
 
 /**
@@ -266,17 +608,21 @@ function lineSpacingValue(properties: AppBlockProperties): string {
  * choosing it clears the property so the block inherits again, which is a
  * different document state from any explicit number. A value the presets do
  * not cover (an imported document, say) is appended as its own selected
- * option rather than being silently displayed as something else.
+ * option rather than being silently displayed as something else — either by
+ * `describeOther` here, or by the caller when Rust already labelled it.
  */
 function presetSelect(
   name: string,
   label: string,
   current: string,
   presets: [string, string][],
-  describeOther: (value: string) => string,
+  describeOther?: (value: string) => string,
 ): string {
   const known = presets.some(([value]) => value === current);
-  const options = known || current === "" ? presets : [...presets, [current, describeOther(current)] as [string, string]];
+  const options =
+    known || current === "" || !describeOther
+      ? presets
+      : [...presets, [current, describeOther(current)] as [string, string]];
   return `<select class="tb-select spacing" data-select="${name}" aria-label="${escapeHtml(label)}" title="${escapeHtml(label)}">
       ${options
         .map(([value, text]) => `<option value="${escapeHtml(value)}"${value === current ? " selected" : ""}>${escapeHtml(text)}</option>`)
@@ -284,32 +630,13 @@ function presetSelect(
     </select>`;
 }
 
-const LINE_SPACING_PRESETS: [string, string][] = [
-  // The empty value is "inherit", which is not the same document state as any
-  // explicit number — picking it clears the property.
-  ["", "Line ⇕"],
-  ["multiple:1000", "Single"],
-  ["multiple:1150", "1.15"],
-  ["multiple:1500", "1.5"],
-  ["multiple:2000", "Double"],
-];
-
-// 20 twips to the point, so these are 0 / 6pt / 12pt / 18pt.
+// Stated in points and converted with the model's own factor, so the labels
+// and the stored twips cannot drift apart.
 const paragraphSpacePresets = (inheritLabel: string): [string, string][] => [
   ["", inheritLabel],
-  ["0", "0 pt"],
-  ["120", "6 pt"],
-  ["240", "12 pt"],
-  ["360", "18 pt"],
+  ...[0, 6, 12, 18].map((points) => [String(points * APP_TWIPS_PER_POINT), `${points} pt`] as [string, string]),
 ];
 
-function describeSpacing(value: string): string {
-  const [mode, raw] = value.split(":");
-  const amount = Number(raw);
-  if (mode === "multiple") return `${(amount / 1000).toFixed(2).replace(/0+$/, "").replace(/\.$/, "")}×`;
-  return `${amount / 20} pt`;
-}
-
 function describeTwips(value: string): string {
-  return `${Number(value) / 20} pt`;
+  return `${Number(value) / APP_TWIPS_PER_POINT} pt`;
 }

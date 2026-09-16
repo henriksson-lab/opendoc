@@ -25,5 +25,10 @@ run("desktop wasm build", "npm", ["run", "build:wasm"], { cwd: desktopRoot });
 run("desktop build", "npm", ["run", "build"], { cwd: desktopRoot });
 run("desktop smoke", "npm", ["run", "smoke"], { cwd: desktopRoot });
 run("desktop e2e (real browser)", "npm", ["run", "e2e"], { cwd: desktopRoot });
+// `src-tauri` is excluded from the workspace, so nothing above this line
+// builds, lints or runs it. `native-check` is where it enters the gate, and
+// it lives here rather than only in CI so that the gate a developer runs is
+// not weaker than the one CI runs. PLAN88 §7.
+run("desktop native check", "npm", ["run", "native-check"], { cwd: desktopRoot });
 
 console.log("\nOpenDoc desktop verification passed");

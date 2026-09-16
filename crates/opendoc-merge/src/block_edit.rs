@@ -166,9 +166,15 @@ pub(crate) fn set_block_text_style(
     for block in blocks {
         if &block.id == block_id_to_update {
             return match &block.kind {
-                BlockKind::Paragraph | BlockKind::Heading { .. } | BlockKind::ListItem { .. } => {
+                BlockKind::Paragraph
+                | BlockKind::Title
+                | BlockKind::Subtitle
+                | BlockKind::Heading { .. }
+                | BlockKind::ListItem { .. } => {
                     block.kind = match style {
                         BlockTextStyle::Paragraph => BlockKind::Paragraph,
+                        BlockTextStyle::Title => BlockKind::Title,
+                        BlockTextStyle::Subtitle => BlockKind::Subtitle,
                         BlockTextStyle::Heading { level } => BlockKind::Heading { level },
                         BlockTextStyle::ListItem {
                             list_id,
@@ -203,6 +209,7 @@ pub(crate) fn set_block_text_style(
 pub(crate) fn validate_block_text_style(style: &BlockTextStyle) -> Result<(), &'static str> {
     match style {
         BlockTextStyle::Paragraph => Ok(()),
+        BlockTextStyle::Title | BlockTextStyle::Subtitle => Ok(()),
         BlockTextStyle::Heading { level } if (1..=6).contains(level) => Ok(()),
         BlockTextStyle::Heading { .. } => Err("heading level is outside 1..=6"),
         BlockTextStyle::ListItem { level, .. } if *level <= 8 => Ok(()),

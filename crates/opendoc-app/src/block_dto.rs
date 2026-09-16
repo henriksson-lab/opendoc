@@ -1,58 +1,88 @@
 //! The block projection DTO and its typed block properties.
 
 use super::*;
+use crate::table_dto::AppCellBorder;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AppBlock {
     pub id: String,
     pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub level: Option<u8>,
     /// Projection of `list_kind`: `Some(true)` only for an ordered list item.
     /// A checklist item is `Some(false)` here — read `list_kind` to tell a
     /// checklist from a bullet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ordered: Option<bool>,
     /// The list run this item belongs to. Adjacent items sharing this id are
     /// one list; a different id starts a new list and restarts numbering.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub list_id: Option<String>,
     /// `"bullet"`, `"ordered"` or `"checklist"`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub list_kind: Option<String>,
     /// Checkbox state, present only for checklist items.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checked: Option<bool>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "crate::is_default")]
     pub properties: AppBlockProperties,
     pub style_value: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub equation_source: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blob_hash: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alt_text: Option<String>,
     /// Display width of an image block, in twips. Absent means the image is
     /// drawn at its intrinsic size — it is never filled in with the size the
     /// bytes happen to decode to, because that is a fact about the blob and
     /// not something the document said.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_width_twips: Option<i32>,
     /// Display height of an image block, in twips. Absent with a width
     /// present means "scale to keep the aspect ratio".
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_height_twips: Option<i32>,
     /// `"block"`, `"wrap-start"` or `"wrap-end"`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_placement: Option<String>,
+    /// Logical clearance around a floated image, in twips. Absent means the
+    /// target's ordinary float spacing, not four authored zeroes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_wrap_clearance: Option<opendoc_core::ImageWrapClearance>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_rotation_degrees: Option<i16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_opacity_percent: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_crop_top_percent: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_crop_right_percent: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_crop_bottom_percent: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_crop_left_percent: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_caption: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_border: Option<AppCellBorder>,
+    /// Durable positioned-object data (ADR 0022). The current desktop
+    /// renderer intentionally does not consume it yet, but projections must
+    /// preserve it so a read/modify/write client cannot erase the object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_positioned: Option<opendoc_core::PositionedImage>,
     pub content: Vec<AppInline>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rows: Vec<Vec<Vec<AppBlock>>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub row_ids: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cell_ids: Vec<Vec<String>>,
     /// The grid itself — column identities and widths, cell spans and cell
     /// styling — present only on a table block. `rows`, `row_ids` and
     /// `cell_ids` carry the *contents* of the grid; this carries its shape,
     /// and the two are parallel.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub table: Option<AppTable>,
 }
 
@@ -68,7 +98,11 @@ impl AppBlock {
         // Same reason: the grid's shape is a fact only a table has, and
         // coverage is derived here so no view has to derive it again.
         let table = match &block.kind {
-            BlockKind::Table { columns, rows } => {
+            BlockKind::Table {
+                columns,
+                properties,
+                rows,
+            } => {
                 let covered = opendoc_core::table_covered_positions(rows);
                 Some(AppTable {
                     columns: columns
@@ -78,6 +112,15 @@ impl AppBlock {
                             width_twips: column.width.map(|width| width.twips()),
                         })
                         .collect(),
+                    border: properties.border.map(AppCellBorder::from_core),
+                    alignment: properties
+                        .alignment
+                        .map(|alignment| alignment.as_str().to_string()),
+                    row_heights_twips: rows
+                        .iter()
+                        .map(|row| row.height.map(|height| height.twips()))
+                        .collect(),
+                    row_headers: rows.iter().map(|row| row.header).collect(),
                     cells: rows
                         .iter()
                         .enumerate()
@@ -102,6 +145,28 @@ impl AppBlock {
             match &block.kind {
                 BlockKind::Paragraph => (
                     "paragraph".to_string(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                ),
+                BlockKind::Title => (
+                    "title".to_string(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                ),
+                BlockKind::Subtitle => (
+                    "subtitle".to_string(),
                     None,
                     None,
                     None,
@@ -184,6 +249,39 @@ impl AppBlock {
                     Vec::new(),
                     Vec::new(),
                 ),
+                BlockKind::HorizontalRule => (
+                    "horizontal-rule".to_string(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                ),
+                BlockKind::TableOfContents { max_level } => (
+                    "table-of-contents".to_string(),
+                    Some(*max_level),
+                    None,
+                    None,
+                    None,
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                ),
+                BlockKind::Bibliography => (
+                    "bibliography".to_string(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                ),
                 BlockKind::PageBreak => (
                     "page-break".to_string(),
                     None,
@@ -218,6 +316,21 @@ impl AppBlock {
             image_placement: image_layout
                 .and_then(|layout| layout.placement)
                 .map(|placement| placement.as_str().to_string()),
+            image_wrap_clearance: image_layout.and_then(|layout| layout.wrap_clearance),
+            image_rotation_degrees: image_layout.and_then(|layout| layout.rotation_degrees),
+            image_opacity_percent: image_layout.and_then(|layout| layout.opacity_percent),
+            image_crop_top_percent: image_layout
+                .and_then(|layout| layout.crop.map(|crop| crop.top_percent)),
+            image_crop_right_percent: image_layout
+                .and_then(|layout| layout.crop.map(|crop| crop.right_percent)),
+            image_crop_bottom_percent: image_layout
+                .and_then(|layout| layout.crop.map(|crop| crop.bottom_percent)),
+            image_crop_left_percent: image_layout
+                .and_then(|layout| layout.crop.map(|crop| crop.left_percent)),
+            image_caption: image_layout.and_then(|layout| layout.caption.clone()),
+            image_border: image_layout
+                .and_then(|layout| layout.border.map(AppCellBorder::from_core)),
+            image_positioned: image_layout.and_then(|layout| layout.positioned.clone()),
             content: block
                 .content
                 .iter()
@@ -250,6 +363,40 @@ impl AppBlock {
                 .map(opendoc_core::ImagePlacement::parse)
                 .transpose()
                 .map_err(|err| AppApiError::Format(err.to_string()))?,
+            wrap_clearance: self.image_wrap_clearance,
+            rotation_degrees: self.image_rotation_degrees,
+            opacity_percent: self.image_opacity_percent,
+            crop: match (
+                self.image_crop_top_percent,
+                self.image_crop_right_percent,
+                self.image_crop_bottom_percent,
+                self.image_crop_left_percent,
+            ) {
+                (None, None, None, None) => None,
+                (
+                    Some(top_percent),
+                    Some(right_percent),
+                    Some(bottom_percent),
+                    Some(left_percent),
+                ) => Some(opendoc_core::ImageCrop {
+                    top_percent,
+                    right_percent,
+                    bottom_percent,
+                    left_percent,
+                }),
+                _ => {
+                    return Err(AppApiError::Format(
+                        "image crop must state all four edges".to_string(),
+                    ))
+                }
+            },
+            caption: self.image_caption.clone(),
+            border: self
+                .image_border
+                .as_ref()
+                .map(AppCellBorder::to_core)
+                .transpose()?,
+            positioned: self.image_positioned.clone(),
         };
         layout
             .validate()
@@ -316,6 +463,15 @@ impl AppBlock {
                                     .map(|id| parse_id(id))
                                     .transpose()?
                                     .unwrap_or_else(|| StableId::new("row")),
+                                height: shape
+                                    .row_heights_twips
+                                    .get(row_index)
+                                    .copied()
+                                    .flatten()
+                                    .map(opendoc_core::Length::from_twips)
+                                    .transpose()
+                                    .map_err(|err| AppApiError::Format(err.to_string()))?,
+                                header: shape.row_headers.get(row_index).copied().unwrap_or(false),
                                 cells,
                             })
                         })
@@ -346,9 +502,30 @@ impl AppBlock {
                     while columns.len() < width {
                         columns.push(opendoc_core::TableColumn::auto());
                     }
-                    BlockKind::Table { columns, rows }
+                    BlockKind::Table {
+                        columns,
+                        properties: opendoc_core::TableProperties {
+                            border: shape
+                                .border
+                                .as_ref()
+                                .map(AppCellBorder::to_core)
+                                .transpose()?,
+                            alignment: shape
+                                .alignment
+                                .as_deref()
+                                .map(opendoc_core::TableAlignment::parse)
+                                .transpose()
+                                .map_err(|err| AppApiError::Format(err.to_string()))?,
+                        },
+                        rows,
+                    }
                 }
                 "page-break" => BlockKind::PageBreak,
+                "horizontal-rule" => BlockKind::HorizontalRule,
+                "table-of-contents" => BlockKind::TableOfContents {
+                    max_level: self.level.unwrap_or(3),
+                },
+                "bibliography" => BlockKind::Bibliography,
                 "list-item" => BlockKind::ListItem {
                     list_id: self
                         .list_id
@@ -419,44 +596,62 @@ impl AppBlock {
 /// on anything else.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AppBlockProperties {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alignment: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub indent_start_twips: Option<i32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub indent_end_twips: Option<i32>,
     /// Negative means a hanging indent.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub indent_first_line_twips: Option<i32>,
     /// `"multiple"`, `"exact"` or `"at-least"`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line_spacing_mode: Option<String>,
     /// Thousandths of a line for `"multiple"`, twips for the other two modes.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line_spacing_value: Option<i32>,
-    #[serde(default)]
+    /// How the spacing above reads to a person — `"Single"`, `"1.15\u{d7}"`,
+    /// `"Exactly 24 pt"`. A projection, so `to_core` ignores it: it is here so
+    /// a view can label an imported spacing no preset covers without
+    /// inventing the wording itself.
+    //
+    // Skipped when unset like every field above it. Four of the ten used to
+    // serialize `null` instead, which put four dead keys on every formatted
+    // block of every projection and made this struct describe "inherit" two
+    // different ways at once — the second of which no consumer could use,
+    // because a block with *no* properties at all is omitted entirely by
+    // `AppBlock::properties` and arrives as no object rather than as an object
+    // full of nulls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_spacing_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub space_before_twips: Option<i32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub space_after_twips: Option<i32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direction: Option<String>,
+    /// Whether this paragraph requests that its next sibling stay on the
+    /// same page. Absent means inherit rather than false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_with_next: Option<bool>,
+    /// Flat paragraph background colour in canonical `#rrggbb` form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<String>,
+    /// Uniform paragraph frame. Per-edge borders belong to table cells.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub border: Option<AppCellBorder>,
 }
 
 impl AppBlockProperties {
     fn from_core(properties: &BlockProperties) -> Self {
-        let (line_spacing_mode, line_spacing_value) = match properties.line_spacing {
-            Some(opendoc_core::LineSpacing::Multiple(multiple)) => (
-                Some("multiple".to_string()),
-                Some(multiple.thousandths() as i32),
-            ),
-            Some(opendoc_core::LineSpacing::Exact(height)) => {
-                (Some("exact".to_string()), Some(height.twips()))
-            }
-            Some(opendoc_core::LineSpacing::AtLeast(height)) => {
-                (Some("at-least".to_string()), Some(height.twips()))
-            }
-            None => (None, None),
-        };
+        // The mode/value pair and its label are the model's own spelling of
+        // itself, never a second encoding written here.
+        let line_spacing_mode = properties
+            .line_spacing
+            .map(|spacing| spacing.mode().to_string());
+        let line_spacing_value = properties.line_spacing.map(|spacing| spacing.value());
+        let line_spacing_label = properties.line_spacing.map(|spacing| spacing.label());
         Self {
             alignment: properties
                 .alignment
@@ -468,11 +663,15 @@ impl AppBlockProperties {
                 .map(opendoc_core::Length::twips),
             line_spacing_mode,
             line_spacing_value,
+            line_spacing_label,
             space_before_twips: properties.space_before.map(opendoc_core::Length::twips),
             space_after_twips: properties.space_after.map(opendoc_core::Length::twips),
             direction: properties
                 .direction
                 .map(|direction| direction.as_str().to_string()),
+            keep_with_next: properties.keep_with_next,
+            background: properties.background.map(opendoc_core::Color::as_hex),
+            border: properties.border.map(AppCellBorder::from_core),
         }
     }
 
@@ -499,26 +698,12 @@ impl AppBlockProperties {
         }
         match (self.line_spacing_mode.as_deref(), self.line_spacing_value) {
             (None, None) => {}
-            (Some("multiple"), Some(thousandths)) => {
-                let thousandths = u32::try_from(thousandths).map_err(|_| {
-                    AppApiError::Format("line spacing multiple is negative".to_string())
-                })?;
-                properties.set(BlockProperty::LineSpacing(
-                    opendoc_core::LineSpacing::Multiple(model(
-                        opendoc_core::LineHeightMultiple::from_thousandths(thousandths),
-                    )?),
-                ));
-            }
-            (Some("exact"), Some(twips)) => {
-                let height = model(opendoc_core::Length::from_twips(twips))?;
+            // `line_spacing_label` is deliberately not read: it is a
+            // projection of the pair below, and trusting it would let a caller
+            // state a spacing twice and disagree with itself.
+            (Some(mode), Some(value)) => {
                 properties.set(BlockProperty::LineSpacing(model(
-                    opendoc_core::LineSpacing::exactly(height),
-                )?));
-            }
-            (Some("at-least"), Some(twips)) => {
-                let height = model(opendoc_core::Length::from_twips(twips))?;
-                properties.set(BlockProperty::LineSpacing(model(
-                    opendoc_core::LineSpacing::at_least(height),
+                    opendoc_core::LineSpacing::parse(mode, value),
                 )?));
             }
             _ => {
@@ -531,6 +716,17 @@ impl AppBlockProperties {
             properties.set(BlockProperty::Direction(model(
                 opendoc_core::TextDirection::parse(direction),
             )?));
+        }
+        if let Some(keep_with_next) = self.keep_with_next {
+            properties.set(BlockProperty::KeepWithNext(keep_with_next));
+        }
+        if let Some(background) = &self.background {
+            properties.set(BlockProperty::Background(model(
+                opendoc_core::Color::parse(background),
+            )?));
+        }
+        if let Some(border) = &self.border {
+            properties.set(BlockProperty::Border(border.to_core()?));
         }
         Ok(properties)
     }

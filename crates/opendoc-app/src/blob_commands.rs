@@ -155,14 +155,16 @@ impl OpenDocApp {
         let block = self
             .image_block_service()
             .image_block_for_existing_blob(blob_hash, alt_text)?;
-        Ok(self.apply(
+        self.apply(
             "insert-block",
             "image block",
             OperationKind::InsertBlock {
-                after: self.document.blocks.last().map(|block| block.id.clone()),
+                position: InsertPosition::after_or_last(
+                    self.document.blocks.last().map(|block| block.id.clone()),
+                ),
                 block,
             },
-        ))
+        )
     }
 
     pub fn insert_image_block_after(
@@ -172,22 +174,22 @@ impl OpenDocApp {
         alt_text: impl Into<String>,
     ) -> Result<AppDocument, AppApiError> {
         let after = parse_id(after_block_id.as_ref())?;
-        if !self.document.blocks.iter().any(|block| block.id == after) {
+        if find_block_in_blocks(&self.document.blocks, &after).is_none() {
             return Err(AppApiError::NotFound(format!(
-                "top-level block {after} was not found"
+                "block {after} was not found"
             )));
         }
         let block = self
             .image_block_service()
             .image_block_for_existing_blob(blob_hash, alt_text)?;
-        Ok(self.apply(
+        self.apply(
             "insert-block",
             "image block after block",
             OperationKind::InsertBlock {
-                after: Some(after),
+                position: InsertPosition::After(after),
                 block,
             },
-        ))
+        )
     }
 
     /// Draws the image `twips` wide, leaving the height to follow the aspect
@@ -266,6 +268,160 @@ impl OpenDocApp {
         };
         self.update_image_layout(block_id.as_ref(), "image placement", |layout| {
             layout.placement = stored;
+            if stored.is_none() {
+                layout.wrap_clearance = None;
+            }
+        })
+    }
+
+    /// Sets the four logical text clearances around a floated image. A spacing
+    /// dialog is one authored choice and therefore one undoable operation.
+    pub fn set_image_block_wrap_clearance(
+        &mut self,
+        block_id: impl AsRef<str>,
+        top_twips: i32,
+        end_twips: i32,
+        bottom_twips: i32,
+        start_twips: i32,
+    ) -> Result<AppDocument, AppApiError> {
+        let length = |twips| {
+            opendoc_core::Length::from_twips(twips)
+                .map_err(|err| AppApiError::Model(err.to_string()))
+        };
+        let clearance = opendoc_core::ImageWrapClearance {
+            top: length(top_twips)?,
+            end: length(end_twips)?,
+            bottom: length(bottom_twips)?,
+            start: length(start_twips)?,
+        };
+        clearance
+            .validate()
+            .map_err(|err| AppApiError::Model(err.to_string()))?;
+        self.update_image_layout(block_id.as_ref(), "image wrap clearance", |layout| {
+            layout.wrap_clearance = (!clearance.is_empty()).then_some(clearance);
+        })
+    }
+
+    /// Makes an image an out-of-flow object as defined by ADR 0022.
+    ///
+    /// This command persists and collaborates the intent. `None` anchors at
+    /// the page content rectangle; a supplied id anchors at that block's
+    /// border box. Both offsets are twips and may be negative.
+    pub fn set_image_block_positioned(
+        &mut self,
+        block_id: impl AsRef<str>,
+        anchor_block_id: Option<&str>,
+        horizontal_offset_twips: i32,
+        vertical_offset_twips: i32,
+        layer: impl AsRef<str>,
+    ) -> Result<AppDocument, AppApiError> {
+        let block_id = parse_id(block_id.as_ref())?;
+        let anchor = match anchor_block_id {
+            Some(anchor) => {
+                let anchor = parse_id(anchor)?;
+                if anchor == block_id {
+                    return Err(AppApiError::Format(
+                        "positioned image cannot anchor to itself".to_string(),
+                    ));
+                }
+                opendoc_core::PositionedImageAnchor::Block(anchor)
+            }
+            None => opendoc_core::PositionedImageAnchor::PageContent,
+        };
+        let layer = opendoc_core::PositionedImageLayer::parse(layer.as_ref())
+            .map_err(|error| AppApiError::Model(error.to_string()))?;
+        let positioned = opendoc_core::PositionedImage {
+            anchor,
+            horizontal_offset: opendoc_core::Length::from_twips(horizontal_offset_twips)
+                .map_err(|error| AppApiError::Model(error.to_string()))?,
+            vertical_offset: opendoc_core::Length::from_twips(vertical_offset_twips)
+                .map_err(|error| AppApiError::Model(error.to_string()))?,
+            layer,
+        };
+        self.update_image_layout(&block_id.to_string(), "position image", |layout| {
+            layout.placement = None;
+            layout.positioned = Some(positioned);
+        })
+    }
+
+    /// Returns an image from the positioned-object model to normal in-flow
+    /// layout without materialising an otherwise implicit block placement.
+    pub fn clear_image_block_positioned(
+        &mut self,
+        block_id: impl AsRef<str>,
+    ) -> Result<AppDocument, AppApiError> {
+        self.update_image_layout(block_id.as_ref(), "clear image position", |layout| {
+            layout.positioned = None;
+        })
+    }
+
+    pub fn set_image_block_effects(
+        &mut self,
+        block_id: impl AsRef<str>,
+        rotation_degrees: i16,
+        opacity_percent: u8,
+    ) -> Result<AppDocument, AppApiError> {
+        self.update_image_layout(block_id.as_ref(), "image effects", |layout| {
+            layout.rotation_degrees = (rotation_degrees != 0).then_some(rotation_degrees);
+            layout.opacity_percent = (opacity_percent != 100).then_some(opacity_percent);
+        })
+    }
+
+    pub fn set_image_block_crop(
+        &mut self,
+        block_id: impl AsRef<str>,
+        top_percent: u8,
+        right_percent: u8,
+        bottom_percent: u8,
+        left_percent: u8,
+    ) -> Result<AppDocument, AppApiError> {
+        let crop = opendoc_core::ImageCrop {
+            top_percent,
+            right_percent,
+            bottom_percent,
+            left_percent,
+        };
+        crop.validate()
+            .map_err(|error| AppApiError::Model(error.to_string()))?;
+        self.update_image_layout(block_id.as_ref(), "image crop", |layout| {
+            layout.crop = (!crop.is_empty()).then_some(crop);
+        })
+    }
+
+    pub fn set_image_block_caption(
+        &mut self,
+        block_id: impl AsRef<str>,
+        caption: impl Into<String>,
+    ) -> Result<AppDocument, AppApiError> {
+        let caption = caption.into();
+        self.update_image_layout(block_id.as_ref(), "image caption", |layout| {
+            layout.caption = (!caption.trim().is_empty()).then_some(caption);
+        })
+    }
+
+    pub fn set_image_block_border(
+        &mut self,
+        block_id: impl AsRef<str>,
+        style: impl AsRef<str>,
+        twips: i32,
+        color: impl AsRef<str>,
+    ) -> Result<AppDocument, AppApiError> {
+        let style = opendoc_core::BorderStyle::parse(style.as_ref().trim())
+            .map_err(|error| AppApiError::Model(error.to_string()))?;
+        let border = if style == opendoc_core::BorderStyle::None {
+            None
+        } else {
+            let width = opendoc_core::Length::from_twips(twips)
+                .map_err(|error| AppApiError::Model(error.to_string()))?;
+            let color = opendoc_core::Color::parse(color.as_ref().trim())
+                .map_err(|error| AppApiError::Model(error.to_string()))?;
+            Some(
+                opendoc_core::CellBorder::new(style, width, color)
+                    .map_err(|error| AppApiError::Model(error.to_string()))?,
+            )
+        };
+        self.update_image_layout(block_id.as_ref(), "image border", |layout| {
+            layout.border = border;
         })
     }
 
@@ -283,11 +439,14 @@ impl OpenDocApp {
         let block_id = parse_id(block_id)?;
         let mut layout = image_block_layout(&self.document.blocks, &block_id)?;
         edit(&mut layout);
-        Ok(self.apply(
+        layout
+            .validate()
+            .map_err(|error| AppApiError::Model(error.to_string()))?;
+        self.apply(
             "update-image-layout",
             label,
             OperationKind::UpdateImageLayout { block_id, layout },
-        ))
+        )
     }
 
     fn image_block_service(&self) -> ImageBlockService<'_> {
@@ -331,7 +490,7 @@ mod tests {
     fn an_inserted_image_states_no_size_and_renders_without_one() {
         let (app, _) = app_with_image();
         assert!(layout(&app).is_empty());
-        let html = app.document().body_html;
+        let html = app.document().body_html();
         assert!(html.contains("<figure"), "{html}");
         // No size attribute at all: absent means intrinsic, and materialising
         // a default here would freeze a fact about the blob into the document.
@@ -351,10 +510,29 @@ mod tests {
         // 1440 twips is 72pt, and the unset axis has to stay free or a
         // one-axis resize would stretch the picture.
         assert!(
-            projected.body_html.contains("width: 72pt; height: auto;"),
+            projected.body_html().contains("width: 72pt; height: auto;"),
             "{}",
-            projected.body_html
+            projected.body_html()
         );
+    }
+
+    #[test]
+    fn float_clearance_is_durable_and_clears_with_block_placement() {
+        let (mut app, image_id) = app_with_image();
+        app.set_image_block_placement(&image_id, "wrap-start")
+            .unwrap();
+        app.set_image_block_wrap_clearance(&image_id, 20, 40, 60, 80)
+            .unwrap();
+        assert_eq!(
+            layout(&app).wrap_clearance.unwrap().start,
+            Length::from_twips(80).unwrap()
+        );
+        assert!(app
+            .document()
+            .body_html()
+            .contains("--doc-image-clearance-start: 4pt"));
+        app.set_image_block_placement(&image_id, "block").unwrap();
+        assert!(layout(&app).wrap_clearance.is_none());
     }
 
     /// A corner drag sets both axes, and the whole point of doing that with
@@ -403,7 +581,7 @@ mod tests {
         app.clear_image_block_size(&image_id).unwrap();
 
         assert!(layout(&app).is_empty());
-        assert!(!app.document().body_html.contains("width:"));
+        assert!(!app.document().body_html().contains("width:"));
     }
 
     #[test]
@@ -431,7 +609,7 @@ mod tests {
         let (mut app, image_id) = app_with_image();
         assert!(
             app.document()
-                .body_html
+                .body_html()
                 .contains("data-placement=\"block\""),
             "the projection always states the placement it drew"
         );
@@ -445,7 +623,7 @@ mod tests {
         );
         assert!(app
             .document()
-            .body_html
+            .body_html()
             .contains("data-placement=\"wrap-end\""));
 
         app.set_image_block_placement(&image_id, "block").unwrap();
@@ -458,6 +636,154 @@ mod tests {
 
         assert!(app
             .set_image_block_placement(&image_id, "behind-text")
+            .is_err());
+    }
+
+    #[test]
+    fn positioned_image_persists_as_one_layout_operation_and_projects_geometry() {
+        let (mut app, image_id) = app_with_image();
+        let anchor_id = app.document.blocks[0].id.to_string();
+        let operations_before = app.document().operations.len();
+        app.set_image_block_positioned(&image_id, Some(&anchor_id), -240, 480, "behind-text")
+            .unwrap();
+
+        let stored_layout = layout(&app);
+        let positioned = stored_layout
+            .positioned
+            .as_ref()
+            .expect("position persisted");
+        assert_eq!(positioned.horizontal_offset.twips(), -240);
+        assert_eq!(positioned.vertical_offset.twips(), 480);
+        assert_eq!(
+            positioned.layer,
+            opendoc_core::PositionedImageLayer::BehindText
+        );
+        assert_eq!(app.document().operations.len(), operations_before + 1);
+        assert!(app
+            .document()
+            .body_html()
+            .contains("data-positioned=\"true\""));
+        assert!(app
+            .set_image_block_positioned(&image_id, Some(&image_id), 0, 0, "behind-text")
+            .is_err());
+    }
+
+    /// The desktop invokes positioning through the named command, where the
+    /// dispatcher owns undo checkpoints.  Keep this separate from the direct
+    /// service test above so a future UI/API wiring regression cannot make a
+    /// persisted position look like an undoable gesture.
+    #[test]
+    fn positioned_image_command_is_undoable_and_can_return_to_flow() {
+        let (mut app, image_id) = app_with_image();
+        let anchor_id = app.document.blocks[0].id.to_string();
+        let checkpoints_before = app.undo_stack.len();
+        app.dispatch_command(
+            "set_image_block_positioned",
+            serde_json::json!({
+                "blockId": image_id,
+                "anchorBlockId": anchor_id,
+                "horizontalOffsetTwips": -240,
+                "verticalOffsetTwips": 480,
+                "layer": "in-front-of-text",
+            }),
+        )
+        .expect("position image");
+        assert_eq!(app.undo_stack.len(), checkpoints_before + 1);
+        assert!(layout(&app).positioned.is_some());
+
+        app.dispatch_command(
+            "clear_image_block_positioned",
+            serde_json::json!({ "blockId": image_id }),
+        )
+        .expect("return image to flow");
+        assert!(layout(&app).positioned.is_none());
+        app.undo_current_edit().expect("undo returning to flow");
+        assert!(layout(&app).positioned.is_some());
+    }
+
+    #[test]
+    fn visual_effects_are_one_validated_undoable_image_layout_edit() {
+        let (mut app, image_id) = app_with_image();
+        app.dispatch_command(
+            "set_image_block_effects",
+            serde_json::json!({
+                "blockId": image_id,
+                "rotationDegrees": 90,
+                "opacityPercent": 40,
+            }),
+        )
+        .expect("effects");
+        assert_eq!(layout(&app).rotation_degrees, Some(90));
+        assert_eq!(layout(&app).opacity_percent, Some(40));
+        let html = app.document().body_html();
+        assert!(html.contains("transform: rotate(90deg);"), "{html}");
+        assert!(html.contains("opacity: 0.4;"), "{html}");
+        app.undo_current_edit().expect("undo effects");
+        assert!(layout(&app).is_empty());
+
+        let error = app
+            .set_image_block_effects(&image_id, 361, 100)
+            .expect_err("invalid rotation");
+        assert!(matches!(error, AppApiError::Model(_)), "{error:?}");
+    }
+
+    #[test]
+    fn crop_is_projected_and_refuses_to_erase_the_image() {
+        let (mut app, image_id) = app_with_image();
+        app.set_image_block_crop(&image_id, 10, 20, 30, 5)
+            .expect("crop");
+        assert_eq!(
+            layout(&app).crop,
+            Some(opendoc_core::ImageCrop {
+                top_percent: 10,
+                right_percent: 20,
+                bottom_percent: 30,
+                left_percent: 5,
+            })
+        );
+        assert!(app
+            .document()
+            .body_html()
+            .contains("clip-path: inset(10% 20% 30% 5%);"));
+        assert!(app.set_image_block_crop(&image_id, 50, 0, 50, 0).is_err());
+    }
+
+    #[test]
+    fn caption_is_a_separate_undoable_image_layout_edit() {
+        let (mut app, image_id) = app_with_image();
+        app.dispatch_command(
+            "set_image_block_caption",
+            serde_json::json!({ "blockId": image_id, "caption": "Figure 1. Results" }),
+        )
+        .expect("caption");
+        assert_eq!(layout(&app).caption.as_deref(), Some("Figure 1. Results"));
+        let html = app.document().body_html();
+        assert!(html.contains("<figcaption id=\"opendoc-image-caption:"));
+        assert!(html.contains(">Figure 1. Results</figcaption>"));
+        app.undo_current_edit().expect("undo caption");
+        assert!(layout(&app).caption.is_none());
+    }
+
+    #[test]
+    fn border_is_validated_rendered_and_undoable() {
+        let (mut app, image_id) = app_with_image();
+        app.dispatch_command(
+            "set_image_block_border",
+            serde_json::json!({ "blockId": image_id, "style": "dashed", "twips": 20, "color": "#336699" }),
+        )
+        .expect("border");
+        let border = layout(&app).border.expect("stored border");
+        assert_eq!(border.style(), opendoc_core::BorderStyle::Dashed);
+        assert_eq!(border.width().twips(), 20);
+        assert_eq!(border.color().as_hex(), "#336699");
+        assert!(app
+            .document()
+            .body_html()
+            .contains("border: 1pt dashed #336699;"));
+        app.undo_current_edit().expect("undo border");
+        assert!(layout(&app).border.is_none());
+        assert!(app
+            .set_image_block_border(&image_id, "solid", 121, "#000000")
             .is_err());
     }
 

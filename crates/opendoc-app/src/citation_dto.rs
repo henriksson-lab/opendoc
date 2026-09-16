@@ -261,3 +261,44 @@ pub(crate) fn app_citation_item_to_core(
         .map_err(|err| AppApiError::Format(err.to_string()))?;
     Ok(item)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The desktop/API route projects an `AppDocument` after each command.
+    /// Keep this cold default-APA case here rather than testing the direct
+    /// mutation method: `AppCitationDatabase::from_core` is where a previous
+    /// empty-document projection reached the deeply nested CSL decoder on an
+    /// already-shallow test stack. A real reference must continue to render;
+    /// the empty-bibliography fast path must not weaken APA behavior.
+    #[test]
+    fn cold_default_apa_reference_projects_through_the_app_dispatch_route() {
+        let mut app = OpenDocApp::new_empty_document();
+        app.dispatch_command("create_document", json!({ "title": "Citations" }))
+            .expect("create the document");
+        let AppCommandResult::Document(projected) = app
+            .dispatch_command(
+                "add_bibliography_reference",
+                json!({
+                    "title": "A projection reference",
+                    "authors": ["Doe"],
+                    "issued": "2024",
+                    "doi": null,
+                    "url": null,
+                }),
+            )
+            .expect("add and project an APA reference")
+        else {
+            panic!("bibliography command must return a document");
+        };
+
+        assert_eq!(projected.citations.style, "apa");
+        assert_eq!(projected.citations.bibliography.len(), 1);
+        assert!(
+            projected.citations.bibliography[0].text.contains("Doe"),
+            "the default APA bibliography projection retained its rendered entry"
+        );
+    }
+}

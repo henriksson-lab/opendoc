@@ -1,4 +1,4 @@
-use opendoc_core::HashRef;
+use opendoc_core::{digest_bytes, HashRef};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fmt;
@@ -8,6 +8,15 @@ const MAX_RECORD_VEC_ITEMS: u32 = 1_000_000;
 
 pub const SNAPSHOT_KIND: &str = "opendoc.snapshot.v0";
 pub const OPERATION_SEGMENT_KIND: &str = "opendoc.operation-segment.v0";
+pub const VERSION_COVERAGE_KIND: &str = "opendoc.version-coverage.v0";
+
+/// Hash algorithm a version coverage record names its manifest with.
+///
+/// ADR 0003 requires algorithm agility, and `HashRef` carries the
+/// algorithm, so a record written under a future algorithm reads back
+/// intact. What is pinned here is the one this build *writes*, matching
+/// the repository's own manifest addressing.
+pub const VERSION_COVERAGE_HASH: &str = "sha256";
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ManifestRecord {
@@ -171,6 +180,138 @@ impl SignatureRecord {
         require_no_surrounding_whitespace("signature signer_display", &self.signer_display)?;
         require_no_surrounding_whitespace("signature title", &self.title)?;
         require_non_empty_bytes("signature bytes", &self.signature)?;
+        Ok(())
+    }
+}
+
+/// What a *version* signature covers: a manifest, and through it the history
+/// that manifest names.
+///
+/// A signature over a snapshot covers the document in that snapshot and
+/// nothing else. Rewrite the head manifest with no parent and no operation
+/// segments and the snapshot is byte-identical, so the signature still
+/// verifies — over a document whose entire history has been erased. This
+/// record is the payload that closes that hole.
+///
+/// It is **derived**, never authored: [`VersionCoverageRecord::for_manifest`]
+/// is the only constructor, so a signer cannot claim coverage the manifest
+/// does not have, and there is no field a caller can set to widen or narrow
+/// what the signature says.
+///
+/// # What covering this transitively covers
+///
+/// [`Self::manifest`] is the content hash of the encoded [`ManifestRecord`],
+/// so every byte of that manifest is covered, and a manifest names by content
+/// hash:
+///
+/// - its parent manifest — and that manifest names *its* parent, so the whole
+///   ancestry is covered by induction;
+/// - its snapshot object, and so the document, workbook and blob metadata in
+///   it;
+/// - its operation segments, each of which names its own predecessor segment;
+/// - the content digest of every blob.
+///
+/// The other fields restate what the manifest already binds. They are here so
+/// the signed payload is **self-describing**: an investigator holding only
+/// these bytes can read that this version claimed a parent, without needing
+/// the repository that has since lost it. They add no integrity the
+/// `manifest` hash does not already provide.
+///
+/// # What it does not cover
+///
+/// - The branch head. It is a mutable pointer, not content; ADR 0002 makes
+///   moving it a normal operation.
+/// - Sidecars keyed by hash: version labels, blob signature sidecars, archive
+///   tombstones, lookup index records, candidate heads. A manifest does not
+///   name any of them.
+/// - **Presence.** Coverage is a statement about bytes, not about
+///   availability. An object that is simply gone leaves every signature over
+///   it verifying. Checking that a repository still holds what a signed
+///   version named is a walk over the store —
+///   `opendoc_store::Repository::audit_manifest_chain`.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct VersionCoverageRecord {
+    pub kind: String,
+    pub document_uuid: String,
+    pub branch: String,
+    /// Content hash of the encoded [`ManifestRecord`] this covers.
+    #[serde(with = "hash_ref_serde")]
+    pub manifest: HashRef,
+    #[serde(with = "hash_ref_opt_serde")]
+    pub parent: Option<HashRef>,
+    #[serde(with = "hash_ref_serde")]
+    pub snapshot: HashRef,
+    #[serde(with = "hash_ref_vec_serde")]
+    pub operation_segments: Vec<HashRef>,
+    #[serde(with = "hash_ref_vec_serde")]
+    pub blobs: Vec<HashRef>,
+    pub created_at_ms: u64,
+}
+
+impl VersionCoverageRecord {
+    /// Derive the coverage of `manifest`, hashing its canonical binary
+    /// encoding to bind the two together.
+    pub fn for_manifest(manifest: &ManifestRecord) -> Result<Self, FormatError> {
+        manifest.validate()?;
+        let hash = digest_bytes(VERSION_COVERAGE_HASH, &encode_record(manifest))
+            .map_err(|err| FormatError::InvalidRecord(err.to_string()))?;
+        let record = Self {
+            kind: VERSION_COVERAGE_KIND.to_string(),
+            document_uuid: manifest.document_uuid.clone(),
+            branch: manifest.branch.clone(),
+            manifest: hash,
+            parent: manifest.parent.clone(),
+            snapshot: manifest.snapshot.clone(),
+            operation_segments: manifest.operation_segments.clone(),
+            blobs: manifest.blobs.clone(),
+            created_at_ms: manifest.created_at_ms,
+        };
+        record.validate()?;
+        Ok(record)
+    }
+
+    /// The exact bytes a version signature is taken over.
+    ///
+    /// Deterministic canonical CBOR, so two verifiers that hold the same
+    /// manifest compute the same payload without agreeing on anything else.
+    pub fn signing_payload(&self) -> Result<Vec<u8>, FormatError> {
+        self.validate()?;
+        encode_canonical_cbor(self)
+    }
+
+    /// Read back a payload written by [`Self::signing_payload`], refusing
+    /// bytes that are not the canonical encoding of what they decode to.
+    ///
+    /// Non-canonical CBOR that decodes to the same record would verify under a
+    /// re-encoding verifier while differing byte for byte from what was
+    /// signed. Refusing it keeps "the payload" a single sequence of bytes.
+    pub fn from_signing_payload(bytes: &[u8]) -> Result<Self, FormatError> {
+        let record: Self = decode_cbor(bytes)?;
+        record.validate()?;
+        if encode_canonical_cbor(&record)? != bytes {
+            return Err(FormatError::InvalidRecord(
+                "version coverage payload is not canonical CBOR".to_string(),
+            ));
+        }
+        Ok(record)
+    }
+
+    /// Whether this coverage is the one `manifest` produces.
+    pub fn covers(&self, manifest: &ManifestRecord) -> bool {
+        Self::for_manifest(manifest).is_ok_and(|derived| &derived == self)
+    }
+
+    pub fn validate(&self) -> Result<(), FormatError> {
+        if self.kind != VERSION_COVERAGE_KIND {
+            return Err(FormatError::UnsupportedKind(self.kind.clone()));
+        }
+        require_canonical_document_uuid("version coverage document_uuid", &self.document_uuid)?;
+        require_repository_key_segment("version coverage branch", &self.branch)?;
+        require_unique_hash_refs(
+            "version coverage operation segment",
+            &self.operation_segments,
+        )?;
+        require_unique_hash_refs("version coverage blob", &self.blobs)?;
         Ok(())
     }
 }
@@ -958,6 +1099,12 @@ mod hash_ref_vec_serde {
 }
 
 #[cfg(test)]
+mod canonical_cbor_tests;
+
+#[cfg(test)]
+mod golden_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1701,5 +1848,162 @@ mod tests {
             Err(FormatError::InvalidRecord(message))
                 if message == "signature title has surrounding whitespace"
         ));
+    }
+
+    /// The point of the record: every hash a manifest names is inside the
+    /// target a version signature binds itself to.
+    ///
+    /// Each case below changes exactly one manifest field and asserts the
+    /// derived `manifest` hash moves. If any field were dropped from the
+    /// binary encoding — or from the manifest — its case would fail with that
+    /// field's name.
+    #[test]
+    fn every_manifest_field_moves_the_hash_a_version_signature_binds_to() {
+        fn manifest() -> ManifestRecord {
+            ManifestRecord {
+                document_uuid: "coverage-document-uuid".to_string(),
+                branch: "main".to_string(),
+                parent: Some(HashRef::parse("sha256:parent").unwrap()),
+                snapshot: HashRef::parse("sha256:snapshot").unwrap(),
+                operation_segments: vec![
+                    HashRef::parse("sha256:segmentone").unwrap(),
+                    HashRef::parse("sha256:segmenttwo").unwrap(),
+                ],
+                signatures: vec![HashRef::parse("sha256:snapshotsig").unwrap()],
+                blobs: vec![HashRef::parse("sha256:blobone").unwrap()],
+                created_at_ms: 1_700_000_000_000,
+            }
+        }
+
+        let base = manifest();
+        let coverage = VersionCoverageRecord::for_manifest(&base).unwrap();
+        assert!(coverage.covers(&base));
+        // The readable fields restate what the manifest binds, so a reader of
+        // the payload alone learns what this version claimed to be.
+        assert_eq!(coverage.parent, base.parent);
+        assert_eq!(coverage.snapshot, base.snapshot);
+        assert_eq!(coverage.operation_segments, base.operation_segments);
+        assert_eq!(coverage.blobs, base.blobs);
+        assert_eq!(coverage.document_uuid, base.document_uuid);
+        assert_eq!(coverage.branch, base.branch);
+        assert_eq!(coverage.created_at_ms, base.created_at_ms);
+
+        type Mutation = (&'static str, Box<dyn Fn(&mut ManifestRecord)>);
+        let mutations: Vec<Mutation> = vec![
+            (
+                "document_uuid",
+                Box::new(|m: &mut ManifestRecord| m.document_uuid = "other-document".to_string()),
+            ),
+            (
+                "branch",
+                Box::new(|m: &mut ManifestRecord| m.branch = "other".to_string()),
+            ),
+            (
+                "parent dropped — history truncated",
+                Box::new(|m: &mut ManifestRecord| m.parent = None),
+            ),
+            (
+                "parent repointed",
+                Box::new(|m: &mut ManifestRecord| {
+                    m.parent = Some(HashRef::parse("sha256:otherparent").unwrap())
+                }),
+            ),
+            (
+                "snapshot",
+                Box::new(|m: &mut ManifestRecord| {
+                    m.snapshot = HashRef::parse("sha256:othersnapshot").unwrap()
+                }),
+            ),
+            (
+                "operation segment dropped — history truncated",
+                Box::new(|m: &mut ManifestRecord| {
+                    m.operation_segments.pop();
+                }),
+            ),
+            (
+                "operation segment replaced",
+                Box::new(|m: &mut ManifestRecord| {
+                    m.operation_segments[0] = HashRef::parse("sha256:othersegment").unwrap()
+                }),
+            ),
+            (
+                "snapshot signature list",
+                Box::new(|m: &mut ManifestRecord| m.signatures.clear()),
+            ),
+            (
+                "blob swapped",
+                Box::new(|m: &mut ManifestRecord| {
+                    m.blobs[0] = HashRef::parse("sha256:otherblob").unwrap()
+                }),
+            ),
+            (
+                "blob added",
+                Box::new(|m: &mut ManifestRecord| {
+                    m.blobs.push(HashRef::parse("sha256:extrablob").unwrap())
+                }),
+            ),
+            (
+                "created_at_ms",
+                Box::new(|m: &mut ManifestRecord| m.created_at_ms += 1),
+            ),
+        ];
+
+        for (label, mutate) in mutations {
+            let mut altered = manifest();
+            mutate(&mut altered);
+            assert_ne!(altered, base, "the {label} case did not change anything");
+            let altered_coverage = VersionCoverageRecord::for_manifest(&altered).unwrap();
+            assert_ne!(
+                altered_coverage.manifest, coverage.manifest,
+                "changing {label} left the signed target unchanged"
+            );
+            assert!(
+                !coverage.covers(&altered),
+                "the {label} case still reports as covered"
+            );
+            assert_ne!(
+                altered_coverage.signing_payload().unwrap(),
+                coverage.signing_payload().unwrap(),
+                "changing {label} left the signed payload unchanged"
+            );
+        }
+    }
+
+    #[test]
+    fn version_coverage_validates_its_kind_and_its_hash_lists() {
+        let manifest = ManifestRecord {
+            document_uuid: "coverage-validate-uuid".to_string(),
+            branch: "main".to_string(),
+            parent: None,
+            snapshot: HashRef::parse("sha256:snapshot").unwrap(),
+            operation_segments: Vec::new(),
+            signatures: Vec::new(),
+            blobs: Vec::new(),
+            created_at_ms: 1,
+        };
+        let coverage = VersionCoverageRecord::for_manifest(&manifest).unwrap();
+        coverage.validate().unwrap();
+
+        let mut foreign = coverage.clone();
+        foreign.kind = "opendoc.snapshot.v0".to_string();
+        assert!(matches!(
+            foreign.validate(),
+            Err(FormatError::UnsupportedKind(kind)) if kind == "opendoc.snapshot.v0"
+        ));
+
+        let mut duplicated = coverage.clone();
+        duplicated.operation_segments = vec![
+            HashRef::parse("sha256:same").unwrap(),
+            HashRef::parse("sha256:same").unwrap(),
+        ];
+        assert!(matches!(
+            duplicated.validate(),
+            Err(FormatError::InvalidRecord(message))
+                if message.contains("version coverage operation segment")
+        ));
+
+        let mut bad_branch = coverage;
+        bad_branch.branch = "../escape".to_string();
+        assert!(bad_branch.validate().is_err());
     }
 }

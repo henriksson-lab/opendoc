@@ -121,4 +121,87 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         false,
         Some("write")
     ),
+    command!(
+        "set_image_block_wrap_clearance",
+        AppDocument,
+        [
+            arg!("blockId", String),
+            arg!("topTwips", Number),
+            arg!("endTwips", Number),
+            arg!("bottomTwips", Number),
+            arg!("startTwips", Number)
+        ],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
+        "set_image_block_positioned",
+        AppDocument,
+        [
+            arg!("blockId", String),
+            arg!("anchorBlockId", NullableString, optional),
+            arg!("horizontalOffsetTwips", Number),
+            arg!("verticalOffsetTwips", Number),
+            arg!("layer", String)
+        ],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
+        "clear_image_block_positioned",
+        AppDocument,
+        [arg!("blockId", String)],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
+        "set_image_block_effects",
+        AppDocument,
+        [
+            arg!("blockId", String),
+            arg!("rotationDegrees", Number),
+            arg!("opacityPercent", Number)
+        ],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
+        "set_image_block_crop",
+        AppDocument,
+        [
+            arg!("blockId", String),
+            arg!("topPercent", Number),
+            arg!("rightPercent", Number),
+            arg!("bottomPercent", Number),
+            arg!("leftPercent", Number)
+        ],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
+        "set_image_block_caption",
+        AppDocument,
+        [arg!("blockId", String), arg!("caption", String)],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
+        "set_image_block_border",
+        AppDocument,
+        [
+            arg!("blockId", String),
+            arg!("style", String),
+            arg!("twips", Number),
+            arg!("color", String)
+        ],
+        true,
+        false,
+        Some("write")
+    ),
 ];

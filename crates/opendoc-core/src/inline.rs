@@ -1,6 +1,7 @@
 //! Inline content: text runs, links, equations, marks and text ranges.
 
 use crate::annotation::validate_text_range;
+use crate::block::TextScope;
 use crate::citation::CitationDatabase;
 use crate::document::{inline_stable_id, validate_inline, validate_marks};
 use crate::ids::validate_stable_id;
@@ -35,6 +36,41 @@ pub enum Inline {
         id: StableId,
         label: String,
     },
+    /// A Google Docs person smart chip. Its visible label is ordinary document
+    /// text; the identity is opaque imported metadata and never authorizes a
+    /// profile lookup when a document is opened.
+    GooglePersonChip {
+        id: StableId,
+        label: String,
+        email: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        person_id: Option<String>,
+    },
+    /// A Google Docs rich-link smart chip. `href` remains the offline fallback;
+    /// provider/resource metadata makes a later Google export unambiguous.
+    GoogleRichLinkChip {
+        id: StableId,
+        label: String,
+        href: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rich_link_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mime_type: Option<String>,
+    },
+    /// A finite, document-owned choice.  The selected value is stored as an
+    /// option identifier rather than its display label, so renaming an option
+    /// cannot silently change the user's choice.
+    Dropdown {
+        id: StableId,
+        options: Vec<DropdownOption>,
+        selected_option_id: String,
+    },
+    /// An atomic calendar date. The durable value is canonical ISO calendar
+    /// notation (`YYYY-MM-DD`), never a locale-formatted display string.
+    DateChip {
+        id: StableId,
+        date: String,
+    },
     Equation {
         id: StableId,
         equation: Equation,
@@ -62,7 +98,12 @@ impl Inline {
         validate_inline(self)
     }
 
-    pub(crate) fn push_visible_text(&self, citations: &CitationDatabase, out: &mut String) {
+    pub(crate) fn push_visible_text(
+        &self,
+        citations: &CitationDatabase,
+        scope: TextScope,
+        out: &mut String,
+    ) {
         match self {
             Inline::Text { text, .. } | Inline::Link { text, .. } => out.push_str(text),
             Inline::Citation {
@@ -81,19 +122,62 @@ impl Inline {
                     out.push(']');
                 }
             }
-            Inline::FootnoteRef { footnote_id, .. } => {
-                out.push('[');
-                out.push_str(footnote_id.as_str());
-                out.push(']');
+            // A footnote reference contributes nothing in **either** scope,
+            // which is why it takes no `scope` test. It used to push
+            // `[{footnote_id}]`: a `StableId` that appears nowhere on the
+            // page, means nothing to a reader, and is not a stand-in a text
+            // file wants either — 20-odd characters of internal identifier,
+            // counted as a word. The marker a reader sees is a number the
+            // renderer computes from the reference's position, and the
+            // footnote's body is not in the text flow at all.
+            //
+            // The `Citation` arm above looks similar and is not: a citation's
+            // rendered form *is* on the page, and falling back to its id is a
+            // last resort for a reference the database has lost.
+            Inline::FootnoteRef { .. } => {}
+            Inline::Mention { label, .. }
+            | Inline::GooglePersonChip { label, .. }
+            | Inline::GoogleRichLinkChip { label, .. } => out.push_str(label),
+            Inline::Dropdown {
+                options,
+                selected_option_id,
+                ..
+            } => {
+                if let Some(option) = options
+                    .iter()
+                    .find(|option| option.id == *selected_option_id)
+                {
+                    out.push_str(&option.label);
+                }
             }
-            Inline::Mention { label, .. } => out.push_str(label),
-            Inline::Equation { equation, .. } => out.push_str(&equation.source),
+            Inline::DateChip { date, .. } => out.push_str(date),
+            // The source, not the rendering: an inline equation is typeset
+            // mathematics on the page, and its LaTeX is what that was written
+            // from (ADR 0003). A text file gets the source, because that is
+            // the best plain text can do for a formula.
+            Inline::Equation { equation, .. } => {
+                if scope == TextScope::PlainText {
+                    out.push_str(&equation.source);
+                }
+            }
             // A field contributes no source text. Its value is produced by
             // pagination, so counting it would make the word count depend on
             // the page size.
             Inline::PageNumber { .. } => {}
         }
     }
+}
+
+/// One stable choice in an inline dropdown.
+///
+/// The id is local to its dropdown, deliberately not a document-wide
+/// [`StableId`].  It is nevertheless canonical and immutable once selected;
+/// selection operations name this id so concurrent label edits cannot retarget
+/// a choice.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DropdownOption {
+    pub id: String,
+    pub label: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

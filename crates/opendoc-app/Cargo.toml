@@ -12,10 +12,13 @@ opendoc-format = { path = "../opendoc-format" }
 opendoc-import = { path = "../opendoc-import" }
 opendoc-layout = { path = "../opendoc-layout" }
 opendoc-merge = { path = "../opendoc-merge" }
+opendoc-pdf = { path = "../opendoc-pdf" }
 opendoc-render = { path = "../opendoc-render" }
 opendoc-spreadsheet = { path = "../opendoc-spreadsheet" }
 opendoc-sign = { path = "../opendoc-sign" }
 opendoc-store = { path = "../opendoc-store" }
+base64 = "0.22"
+quick-xml = "0.41"
 # Find and replace compiles user patterns; the regex crate has no
 # backtracking, so a pathological pattern cannot hang the app.
 regex = "1"

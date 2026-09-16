@@ -1,0 +1,23 @@
+[package]
+name = "opendoc-pdf"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opendoc-core = { path = "../opendoc-core" }
+opendoc-layout = { path = "../opendoc-layout" }
+opendoc-spreadsheet = { path = "../opendoc-spreadsheet" }
+# A step-by-step PDF object writer: pure Rust, four tiny dependencies
+# (bitflags, itoa, memchr, ryu), no filesystem, no clock and no C, so it
+# builds for wasm32-unknown-unknown like the rest of the core. Checked before
+# any of this crate was written — `rust_xlsxwriter`'s clock call trapping on
+# wasm32 is recent enough to check first rather than discover.
+pdf-writer = "0.15"
+# Decode the raster formats that PDF export can turn into an RGB image
+# XObject. Keeping the feature set explicit makes this work in wasm and
+# avoids quietly accepting a format the PDF backend cannot faithfully embed.
+image = { version = "0.25.10", default-features = false, features = ["bmp", "gif", "jpeg", "png", "tiff", "webp"] }
+# Static SVG renderer used only for the bounded PDF fallback below.  No text,
+# system-font or external-image features: PDF never reads a path, font, or URL
+# while rendering a document blob.
+resvg = { version = "0.47.0", default-features = false }

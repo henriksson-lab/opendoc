@@ -6,17 +6,40 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use opendoc_app::{
-    base64_decode, base64_encode, AppCommandResult, FileRecoveryJournalStore, OpenDocApp,
+    AppCommandResult, FileRecentDocumentStore, FileRecoveryJournalStore, OpenDocApp,
 };
-use serde::Serialize;
 use serde_json::Value;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
 use tauri_plugin_dialog::{DialogExt, FilePath};
 
+mod bridge;
+mod collab;
+mod fetch;
+mod fileaccess;
+
+pub(crate) use fileaccess::{media_type_for, Access, FileContents, FileGrants};
+
+// Imported by name so `generate_handler!` keeps a flat list of command names:
+// that list is the ACL surface, and `scripts/native-check.mjs` reads it to
+// prove every command has a permission and every permission has a command.
+use fetch::fetch_url_base64;
+use fileaccess::{read_file_base64, write_file_base64, write_file_text};
+
 struct DesktopState {
-    app: Mutex<OpenDocApp>,
+    /// `Arc` because the collaboration session thread holds the document too
+    /// (`collab.rs`). It takes the same lock the `dispatch` command takes, and
+    /// never across an `await`.
+    app: Arc<Mutex<OpenDocApp>>,
+}
+
+/// The collaboration transport, if a session was ever started.
+///
+/// Managed separately from `DesktopState` because it needs an `AppHandle` to
+/// push statuses with, which does not exist until `setup`.
+struct CollabState {
+    collab: Mutex<Option<Arc<collab::NativeCollab>>>,
 }
 
 fn lock_app(state: &DesktopState) -> Result<std::sync::MutexGuard<'_, OpenDocApp>, String> {
@@ -37,18 +60,154 @@ fn dispatch(
         .map_err(|err| err.to_string())
 }
 
+// ---- Collaboration -------------------------------------------------------
+//
+// The native shell owns the socket, using `opendoc-service`'s own client
+// (`collab.rs`, docs/adr/0018). The page never sees a frame and never sees the
+// session token; it asks for a connection and renders the statuses that come
+// back on `opendoc://collab-status`.
+
+fn collab_session(
+    app: &tauri::AppHandle,
+    state: &CollabState,
+) -> Result<Arc<collab::NativeCollab>, String> {
+    let mut slot = state
+        .collab
+        .lock()
+        .map_err(|_| "collaboration state is poisoned".to_string())?;
+    if let Some(existing) = slot.as_ref() {
+        return Ok(Arc::clone(existing));
+    }
+    let document = Arc::clone(&app.state::<DesktopState>().app);
+    let emitter = app.clone();
+    let session = Arc::new(collab::NativeCollab::new(
+        document,
+        Arc::new(move |status| {
+            let _ = emitter.emit("opendoc://collab-status", status);
+        }),
+    ));
+    *slot = Some(Arc::clone(&session));
+    Ok(session)
+}
+
+#[tauri::command]
+fn collab_connect(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, CollabState>,
+    options: collab::ConnectOptions,
+) -> Result<collab::CollabStatus, String> {
+    collab_session(&app, &state)?.connect(options)
+}
+
+#[tauri::command]
+fn collab_disconnect(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, CollabState>,
+) -> Result<collab::CollabStatus, String> {
+    Ok(collab_session(&app, &state)?.disconnect())
+}
+
+#[tauri::command]
+fn collab_cursor(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, CollabState>,
+    anchor: Option<String>,
+) -> Result<(), String> {
+    collab_session(&app, &state)?.set_cursor(anchor.filter(|value| !value.trim().is_empty()));
+    Ok(())
+}
+
+#[tauri::command]
+fn collab_selection_anchor(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, CollabState>,
+    anchor: Option<String>,
+) -> Result<(), String> {
+    collab_session(&app, &state)?
+        .set_selection_anchor(anchor.filter(|value| !value.trim().is_empty()));
+    Ok(())
+}
+
+#[tauri::command]
+fn collab_selection(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, CollabState>,
+    selection: Option<opendoc_app::EditorSelection>,
+) -> Result<(), String> {
+    collab_session(&app, &state)?.set_selection(selection);
+    Ok(())
+}
+
+#[tauri::command]
+fn collab_status(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, CollabState>,
+) -> Result<collab::CollabStatus, String> {
+    Ok(collab_session(&app, &state)?.status())
+}
+
+/// Native ACL bridge. The page has no service bearer token: these commands
+/// use the authenticated client retained by `NativeCollab`, and the service
+/// remains the authority for both listing and mutation.
+#[tauri::command]
+async fn collab_list_grants(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, CollabState>,
+) -> Result<Vec<opendoc_service::GrantView>, String> {
+    let collab = collab_session(&app, &state)?;
+    collab.list_grants().await
+}
+
+#[tauri::command]
+async fn collab_list_grant_audit(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, CollabState>,
+) -> Result<Vec<opendoc_service::GrantAuditView>, String> {
+    let collab = collab_session(&app, &state)?;
+    collab.list_grant_audit().await
+}
+
+#[tauri::command]
+async fn collab_set_grant(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, CollabState>,
+    subject: String,
+    role: Option<String>,
+) -> Result<(), String> {
+    let collab = collab_session(&app, &state)?;
+    collab.set_grant(subject, role).await
+}
+
+#[tauri::command]
+fn collab_share_link(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, CollabState>,
+) -> Result<String, String> {
+    collab_session(&app, &state)?.share_link()
+}
+
 fn file_path_string(path: FilePath) -> Option<String> {
     match path {
         FilePath::Path(path) => Some(path.to_string_lossy().to_string()),
-        FilePath::Url(url) => url.to_file_path().ok().map(|p| p.to_string_lossy().to_string()),
+        FilePath::Url(url) => url
+            .to_file_path()
+            .ok()
+            .map(|p| p.to_string_lossy().to_string()),
     }
 }
 
 /// Native "open" dialog. `extensions` filters by file extension (without
 /// dots); `directory` picks a folder instead of a file.
+///
+/// Picking a *file* also mints the one-shot read grant that
+/// [`fileaccess::read_file_base64`] spends — the user choosing a file in a
+/// native dialog is the only thing that authorises reading it. Picking a
+/// folder mints nothing: a folder is not read through this command, it is
+/// handed to the app as a repository root.
 #[tauri::command]
 async fn pick_open_path(
     app: tauri::AppHandle,
+    grants: tauri::State<'_, FileGrants>,
     title: Option<String>,
     extensions: Option<Vec<String>>,
     directory: Option<bool>,
@@ -72,13 +231,21 @@ async fn pick_open_path(
         });
     }
     let picked = rx.recv().map_err(|err| err.to_string())?;
-    Ok(picked.and_then(file_path_string))
+    let picked = picked.and_then(file_path_string);
+    if let Some(path) = &picked {
+        if !directory.unwrap_or(false) {
+            grants.mint(Path::new(path), Access::Read);
+        }
+    }
+    Ok(picked)
 }
 
-/// Native "save as" dialog.
+/// Native "save as" dialog. Mints the one-shot write grant the write commands
+/// spend; see [`fileaccess`].
 #[tauri::command]
 async fn pick_save_path(
     app: tauri::AppHandle,
+    grants: tauri::State<'_, FileGrants>,
     title: Option<String>,
     default_name: Option<String>,
     extensions: Option<Vec<String>>,
@@ -99,70 +266,11 @@ async fn pick_save_path(
         let _ = tx.send(path);
     });
     let picked = rx.recv().map_err(|err| err.to_string())?;
-    Ok(picked.and_then(file_path_string))
-}
-
-#[derive(Serialize)]
-struct FileContents {
-    name: String,
-    path: String,
-    media_type: String,
-    size: usize,
-    base64: String,
-}
-
-fn media_type_for(path: &Path) -> &'static str {
-    match path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| ext.to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("png") => "image/png",
-        Some("jpg") | Some("jpeg") => "image/jpeg",
-        Some("gif") => "image/gif",
-        Some("webp") => "image/webp",
-        Some("svg") => "image/svg+xml",
-        Some("bmp") => "image/bmp",
-        Some("docx") => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        Some("doc") => "application/msword",
-        Some("xlsx") => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        Some("csv") => "text/csv",
-        Some("tsv") => "text/tab-separated-values",
-        Some("json") => "application/json",
-        Some("md") => "text/markdown",
-        Some("html") | Some("htm") => "text/html",
-        Some("txt") => "text/plain",
-        Some("pdf") => "application/pdf",
-        _ => "application/octet-stream",
+    let picked = picked.and_then(file_path_string);
+    if let Some(path) = &picked {
+        grants.mint(Path::new(path), Access::Write);
     }
-}
-
-#[tauri::command]
-fn read_file_base64(path: String) -> Result<FileContents, String> {
-    let path = PathBuf::from(path);
-    let bytes = std::fs::read(&path).map_err(|err| format!("{}: {err}", path.display()))?;
-    Ok(FileContents {
-        name: path
-            .file_name()
-            .map(|name| name.to_string_lossy().to_string())
-            .unwrap_or_default(),
-        path: path.to_string_lossy().to_string(),
-        media_type: media_type_for(&path).to_string(),
-        size: bytes.len(),
-        base64: base64_encode(&bytes),
-    })
-}
-
-#[tauri::command]
-fn write_file_base64(path: String, base64: String) -> Result<(), String> {
-    let bytes = base64_decode(&base64).ok_or_else(|| "invalid base64 payload".to_string())?;
-    std::fs::write(&path, bytes).map_err(|err| format!("{path}: {err}"))
-}
-
-#[tauri::command]
-fn write_file_text(path: String, text: String) -> Result<(), String> {
-    std::fs::write(&path, text).map_err(|err| format!("{path}: {err}"))
+    Ok(picked)
 }
 
 /// Close the main window even if there are unsaved changes (the frontend
@@ -181,26 +289,44 @@ fn set_window_title(window: tauri::Window, title: String) -> Result<(), String> 
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        // `withGlobalTauri` is off; this puts back the two functions the page
+        // actually uses. See `bridge.rs`.
+        .plugin(bridge::init())
+        .manage(FileGrants::default())
         .manage(DesktopState {
-            app: Mutex::new(OpenDocApp::new_empty_document()),
+            app: Arc::new(Mutex::new(OpenDocApp::new_empty_document())),
+        })
+        .manage(CollabState {
+            collab: Mutex::new(None),
         })
         .setup(|app| {
-            // Crash recovery is a local-runtime capability: the store is a
-            // directory this shell owns. A browser build installs nothing and
-            // journalling stays inert (ADR 0005).
+            // Both of these are local-runtime capabilities whose storage is a
+            // path only this shell knows: the app-data directory comes from
+            // the bundle identifier and differs per platform, so the app is
+            // *given* a store rather than guessing one (ADR 0005, and
+            // `opendoc-app/src/recent.rs` for the same decision about
+            // recents). A browser build installs its own over the IndexedDB
+            // volume; a runtime that installs neither keeps working, without
+            // crash protection and without recents that outlive the process.
             match app.path().app_data_dir() {
-                Ok(dir) => {
-                    let store = Arc::new(FileRecoveryJournalStore::new(dir.join("recovery")));
-                    match app.state::<DesktopState>().app.lock() {
-                        Ok(mut opendoc) => {
-                            if let Err(err) = opendoc.install_recovery_journal(store) {
-                                eprintln!("crash recovery journal unavailable: {err}");
-                            }
+                Ok(dir) => match app.state::<DesktopState>().app.lock() {
+                    Ok(mut opendoc) => {
+                        let recovery =
+                            Arc::new(FileRecoveryJournalStore::new(dir.join("recovery")));
+                        if let Err(err) = opendoc.install_recovery_journal(recovery) {
+                            eprintln!("crash recovery journal unavailable: {err}");
                         }
-                        Err(_) => eprintln!("crash recovery journal unavailable: state poisoned"),
+                        // Beside the recovery segments, and with no `Result`
+                        // to ignore: an unreadable list is reported to the
+                        // user as a model warning, never as a failure to
+                        // start (`OpenDocApp::install_recent_documents`).
+                        opendoc.install_recent_documents(Arc::new(FileRecentDocumentStore::new(
+                            dir.join("recent-documents"),
+                        )));
                     }
-                }
-                Err(err) => eprintln!("crash recovery journal unavailable: {err}"),
+                    Err(_) => eprintln!("durable local storage unavailable: state poisoned"),
+                },
+                Err(err) => eprintln!("durable local storage unavailable: {err}"),
             }
             Ok(())
         })
@@ -225,10 +351,21 @@ fn main() {
             pick_open_path,
             pick_save_path,
             read_file_base64,
+            fetch_url_base64,
             write_file_base64,
             write_file_text,
             close_window,
             set_window_title,
+            collab_connect,
+            collab_disconnect,
+            collab_cursor,
+            collab_selection_anchor,
+            collab_selection,
+            collab_status,
+            collab_list_grants,
+            collab_list_grant_audit,
+            collab_set_grant,
+            collab_share_link,
         ])
         .run(tauri::generate_context!())
         .expect("error while running OpenDoc desktop");

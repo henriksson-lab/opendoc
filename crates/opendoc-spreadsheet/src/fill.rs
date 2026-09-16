@@ -11,8 +11,16 @@
 //!   difference, or by a least-squares fit when the differences vary.
 //! * **date** — a single date-formatted number steps by one day; several step
 //!   like any other numeric series (so a two-day or one-week cadence carries).
+//! * **name list** — a month or weekday name cycles through its list in the
+//!   source's own spelling and case: `Jan` fills `Feb, Mar, Apr`, `MONDAY`
+//!   fills `TUESDAY`. Two sources set the stride, so `Jan, Mar` fills
+//!   `May, Jul`. English only, because the workbook locale carries decimal
+//!   and date-order rules but no month names.
+//! * **trailing integer** — text ending in digits counts up: `Item 1` fills
+//!   `Item 2, Item 3`, and `Item 01` keeps its padding.
 //! * **copy / constant** — anything else repeats the source cells cyclically,
-//!   which covers text, booleans, a lone number, and mixed blocks.
+//!   which covers text with no counter, booleans, a lone number, and mixed
+//!   blocks.
 //! * **formula with shift** — repeated formulas have their relative
 //!   references moved to the cell they land in; absolute (`$`) parts stay put.
 //!
@@ -36,14 +44,96 @@ enum FillAxis {
 }
 
 /// How one line of a fill produces values outside the source block.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 enum SeriesPlan {
     /// Repeat the source cells cyclically, shifting formulas as they move.
     Repeat,
     /// `start + step * offset`, where `offset` is the signed distance from the
     /// first source cell of the line.
     Linear { start: f64, step: f64 },
+    /// A cyclic list of names — the months, or the days of the week. The
+    /// index wraps, so December is followed by January, and the text is
+    /// written back in the case the source used.
+    Names {
+        list: &'static [&'static str],
+        start: i64,
+        step: i64,
+        casing: Casing,
+    },
+    /// Text ending in digits: the digits count and the text before them is
+    /// carried unchanged. `width` is the zero-padded width to keep, or `0`
+    /// for a counter that was not padded.
+    Counted {
+        prefix: String,
+        start: i64,
+        step: i64,
+        width: usize,
+    },
 }
+
+/// The letter case a name series writes its names in — taken from the source
+/// cell, so `JAN` fills `FEB` and `jan` fills `feb`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Casing {
+    Lower,
+    Upper,
+    Title,
+}
+
+impl Casing {
+    fn of(text: &str) -> Self {
+        let letters = || text.chars().filter(|character| character.is_alphabetic());
+        if letters().all(char::is_lowercase) {
+            Self::Lower
+        } else if letters().all(char::is_uppercase) {
+            Self::Upper
+        } else {
+            Self::Title
+        }
+    }
+
+    /// `name` is a canonical title-case entry from one of the lists.
+    fn apply(self, name: &str) -> String {
+        match self {
+            Self::Lower => name.to_lowercase(),
+            Self::Upper => name.to_uppercase(),
+            Self::Title => name.to_string(),
+        }
+    }
+}
+
+/// The name lists, longest spelling first so `May` is read as the month
+/// rather than as an abbreviation of itself — which is what makes it fill
+/// `June` rather than `Jun`, as it does in Sheets.
+const NAME_LISTS: [&[&str]; 4] = [
+    &[
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ],
+    &[
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+        "Sunday",
+    ],
+    &[
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ],
+    &["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+];
 
 /// Expands `source_range` across `target_range`.
 ///
@@ -109,7 +199,7 @@ pub fn fill_sheet_range(
                 template.as_ref(),
                 template_address,
                 &address_at(position)?,
-                plan,
+                &plan,
                 offset,
             )?);
         }
@@ -200,21 +290,161 @@ fn fill_span(
 }
 
 /// Chooses the series for one line of source cells.
+///
+/// The families are tried in order and the first that recognises *every*
+/// source cell wins. Numbers first, because a numeric source can never be a
+/// name or a counter; then names, because `Q1` is a counter but `Jan` is not;
+/// then trailing counters; then a plain repeat, which always succeeds.
 fn infer_series(sources: &[(String, Option<Cell>)]) -> SeriesPlan {
+    numeric_series(sources)
+        .or_else(|| name_series(sources))
+        .or_else(|| counted_series(sources))
+        .unwrap_or(SeriesPlan::Repeat)
+}
+
+/// The trimmed text of every source cell, or `None` if any is missing or is
+/// not stored as text. A name or a counter is text; a number is not, and
+/// neither is a formula, whose result is not known here.
+fn source_texts(sources: &[(String, Option<Cell>)]) -> Option<Vec<String>> {
+    if sources.is_empty() {
+        return None;
+    }
+    sources
+        .iter()
+        .map(|(_, cell)| {
+            let cell = cell.as_ref()?;
+            (cell.user_kind == "string").then(|| cell.user_value.trim().to_string())
+        })
+        .collect()
+}
+
+/// A month or weekday series, when every source names an entry of the same
+/// list. One source steps by one; several set the stride, which is read
+/// modulo the list so `Nov, Jan` steps by two rather than by minus ten.
+fn name_series(sources: &[(String, Option<Cell>)]) -> Option<SeriesPlan> {
+    let texts = source_texts(sources)?;
+    let list = NAME_LISTS.into_iter().find(|list| {
+        texts
+            .iter()
+            .all(|text| list.iter().any(|name| name.eq_ignore_ascii_case(text)))
+    })?;
+    let length = list.len() as i64;
+    let indices = texts
+        .iter()
+        .map(|text| {
+            list.iter()
+                .position(|name| name.eq_ignore_ascii_case(text))
+                .expect("the list was chosen because it contains every source") as i64
+        })
+        .collect::<Vec<_>>();
+    let step = match indices.as_slice() {
+        [_] => 1,
+        [first, second, ..] => {
+            let step = (second - first).rem_euclid(length);
+            let uniform = indices
+                .windows(2)
+                .all(|pair| (pair[1] - pair[0]).rem_euclid(length) == step);
+            if !uniform {
+                return None;
+            }
+            step
+        }
+        [] => return None,
+    };
+    Some(SeriesPlan::Names {
+        list,
+        start: indices[0],
+        step,
+        casing: Casing::of(&texts[0]),
+    })
+}
+
+/// A trailing-integer series, when every source is the same text followed by
+/// digits. `Item 1, Item 3` steps by two; `Item 1` alone steps by one.
+fn counted_series(sources: &[(String, Option<Cell>)]) -> Option<SeriesPlan> {
+    let texts = source_texts(sources)?;
+    let parts = texts
+        .iter()
+        .map(|text| split_trailing_counter(text))
+        .collect::<Option<Vec<_>>>()?;
+    let (prefix, first_digits) = parts.first()?;
+    if parts.iter().any(|(other, _)| other != prefix) {
+        return None;
+    }
+    let counters = parts
+        .iter()
+        .map(|(_, digits)| digits.parse::<i64>().ok())
+        .collect::<Option<Vec<_>>>()?;
+    let step = match counters.as_slice() {
+        [_] => 1,
+        [first, second, ..] => {
+            let step = second - first;
+            if !counters.windows(2).all(|pair| pair[1] - pair[0] == step) {
+                return None;
+            }
+            step
+        }
+        [] => return None,
+    };
+    Some(SeriesPlan::Counted {
+        prefix: prefix.clone(),
+        start: counters[0],
+        step,
+        // Padding is only kept when the source actually had some: `Item 01`
+        // stays two wide, `Item 1` is free to reach `Item 10`.
+        width: if first_digits.len() > 1 && first_digits.starts_with('0') {
+            first_digits.len()
+        } else {
+            0
+        },
+    })
+}
+
+/// `text` split into everything before its trailing run of ASCII digits and
+/// the digits themselves. `None` when it does not end in a digit, or when it
+/// is *only* digits — that is a number stored as text, not a counter, and
+/// repeating it is the safer answer.
+fn split_trailing_counter(text: &str) -> Option<(String, String)> {
+    let start = text
+        .char_indices()
+        .rev()
+        .take_while(|(_, character)| character.is_ascii_digit())
+        .last()
+        .map(|(index, _)| index)?;
+    if start == 0 {
+        return None;
+    }
+    // More than 15 digits will not survive an i64 round trip intact.
+    let digits = &text[start..];
+    if digits.len() > 15 {
+        return None;
+    }
+    Some((text[..start].to_string(), digits.to_string()))
+}
+
+fn padded_counter(value: i64, width: usize) -> String {
+    if width == 0 {
+        return value.to_string();
+    }
+    match value < 0 {
+        true => format!("-{:0>width$}", value.unsigned_abs(), width = width),
+        false => format!("{value:0>width$}"),
+    }
+}
+
+/// A numeric series, when every source cell holds a number. `None` hands the
+/// line on to the text families.
+fn numeric_series(sources: &[(String, Option<Cell>)]) -> Option<SeriesPlan> {
     let mut values = Vec::with_capacity(sources.len());
     let mut all_dates = true;
     for (_, cell) in sources {
-        let Some(cell) = cell else {
-            return SeriesPlan::Repeat;
-        };
+        let cell = cell.as_ref()?;
         if cell.user_kind != "number" {
-            return SeriesPlan::Repeat;
+            return None;
         }
-        let Ok(value) = cell.user_value.trim().parse::<f64>() else {
-            return SeriesPlan::Repeat;
-        };
+        let value = cell.user_value.trim().parse::<f64>().ok()?;
         if !value.is_finite() {
-            return SeriesPlan::Repeat;
+            return None;
         }
         all_dates &= cell
             .format
@@ -224,26 +454,26 @@ fn infer_series(sources: &[(String, Option<Cell>)]) -> SeriesPlan {
         values.push(value);
     }
     match values.len() {
-        0 => SeriesPlan::Repeat,
+        0 => None,
         // A lone number copies; a lone date steps by a day, as it does in
         // every other spreadsheet.
-        1 if all_dates => SeriesPlan::Linear {
+        1 if all_dates => Some(SeriesPlan::Linear {
             start: values[0],
             step: 1.0,
-        },
-        1 => SeriesPlan::Repeat,
+        }),
+        1 => Some(SeriesPlan::Repeat),
         _ => {
             let step = values[1] - values[0];
             let uniform = values
                 .windows(2)
                 .all(|pair| nearly_equal(pair[1] - pair[0], step));
             if uniform {
-                SeriesPlan::Linear {
+                Some(SeriesPlan::Linear {
                     start: values[0],
                     step,
-                }
+                })
             } else {
-                least_squares(&values)
+                Some(least_squares(&values))
             }
         }
     }
@@ -283,7 +513,7 @@ fn build_cell(
     template: Option<&Cell>,
     template_address: &str,
     address: &str,
-    plan: SeriesPlan,
+    plan: &SeriesPlan,
     offset: i64,
 ) -> Result<Cell, SpreadsheetError> {
     let mut cell = match template {
@@ -306,6 +536,29 @@ fn build_cell(
         SeriesPlan::Linear { start, step } => {
             cell.user_kind = "number".to_string();
             cell.user_value = series_number_text(start + step * offset as f64);
+        }
+        SeriesPlan::Names {
+            list,
+            start,
+            step,
+            casing,
+        } => {
+            let index = (start + step * offset).rem_euclid(list.len() as i64) as usize;
+            cell.user_kind = "string".to_string();
+            cell.user_value = casing.apply(list[index]);
+            // A name is text, not the number some template happened to hold.
+            cell.format.number_format = None;
+        }
+        SeriesPlan::Counted {
+            prefix,
+            start,
+            step,
+            width,
+        } => {
+            let counter = start + step * offset;
+            cell.user_kind = "string".to_string();
+            cell.user_value = format!("{prefix}{}", padded_counter(counter, *width));
+            cell.format.number_format = None;
         }
     }
     cell.computed_kind = cell.user_kind.clone();
@@ -353,7 +606,12 @@ mod tests {
     fn sheet_with(cells: &[(&str, &str)]) -> Sheet {
         let mut sheet = blank_sheet("sheet-1", "Sheet1", 20, 10);
         for (address, value) in cells {
-            super::super::structure::set_sheet_cell(&mut sheet, address, (*value).to_string());
+            super::super::structure::set_sheet_cell(
+                &mut sheet,
+                address,
+                (*value).to_string(),
+                &crate::format::Locale::for_tag("en-US"),
+            );
         }
         sheet
     }
@@ -417,16 +675,108 @@ mod tests {
         );
     }
 
+    /// Text that names no series still repeats cyclically. (This test used to
+    /// use `Mon, Tue` — which is a weekday series, and now fills as one.)
     #[test]
     fn text_repeats_cyclically() {
-        let mut sheet = sheet_with(&[("A1", "Mon"), ("A2", "Tue")]);
+        let mut sheet = sheet_with(&[("A1", "Red"), ("A2", "Green")]);
 
         fill_sheet_range(&mut sheet, "A1:A2", "A1:A6").unwrap();
 
-        assert_eq!(value(&sheet, "A3"), "Mon");
-        assert_eq!(value(&sheet, "A4"), "Tue");
-        assert_eq!(value(&sheet, "A5"), "Mon");
-        assert_eq!(value(&sheet, "A6"), "Tue");
+        assert_eq!(value(&sheet, "A3"), "Red");
+        assert_eq!(value(&sheet, "A4"), "Green");
+        assert_eq!(value(&sheet, "A5"), "Red");
+        assert_eq!(value(&sheet, "A6"), "Green");
+    }
+
+    /// `Jan` filled `Jan, Jan, Jan`. Month and weekday names are the two most
+    /// used text series there are.
+    #[test]
+    fn a_month_name_fills_the_following_months() {
+        let mut sheet = sheet_with(&[("A1", "Jan")]);
+
+        fill_sheet_range(&mut sheet, "A1:A1", "A1:A4").unwrap();
+
+        assert_eq!(value(&sheet, "A2"), "Feb");
+        assert_eq!(value(&sheet, "A3"), "Mar");
+        assert_eq!(value(&sheet, "A4"), "Apr");
+    }
+
+    /// The list wraps, the spelling is the source's, and so is the case.
+    #[test]
+    fn a_name_series_keeps_its_spelling_and_case_and_wraps() {
+        let mut sheet = sheet_with(&[("A1", "NOVEMBER")]);
+        fill_sheet_range(&mut sheet, "A1:A1", "A1:A4").unwrap();
+        assert_eq!(value(&sheet, "A2"), "DECEMBER");
+        assert_eq!(value(&sheet, "A3"), "JANUARY");
+        assert_eq!(value(&sheet, "A4"), "FEBRUARY");
+
+        let mut sheet = sheet_with(&[("B1", "mon")]);
+        fill_sheet_range(&mut sheet, "B1:B1", "B1:B3").unwrap();
+        assert_eq!(value(&sheet, "B2"), "tue");
+        assert_eq!(value(&sheet, "B3"), "wed");
+
+        // `May` is both a full month name and its own abbreviation; the full
+        // list is read first, so it fills `June` rather than `Jun`.
+        let mut sheet = sheet_with(&[("C1", "May")]);
+        fill_sheet_range(&mut sheet, "C1:C1", "C1:C2").unwrap();
+        assert_eq!(value(&sheet, "C2"), "June");
+    }
+
+    /// Two sources set the stride, read modulo the list so a wrap does not
+    /// turn a step of two into a step of minus ten.
+    #[test]
+    fn two_names_set_the_stride() {
+        let mut sheet = sheet_with(&[("A1", "Jan"), ("A2", "Mar")]);
+        fill_sheet_range(&mut sheet, "A1:A2", "A1:A4").unwrap();
+        assert_eq!(value(&sheet, "A3"), "May");
+        assert_eq!(value(&sheet, "A4"), "Jul");
+
+        let mut sheet = sheet_with(&[("B1", "Nov"), ("B2", "Jan")]);
+        fill_sheet_range(&mut sheet, "B1:B2", "B1:B4").unwrap();
+        assert_eq!(value(&sheet, "B3"), "Mar");
+        assert_eq!(value(&sheet, "B4"), "May");
+    }
+
+    /// `Item 1` filled `Item 1, Item 1, Item 1`.
+    #[test]
+    fn text_ending_in_digits_counts_up() {
+        let mut sheet = sheet_with(&[("A1", "Item 1")]);
+
+        fill_sheet_range(&mut sheet, "A1:A1", "A1:A3").unwrap();
+
+        assert_eq!(value(&sheet, "A2"), "Item 2");
+        assert_eq!(value(&sheet, "A3"), "Item 3");
+    }
+
+    #[test]
+    fn a_counter_keeps_its_padding_and_takes_its_stride_from_the_source() {
+        let mut sheet = sheet_with(&[("A1", "Q01")]);
+        fill_sheet_range(&mut sheet, "A1:A1", "A1:A3").unwrap();
+        assert_eq!(value(&sheet, "A2"), "Q02");
+        assert_eq!(value(&sheet, "A3"), "Q03");
+
+        let mut sheet = sheet_with(&[("B1", "row 2"), ("B2", "row 4")]);
+        fill_sheet_range(&mut sheet, "B1:B2", "B1:B4").unwrap();
+        assert_eq!(value(&sheet, "B3"), "row 6");
+        assert_eq!(value(&sheet, "B4"), "row 8");
+    }
+
+    /// A counter fills backwards through zero, and text that is *only* digits
+    /// is a number stored as text rather than a counter — it repeats, because
+    /// inventing a prefix for it would be a guess.
+    #[test]
+    fn a_counter_has_limits_that_keep_it_from_guessing() {
+        let mut sheet = sheet_with(&[("A3", "Item 1")]);
+        fill_sheet_range(&mut sheet, "A3:A3", "A1:A3").unwrap();
+        assert_eq!(value(&sheet, "A2"), "Item 0");
+        assert_eq!(value(&sheet, "A1"), "Item -1");
+
+        // Two texts with different prefixes name no series.
+        let mut sheet = sheet_with(&[("B1", "Item 1"), ("B2", "Thing 2")]);
+        fill_sheet_range(&mut sheet, "B1:B2", "B1:B4").unwrap();
+        assert_eq!(value(&sheet, "B3"), "Item 1");
+        assert_eq!(value(&sheet, "B4"), "Thing 2");
     }
 
     #[test]

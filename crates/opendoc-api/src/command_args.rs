@@ -1,6 +1,6 @@
 use crate::{
-    AppCitationItem, EditorSelection, FindOptions, OpenDocPermissionGrant, OpenDocPresencePeer,
-    OpenDocRelayOperation, OpenDocRuntimeLookupEntry, OpenDocRuntimeProfile,
+    AppCitationItem, EditorSelection, FindOptions, OpenDocRelayOperation,
+    OpenDocRuntimeLookupEntry, OpenDocRuntimeProfile,
 };
 use opendoc_spreadsheet::{SheetFilterCriterion, SheetFilterSortSpec};
 
@@ -22,6 +22,14 @@ pub struct SetDocumentLocaleArgs {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AddParagraphArgs {
     pub text: String,
+}
+
+/// A read-only, hypothetical resolution of one still-proposed suggestion.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SuggestionPreviewArgs {
+    pub suggestion_id: String,
+    /// `accept` or `reject`.
+    pub resolution: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -141,6 +149,41 @@ pub struct InsertImageBlockAfterArgs {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ImageBlockEffectsArgs {
+    pub block_id: String,
+    pub rotation_degrees: i16,
+    pub opacity_percent: u8,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ImageBlockCropArgs {
+    pub block_id: String,
+    pub top_percent: u8,
+    pub right_percent: u8,
+    pub bottom_percent: u8,
+    pub left_percent: u8,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ImageBlockCaptionArgs {
+    pub block_id: String,
+    pub caption: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ImageBlockBorderArgs {
+    pub block_id: String,
+    pub style: String,
+    pub twips: i32,
+    pub color: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExportImageBlobArgs {
+    pub blob_hash: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SignBlobWithOpenSshPrivateKeyArgs {
     pub blob_hash: String,
     pub private_key_pem: String,
@@ -172,56 +215,59 @@ pub struct SignWithOpenSshPrivateKeyArgs {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SignCurrentRepositoryVersionWithOpenSshPrivateKeyArgs {
+    pub private_key_pem: String,
+    pub signer_display: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerifyCurrentSignatureArgs {
     pub private_key_pem: String,
 }
 
+/// Arguments for `get_runtime_session`.
+///
+/// Only the host's own capabilities. Identity, permissions and presence are
+/// not here, and cannot be: they are the service's answers, which the app
+/// holds because a transport delivered them (ADR 0015).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GetRuntimeSessionArgs {
     pub profile: OpenDocRuntimeProfile,
-    pub subject: Option<String>,
-    pub document_uuid: Option<String>,
-    pub presence: Vec<OpenDocPresencePeer>,
-    pub permissions: Vec<OpenDocPermissionGrant>,
 }
 
+/// Arguments for `authorize_runtime_command`.
+///
+/// There is deliberately no `permissions` argument. A caller that could hand
+/// in its own grants would be asserting its own permissions rather than
+/// asking; the answer comes from the service session the app is holding.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuthorizeRuntimeCommandArgs {
     pub profile: OpenDocRuntimeProfile,
-    pub subject: Option<String>,
-    pub document_uuid: Option<String>,
     pub command_name: String,
-    pub permissions: Vec<OpenDocPermissionGrant>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CreateRuntimeShareInviteArgs {
     pub profile: OpenDocRuntimeProfile,
-    pub subject: Option<String>,
-    pub document_uuid: Option<String>,
     pub target_subject: Option<String>,
-    pub actions: Vec<String>,
-    pub permissions: Vec<OpenDocPermissionGrant>,
+    /// The role to ask the service to grant: viewer, commenter, editor or
+    /// owner. The service's grant table is keyed by role, not by an action
+    /// list, so asking in actions would be asking in a vocabulary the service
+    /// does not have.
+    pub requested_role: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RelayRuntimeSyncArgs {
     pub profile: OpenDocRuntimeProfile,
-    pub subject: Option<String>,
-    pub document_uuid: Option<String>,
-    pub base_manifest: Option<String>,
     pub operations: Vec<OpenDocRelayOperation>,
-    pub permissions: Vec<OpenDocPermissionGrant>,
-    pub presence: Vec<OpenDocPresencePeer>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolveRuntimeDocumentLookupArgs {
     pub profile: OpenDocRuntimeProfile,
-    pub subject: Option<String>,
     pub document_uuid: Option<String>,
     pub doi: Option<String>,
-    pub permissions: Vec<OpenDocPermissionGrant>,
     pub service_index: Vec<OpenDocRuntimeLookupEntry>,
     pub scanned_documents: Vec<OpenDocRuntimeLookupEntry>,
 }
@@ -229,6 +275,18 @@ pub struct ResolveRuntimeDocumentLookupArgs {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SetDocumentDoiArgs {
     pub doi: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetBookmarkArgs {
+    pub bookmark_id: Option<String>,
+    pub name: String,
+    pub block_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BookmarkIdArgs {
+    pub bookmark_id: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -283,6 +341,20 @@ pub struct SetBlockNamedValueArgs {
 pub struct SetEditorSelectionBlockNamedValueArgs {
     pub selection: EditorSelection,
     pub value: String,
+}
+
+/// A block-property write whose value is a boolean. Kept separate from a
+/// named value so JSON `false` cannot turn into the string "false".
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetBlockBoolArgs {
+    pub block_id: String,
+    pub value: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetEditorSelectionBlockBoolArgs {
+    pub selection: EditorSelection,
+    pub value: bool,
 }
 
 /// A block-property write carrying a length in twips (1/20 pt), the unit the
@@ -343,6 +415,20 @@ pub struct SetPageFurnitureArgs {
     pub alignment: String,
 }
 
+/// Replaces a page-furniture slot with the safe, documented HTML fragment
+/// supplied by the rich furniture editor.  This is deliberately a distinct
+/// command from the legacy text form: its caller has made a structural
+/// replacement, rather than accidentally projecting an existing rich slot
+/// through the plain paragraph dialog.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetPageFurnitureHtmlArgs {
+    /// `"header"` or `"footer"`.
+    pub slot: String,
+    /// A hostile HTML fragment, parsed through the same closed-set importer
+    /// used by rich clipboard paste.
+    pub html: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PageFurnitureSlotArgs {
     pub slot: String,
@@ -358,6 +444,34 @@ pub struct ClearBlockPropertyArgs {
 pub struct ClearEditorSelectionBlockPropertyArgs {
     pub selection: EditorSelection,
     pub key: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetBlockColorArgs {
+    pub block_id: String,
+    pub color: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetEditorSelectionBlockColorArgs {
+    pub selection: EditorSelection,
+    pub color: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetBlockBorderArgs {
+    pub block_id: String,
+    pub style: String,
+    pub twips: i32,
+    pub color: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetEditorSelectionBlockBorderArgs {
+    pub selection: EditorSelection,
+    pub style: String,
+    pub twips: i32,
+    pub color: String,
 }
 
 /// Find and replace share one options payload so the two can never disagree
@@ -428,6 +542,28 @@ pub struct InsertMentionAfterArgs {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SelectDropdownOptionArgs {
+    pub inline_id: String,
+    pub option_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpdateDateChipArgs {
+    pub inline_id: String,
+    pub date: String,
+}
+
+/// Insert one atomic calendar chip at a stable inline position.  The date is
+/// canonical ISO notation; accepting a display-formatted value here would
+/// make the document depend on the shell locale.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InsertDateChipAfterArgs {
+    pub block_id: String,
+    pub after_inline_id: Option<String>,
+    pub date: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InsertFootnoteRefAfterArgs {
     pub block_id: String,
     pub after_inline_id: Option<String>,
@@ -480,6 +616,24 @@ pub struct UpdateListItemArgs {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetOrderedListStartArgs {
+    pub block_id: String,
+    pub start: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetOrderedListFormatArgs {
+    pub block_id: String,
+    pub format: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetBulletListMarkerArgs {
+    pub block_id: String,
+    pub marker: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AdjustEditorSelectionListIndentArgs {
     pub selection: EditorSelection,
     pub delta: i8,
@@ -488,6 +642,16 @@ pub struct AdjustEditorSelectionListIndentArgs {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AfterBlockArgs {
     pub after_block_id: String,
+}
+
+/// Repositions one durable block relative to a durable sibling.  The target
+/// may be in a table cell; identities, rather than a row/column index, keep
+/// the command valid while collaborators edit the table tree.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MoveBlockArgs {
+    pub block_id: String,
+    pub anchor_block_id: String,
+    pub placement: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -550,6 +714,52 @@ pub struct SetTableColumnWidthArgs {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetTableRowHeightArgs {
+    pub table_block_id: String,
+    pub row_id: String,
+    pub twips: i32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetTableRowHeaderArgs {
+    pub table_block_id: String,
+    pub row_id: String,
+    pub header: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SortTableRowsArgs {
+    pub table_block_id: String,
+    pub column_id: String,
+    pub descending: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TableRowArgs {
+    pub table_block_id: String,
+    pub row_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetTableBorderArgs {
+    pub table_block_id: String,
+    pub style: String,
+    pub twips: i32,
+    pub color: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetTableAlignmentArgs {
+    pub table_block_id: String,
+    pub alignment: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TableArgs {
+    pub table_block_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MergeTableCellsArgs {
     pub cell_id: String,
     pub row_span: u32,
@@ -580,6 +790,12 @@ pub struct SetTableCellBorderArgs {
 pub struct SetTableCellVerticalAlignmentArgs {
     pub cell_id: String,
     pub alignment: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetTableCellRowHeaderArgs {
+    pub cell_id: String,
+    pub row_header: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -671,6 +887,29 @@ pub struct ThreadIdArgs {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolveCommentThreadArgs {
+    pub thread_id: String,
+    pub resolved_by: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetCommentThreadActionArgs {
+    pub thread_id: String,
+    pub assignee: Option<String>,
+    pub due_at_ms: Option<u64>,
+    pub completed: bool,
+    pub completed_by: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetCommentThreadReactionArgs {
+    pub thread_id: String,
+    pub emoji: String,
+    pub actor: String,
+    pub present: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ThreadCommentIdArgs {
     pub thread_id: String,
     pub comment_id: String,
@@ -705,6 +944,26 @@ pub struct BlockAuthorTextArgs {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BlockDeleteSuggestionArgs {
+    pub block_id: String,
+    pub author: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BlockInsertSuggestionArgs {
+    pub block_id: String,
+    pub author: String,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BlockReplaceSuggestionArgs {
+    pub block_id: String,
+    pub author: String,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeleteSuggestionArgs {
     pub author: String,
     pub inline_id: String,
@@ -732,6 +991,43 @@ pub struct TextRangeFormatSuggestionArgs {
     pub author: String,
     pub mark_kind: String,
     pub value: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TextRangeFormatRemovalSuggestionArgs {
+    pub start_inline_id: String,
+    pub end_inline_id: String,
+    pub author: String,
+    pub mark_kind: String,
+    pub value: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TextRangeFormatReplacementSuggestionArgs {
+    pub start_inline_id: String,
+    pub end_inline_id: String,
+    pub author: String,
+    pub mark_kind: String,
+    pub expected_value: String,
+    pub value: String,
+}
+
+/// Propose replacing, adding, or removing the link on one complete text run.
+/// `href: null` removes a link; a string adds or replaces it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LinkChangeSuggestionArgs {
+    pub inline_id: String,
+    pub author: String,
+    pub href: Option<String>,
+}
+
+/// Propose a whole non-list paragraph style transition. `style` is one of
+/// `paragraph`, `title`, `subtitle`, or `heading:1` through `heading:6`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParagraphStyleSuggestionArgs {
+    pub block_id: String,
+    pub author: String,
+    pub style: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -769,6 +1065,14 @@ pub struct BibliographyReferenceMetadataArgs {
     pub issued: Option<String>,
     pub doi: Option<String>,
     pub url: Option<String>,
+}
+
+/// A local BibTeX/BibLaTeX library.  Parsing belongs to the Rust citation
+/// implementation so the browser never has to reduce a rich source to a
+/// title/author/year summary before it reaches the document.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ImportBibtexArgs {
+    pub source: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -879,6 +1183,28 @@ pub struct ImageBlockPlacementArgs {
     pub placement: String,
 }
 
+/// Logical clearance around an in-flow floated image, in twips.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ImageBlockWrapClearanceArgs {
+    pub block_id: String,
+    pub top_twips: i32,
+    pub end_twips: i32,
+    pub bottom_twips: i32,
+    pub start_twips: i32,
+}
+
+/// Geometry for an out-of-flow image as defined by ADR 0022.  An absent
+/// anchor is the page-content rectangle; otherwise it is another block's
+/// border box.  Offsets are twips and may be negative.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ImageBlockPositionedArgs {
+    pub block_id: String,
+    pub anchor_block_id: Option<String>,
+    pub horizontal_offset_twips: i32,
+    pub vertical_offset_twips: i32,
+    pub layer: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BlockBlobHashArgs {
     pub block_id: String,
@@ -946,6 +1272,15 @@ pub struct SpreadsheetPasteTsvArgs {
     /// workbook. Pasted formulas then shift their relative references by the
     /// paste offset; `None` stores the text verbatim.
     pub source_origin: Option<String>,
+}
+
+/// Hides or reveals every row (or column) the selection covers.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SpreadsheetSelectionHiddenArgs {
+    pub sheet_id: String,
+    pub anchor: String,
+    pub focus: String,
+    pub hidden: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1026,6 +1361,13 @@ pub struct SheetAddressArgs {
 pub struct SheetRangeArgs {
     pub sheet_id: String,
     pub range: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SheetPrintOrientationArgs {
+    pub sheet_id: String,
+    /// `"portrait"` or `"landscape"`.
+    pub orientation: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

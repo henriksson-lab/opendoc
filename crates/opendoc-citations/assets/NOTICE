@@ -1,0 +1,21 @@
+The CSL styles in `styles/` and the CSL locale files in `locales/` are
+Creative Commons BY-SA 3.0 <https://creativecommons.org/licenses/by-sa/3.0/>,
+from the Citation Style Language project <https://citationstyles.org/>.
+
+They are copied byte-for-byte out of `hayagriva` 0.10.1's own bundled
+archive (`hayagriva-0.10.1/archive/styles/` and
+`hayagriva-0.10.1/archive/locales/`), which carries the same notice. Each
+file is CBOR of the `citationberg` types the CSL XML parses into, which is
+the form `hayagriva` reads them in.
+
+Why a subset rather than `hayagriva`'s `archive` feature, and how to refresh
+or extend it, is documented in `../src/styles.rs`. The provenance of every
+file is in `BUNDLED_STYLES.archive_file` there, and
+`bundled_csl_assets_match_their_provenance` in `../src/tests.rs` checks that
+each one still decodes and still reports the CSL id it was copied for.
+
+To refresh from a newer `hayagriva`:
+
+    A=~/.cargo/registry/src/*/hayagriva-<version>/archive
+    for f in $(ls styles); do cp "$A/styles/$f" styles/; done
+    for f in $(ls locales); do cp "$A/locales/$f" locales/; done

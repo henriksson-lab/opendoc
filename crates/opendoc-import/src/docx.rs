@@ -18,6 +18,7 @@ mod props;
 mod revisions;
 mod section;
 mod styles;
+mod table;
 mod util;
 mod warnings;
 

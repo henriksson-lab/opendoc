@@ -22,12 +22,13 @@ pub use commands::{
     runtime_command_required_action, COMMANDS,
 };
 pub use editor::{
-    AppEditorSelection, AppFindMatch, AppFindMatches, EditorInlineRange, EditorInput,
-    EditorMarkInput, EditorPosition, EditorSelection, FindOptions,
+    AppEditorSelection, AppFindMatch, AppFindMatches, AppFindRegion, EditorInlineRange,
+    EditorInput, EditorMarkInput, EditorPosition, EditorSelection, FindOptions,
 };
 pub use runtime::{
-    OpenDocAuthorizationDecision, OpenDocPermissionGrant, OpenDocPresencePeer,
-    OpenDocRelayOperation, OpenDocRuntimeLookupEntry, OpenDocRuntimeLookupResult,
-    OpenDocRuntimeMode, OpenDocRuntimeProfile, OpenDocRuntimeSession, OpenDocShareInvite,
-    OpenDocStorageBackend, OpenDocSyncRelayResult,
+    OpenDocAuthorizationDecision, OpenDocAuthorizationSource, OpenDocPermissionAuthority,
+    OpenDocPresencePeer, OpenDocRelayOperation, OpenDocRuntimeLookupEntry,
+    OpenDocRuntimeLookupResult, OpenDocRuntimeMode, OpenDocRuntimeProfile, OpenDocRuntimeSession,
+    OpenDocServiceRole, OpenDocServiceSession, OpenDocShareInvite, OpenDocStorageBackend,
+    OpenDocSyncBatchOutcome, OpenDocSyncRelayResult,
 };

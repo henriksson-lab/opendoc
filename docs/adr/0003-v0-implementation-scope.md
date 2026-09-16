@@ -1,6 +1,8 @@
 # ADR 0003: V0 Implementation Scope
 
-Status: accepted for first implementation pass.
+Status: accepted for first implementation pass. **Two signing bullets corrected
+2026-09-13** — they stated as fact what the code does not do; each now says what
+is built and what is still unwired.
 
 ## Context
 
@@ -20,7 +22,7 @@ The research design now spans collaborative rich text, spreadsheets, binary obje
 - Lookup/index/archive rules should be soft and fail gracefully when stale, missing, or inconsistent.
 - Tape/archive strategy remains a research task; performance matters within the constraints of local object storage and common S3-compatible stores. For HPC2N-like environments, assume generic archive locators first, with IBM Spectrum Protect/TSM and SweStore/dCache as concrete research targets.
 - First prototype can be API/object-format/schema focused with tests, not a full UI.
-- Paragraph/block UUIDs are acceptable as invisible durable structure, but they should not affect document-content signatures unless a signature profile explicitly includes structure IDs.
+- Paragraph/block UUIDs are acceptable as invisible durable structure, but they should not affect document-content signatures unless a signature profile explicitly includes structure IDs. **Divergence recorded 2026-09-13:** the application's document signature covers the encoded `AppDocument`, and `AppBlock::id` is serialised into it, so block UUIDs *do* affect it and no profile declares that. Unchanged here — narrowing the document payload is a separate decision with its own compatibility cost — but it should not keep reading as though it were true.
 - Merge validation uses realistic synthetic scenarios plus fuzz testing.
 - Import/conversion may use tools that are easy to install on Linux, macOS, and Windows. If necessary, Linux-only tools are acceptable if they do not require root access to install.
 - Invisible block UUIDs are an implementation aid for merging and likely unrelated to import/export stability.
@@ -48,9 +50,9 @@ The research design now spans collaborative rich text, spreadsheets, binary obje
 - Open performance can be optimized later, as long as the design includes a strategy for snapshots, pack indexes, shallow loading, and compaction.
 - Cross-document references default to latest branch with warnings, with an option to pin an exact manifest.
 - “Official” or “published” status follows from presence and policy validation of signatures, not a manual flag.
-- Signature UI state should support at least `unsigned`, `signed`, `trusted`, `untrusted`, and `broken`.
-- A version may have multiple signatures.
-- Signing covers current state plus retained history reachable from the manifest, not unrelated full historical material.
+- Signature UI state should support at least `unsigned`, `signed`, `trusted`, `untrusted`, and `broken`. A *truncated history* is not one of these: a signature over a manifest whose ancestors have been deleted still verifies, and the repository walk that detects it reports separately (`ManifestChainAudit::history_is_truncated`). Whoever wires this into the app has to decide how that surfaces; `broken` would be wrong, because nothing was altered.
+- A version may have multiple signatures. (`Repository::write_version_signature` keys a version signature sidecar by manifest *and signer*, so a second signer accumulates rather than overwriting; blob signature sidecars still hold one record per blob.)
+- Signing covers current state plus retained history reachable from the manifest, not unrelated full historical material. **Corrected 2026-09-14:** `sign_current_repository_version_with_openssh_private_key` signs a committed manifest through `opendoc_sign::sign_version`, and open runs `Repository::audit_manifest_chain`. Snapshot signing remains available, but is explicitly snapshot-only rather than history coverage. See ADR 0002, "What the code actually does".
 - Deleted comments are hidden by default and restorable/auditable when retained data is available; otherwise degrade gracefully.
 - Accepted suggestions remain as provenance metadata, not visible track-change markup.
 - Formula computed values are not stored durably; they may be cached in RAM.

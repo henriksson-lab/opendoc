@@ -30,10 +30,17 @@ from fontTools.ttLib import TTFont
 # General Punctuation (quotes, dashes, the space family), currency, a handful
 # of symbols word processors emit, and the two f-ligature code points so that
 # text containing them precomposed still measures.
+#
+# Three of these are load-bearing and belong together: U+2022, U+25E6 and
+# U+25A0 are exactly the glyphs CSS draws for `list-style-type: disc, circle,
+# square`, which is the cycle `opendoc_layout::lists` paints on paper. A
+# bullet the subset does not carry is a bullet the paper and the screen
+# disagree about, so all three are in or none is — U+2022 arrives inside
+# General Punctuation, the other two are named here.
 UNICODES = (
     "U+0020-007E,U+00A0-00FF,U+0100-017F,U+02C6-02DC,U+2000-206F,"
     "U+20A0-20BF,U+2122,U+2190-2193,U+2202,U+2212,U+2260,U+2264,U+2265,"
-    "U+25A0,U+25CF,U+2610,U+2611,U+FB01-FB02"
+    "U+25A0,U+25CF,U+25E6,U+2610,U+2611,U+FB01-FB02"
 )
 
 FACES = [

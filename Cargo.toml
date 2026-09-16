@@ -8,13 +8,51 @@ members = [
     "crates/opendoc-sign",
     "crates/opendoc-import",
     "crates/opendoc-api",
+    "crates/opendoc-service",
     "crates/opendoc-render",
     "crates/opendoc-layout",
+    "crates/opendoc-pdf",
     "crates/opendoc-spreadsheet",
     "crates/opendoc-app",
     "crates/opendoc-wasm",
+    # Fuzz targets for the file parsers, in the workspace so the stable gate
+    # runs them. The nightly-only `cargo fuzz` entry points live in
+    # `crates/opendoc-fuzz/fuzz`, which is excluded below.
+    "crates/opendoc-fuzz",
 ]
 exclude = [
     "apps/desktop/src-tauri",
+    # `cargo fuzz` needs a nightly toolchain; the gate runs stable. Excluded so
+    # `cargo test --workspace` never tries to build it. See
+    # `crates/opendoc-fuzz/fuzz/README.md`.
+    "crates/opendoc-fuzz/fuzz",
 ]
 resolver = "2"
+
+# The browser build, and only the browser build.
+#
+# `opendoc-wasm` is fetched over the network on every cold load, so it is worth
+# spending build time on its size; `cargo test --release --workspace` is run far
+# more often than the WebAssembly module is built, so `release` itself stays as
+# it was — fat LTO and a single codegen unit there would tax every test cycle
+# for a binary nobody downloads. `apps/desktop/scripts/build-wasm.mjs` selects
+# this profile with `--profile release-wasm`.
+#
+# `opt-level` stays at `release`'s 3, deliberately. Measured on this module,
+# `opt-level = "s"` is 1.6 MB smaller and `"z"` is 3.1 MB smaller, but they cost
+# 71% and 148% more time in `layout_document` and 33% and 102% more in a single
+# editing command — the browser core lays the document out on every edit, so
+# that is the wrong trade. `strip` stays off for a different reason: it drops
+# the `target_features` section along with the symbol names, and a module
+# without that section is one every wasm post-processor rejects, believing its
+# instructions are not enabled. The build script drops the name section itself,
+# after wasm-bindgen, and `WASM_KEEP_NAMES=1` keeps it for a panic trace.
+#
+# `panic` stays as it is: `wasm32-unknown-unknown` is an abort target already
+# (`rustc --print target-spec-json` states `"panic-strategy": "abort"`), so
+# `panic = "abort"` here would buy no bytes and would only change the native
+# release binaries, which do unwind.
+[profile.release-wasm]
+inherits = "release"
+lto = "fat"
+codegen-units = 1

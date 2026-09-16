@@ -28,12 +28,16 @@ pub(crate) fn import_google_citations(
         message: "imported document-local citation database from OpenDoc Google-shaped extension"
             .to_string(),
     });
+    // The style and locale a Google payload leaves out are the model's own
+    // defaults, read from the model rather than spelled again here: a second
+    // copy of a default is a value that can disagree with the first.
+    let defaults = CitationDatabase::default();
     let mut database = CitationDatabase {
         style: optional_str(citations, "style")?
-            .unwrap_or("apa-7th")
+            .unwrap_or(&defaults.style)
             .to_string(),
         locale: optional_str(citations, "locale")?
-            .unwrap_or("en-US")
+            .unwrap_or(&defaults.locale)
             .to_string(),
         references: Vec::new(),
         citations: Vec::new(),
@@ -170,6 +174,7 @@ pub(crate) fn repair_imported_citation_placements(
         .filter(|footnote| !footnote.deleted)
         .map(|footnote| footnote.id.clone())
         .collect::<BTreeSet<_>>();
+    let mut moved_inline = Vec::new();
     for citation in &mut document.citation_database.citations {
         if citation.deleted {
             continue;
@@ -183,7 +188,7 @@ pub(crate) fn repair_imported_citation_placements(
         let missing_footnote_id = footnote_id.clone();
         citation.placement = CitationPlacement::Inline;
         citation.rendered_cache = None;
-        clear_imported_inline_citation_cache(&mut document.blocks, &citation.id);
+        moved_inline.push(citation.id.clone());
         warnings.push(ModelWarning {
             code: "citation-footnote-target-missing".to_string(),
             message: format!(
@@ -191,6 +196,9 @@ pub(crate) fn repair_imported_citation_placements(
                 citation.id
             ),
         });
+    }
+    for citation_id in moved_inline {
+        clear_imported_citation_cache_everywhere(document, &citation_id);
     }
 }
 
@@ -222,7 +230,7 @@ pub(crate) fn repair_imported_citation_references(
     affected_citations.sort();
     affected_citations.dedup();
     for citation_id in affected_citations {
-        clear_imported_inline_citation_cache(&mut document.blocks, &citation_id);
+        clear_imported_citation_cache_everywhere(document, &citation_id);
         warnings.push(ModelWarning {
             code: "citation-reference-missing".to_string(),
             message: format!(
@@ -234,23 +242,68 @@ pub(crate) fn repair_imported_citation_references(
 
 pub(crate) fn clear_imported_inline_citation_cache(blocks: &mut [Block], citation_id: &StableId) {
     for block in blocks {
-        for inline in &mut block.content {
-            if let Inline::Citation {
-                citation_id: inline_citation_id,
-                rendered_cache,
-                ..
-            } = inline
-            {
-                if inline_citation_id == citation_id {
-                    *rendered_cache = None;
-                }
-            }
-        }
+        clear_imported_inline_citation_cache_in_inlines(&mut block.content, citation_id);
         if let BlockKind::Table { rows, .. } = &mut block.kind {
             for row in rows {
                 for cell in &mut row.cells {
                     clear_imported_inline_citation_cache(&mut cell.blocks, citation_id);
                 }
+            }
+        }
+    }
+}
+
+/// Citation labels are projections of the document-level bibliography, not
+/// source text.  Google-shaped input can put an inline sequence in more than
+/// the ordinary body: notes, review evidence, and suggested insertions all
+/// travel through the same extension.  A broken group/reference must not
+/// leave one of those less common surfaces displaying a stale imported label.
+fn clear_imported_citation_cache_everywhere(document: &mut Document, citation_id: &StableId) {
+    clear_imported_inline_citation_cache(&mut document.blocks, citation_id);
+    clear_imported_inline_citation_cache(&mut document.header, citation_id);
+    clear_imported_inline_citation_cache(&mut document.footer, citation_id);
+    if let Some(blocks) = &mut document.first_page_header {
+        clear_imported_inline_citation_cache(blocks, citation_id);
+    }
+    if let Some(blocks) = &mut document.first_page_footer {
+        clear_imported_inline_citation_cache(blocks, citation_id);
+    }
+    if let Some(blocks) = &mut document.even_page_header {
+        clear_imported_inline_citation_cache(blocks, citation_id);
+    }
+    if let Some(blocks) = &mut document.even_page_footer {
+        clear_imported_inline_citation_cache(blocks, citation_id);
+    }
+    for footnote in &mut document.footnotes {
+        clear_imported_inline_citation_cache_in_inlines(&mut footnote.body, citation_id);
+    }
+    for thread in &mut document.comments {
+        for comment in &mut thread.comments {
+            clear_imported_inline_citation_cache_in_inlines(&mut comment.body, citation_id);
+        }
+    }
+    for entry in &mut document.comment_history {
+        if let Some(body) = &mut entry.previous_body {
+            clear_imported_inline_citation_cache_in_inlines(body, citation_id);
+        }
+    }
+    for suggestion in &mut document.suggestions {
+        if let opendoc_core::SuggestionKind::Insert { content, .. } = &mut suggestion.kind {
+            clear_imported_inline_citation_cache_in_inlines(content, citation_id);
+        }
+    }
+}
+
+fn clear_imported_inline_citation_cache_in_inlines(inlines: &mut [Inline], citation_id: &StableId) {
+    for inline in inlines {
+        if let Inline::Citation {
+            citation_id: inline_citation_id,
+            rendered_cache,
+            ..
+        } = inline
+        {
+            if inline_citation_id == citation_id {
+                *rendered_cache = None;
             }
         }
     }
@@ -268,11 +321,7 @@ pub(crate) fn repair_imported_inline_citation_labels(
         .map(|citation| citation.id.clone())
         .collect::<BTreeSet<_>>();
     let mut affected = BTreeSet::new();
-    clear_imported_missing_inline_citation_caches(
-        &mut document.blocks,
-        &live_citations,
-        &mut affected,
-    );
+    clear_imported_missing_citation_caches_everywhere(document, &live_citations, &mut affected);
     for citation_id in affected {
         warnings.push(ModelWarning {
             code: "citation-group-missing".to_string(),
@@ -317,19 +366,11 @@ pub(crate) fn clear_imported_missing_inline_citation_caches(
     affected: &mut BTreeSet<StableId>,
 ) {
     for block in blocks {
-        for inline in &mut block.content {
-            if let Inline::Citation {
-                citation_id,
-                rendered_cache,
-                ..
-            } = inline
-            {
-                if !live_citations.contains(citation_id) {
-                    *rendered_cache = None;
-                    affected.insert(citation_id.clone());
-                }
-            }
-        }
+        clear_imported_missing_citation_caches_in_inlines(
+            &mut block.content,
+            live_citations,
+            affected,
+        );
         if let BlockKind::Table { rows, .. } = &mut block.kind {
             for row in rows {
                 for cell in &mut row.cells {
@@ -344,9 +385,84 @@ pub(crate) fn clear_imported_missing_inline_citation_caches(
     }
 }
 
+fn clear_imported_missing_citation_caches_everywhere(
+    document: &mut Document,
+    live_citations: &BTreeSet<StableId>,
+    affected: &mut BTreeSet<StableId>,
+) {
+    clear_imported_missing_inline_citation_caches(&mut document.blocks, live_citations, affected);
+    clear_imported_missing_inline_citation_caches(&mut document.header, live_citations, affected);
+    clear_imported_missing_inline_citation_caches(&mut document.footer, live_citations, affected);
+    if let Some(blocks) = &mut document.first_page_header {
+        clear_imported_missing_inline_citation_caches(blocks, live_citations, affected);
+    }
+    if let Some(blocks) = &mut document.first_page_footer {
+        clear_imported_missing_inline_citation_caches(blocks, live_citations, affected);
+    }
+    if let Some(blocks) = &mut document.even_page_header {
+        clear_imported_missing_inline_citation_caches(blocks, live_citations, affected);
+    }
+    if let Some(blocks) = &mut document.even_page_footer {
+        clear_imported_missing_inline_citation_caches(blocks, live_citations, affected);
+    }
+    for footnote in &mut document.footnotes {
+        clear_imported_missing_citation_caches_in_inlines(
+            &mut footnote.body,
+            live_citations,
+            affected,
+        );
+    }
+    for thread in &mut document.comments {
+        for comment in &mut thread.comments {
+            clear_imported_missing_citation_caches_in_inlines(
+                &mut comment.body,
+                live_citations,
+                affected,
+            );
+        }
+    }
+    for entry in &mut document.comment_history {
+        if let Some(body) = &mut entry.previous_body {
+            clear_imported_missing_citation_caches_in_inlines(body, live_citations, affected);
+        }
+    }
+    for suggestion in &mut document.suggestions {
+        if let opendoc_core::SuggestionKind::Insert { content, .. } = &mut suggestion.kind {
+            clear_imported_missing_citation_caches_in_inlines(content, live_citations, affected);
+        }
+    }
+}
+
+fn clear_imported_missing_citation_caches_in_inlines(
+    inlines: &mut [Inline],
+    live_citations: &BTreeSet<StableId>,
+    affected: &mut BTreeSet<StableId>,
+) {
+    for inline in inlines {
+        if let Inline::Citation {
+            citation_id,
+            rendered_cache,
+            ..
+        } = inline
+        {
+            if !live_citations.contains(citation_id) {
+                *rendered_cache = None;
+                affected.insert(citation_id.clone());
+            }
+        }
+    }
+}
+
+/// Whether the Google export has to carry the citation extension at all.
+///
+/// A database that is exactly the model's default and holds nothing says
+/// nothing a reader could not reconstruct. The comparison is against
+/// [`CitationDatabase::default`] rather than against a copy of the default
+/// spelled here, which is what let the two drift apart.
 pub(crate) fn should_export_citations(database: &CitationDatabase) -> bool {
-    database.style != "apa-7th"
-        || database.locale != "en-US"
+    let defaults = CitationDatabase::default();
+    database.style != defaults.style
+        || database.locale != defaults.locale
         || !database.references.is_empty()
         || !database.citations.is_empty()
 }

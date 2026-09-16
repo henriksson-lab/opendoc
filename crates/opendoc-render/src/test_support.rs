@@ -19,6 +19,8 @@ pub(crate) fn table_document() -> Document {
             (0..2)
                 .map(|row| opendoc_core::TableRow {
                     id: StableId::parse(format!("row-{row}")).expect("valid id"),
+                    height: None,
+                    header: false,
                     cells: (0..3)
                         .map(|column| {
                             opendoc_core::TableCell::new(vec![Block::paragraph(format!(
@@ -42,7 +44,7 @@ pub(crate) fn table_parts(
     &mut Vec<opendoc_core::TableRow>,
 ) {
     match &mut document.blocks[0].kind {
-        BlockKind::Table { columns, rows } => (columns, rows),
+        BlockKind::Table { columns, rows, .. } => (columns, rows),
         other => panic!("expected a table, got {other:?}"),
     }
 }

@@ -55,7 +55,9 @@ Everything the UI can do is a named command in the registry in `opendoc-api/src/
 - **Browser/WASM**: `opendoc-wasm` is a thin wasm-bindgen wrapper over the same `OpenDocApp`.
 - **Frontend**: `apps/desktop/src/invoke.ts` picks Tauri or WASM at runtime. No document logic lives there.
 
-A future `opendoc-service` (HTTP/WebSocket, auth, server-enforced permissions) is deliberately **not** created yet — see `docs/adr/0004`. The `relay_runtime_sync` / share / presence DTOs exist as contract design but are local simulations; do not describe them as a working backend.
+`opendoc-service` (HTTP/WebSocket, session auth, server-enforced permissions, durable operation intake, presence fanout) now exists — ADR 0004 gated it on the local boundaries being stable, and `docs/adr/0015` records that assessment and the crate's scope. It composes `opendoc-core`/`format`/`merge`/`store` directly and deliberately does **not** depend on `opendoc-app`, so a network daemon cannot pull in layout, render, import or spreadsheet; the dependency list is the tripwire if semantics ever creep in. It is not in the WASM dependency graph.
+
+`opendoc-api`'s runtime DTOs no longer let a client assert its own permissions. `authorize_runtime_command` takes no grants: in a local runtime the answer is a *capability* check (ADR 0004 calls permissions there advisory), and in `multi-user-service` mode it is the service's answer, read from the `OpenDocServiceSession` that `join_collaboration_session` stored from the welcome frame. No command argument can reach that field, and with no session nothing is authorized — there is no local fallback. `relay_runtime_sync` is a **preflight**, not a relay: it applies the checks the service applies (actor binding, sequence density, history immutability) and answers accepted / refused / retried, the only three states the service has. `OpenDocApp` is a client of the service: `join_collaboration_session` adopts the actor, role, peers, merge base and operation log, `apply_remote_operations` folds a commit in by re-merging from that base (never by folding into the previous result — ADR 0007), and `opendoc-service`'s own tests drive a real `OpenDocApp` over a socket against a second client. Envelope identity and operation identity are separate counters: `next_envelope_seq` numbers every journal entry and `next_operation_seq` numbers only `OperationId`, so a blob, spreadsheet or undo envelope no longer leaves a gap the service refuses (`local_operations_are_dense_after` still lets a transport check). A repository written before that split keeps its gaps, is read exactly as written, and says so (`legacy-operation-sequence-gap`). Connecting the desktop/browser shells is still not done: nothing in `main.ts` or `src-tauri` speaks the protocol.
 
 ### The contract is generated, never hand-written
 
@@ -89,6 +91,7 @@ This is the project's central rule (`docs/RESTRUCTURE_PLAN.md` "Non-Negotiable D
 | `opendoc-citations` | Citation model/parse/render (hayagriva-backed) |
 | `opendoc-render` | Pure HTML/debug projections — must never mutate source state or force recalculation |
 | `opendoc-layout` | Deterministic document layout: line breaking, block flow and pagination against a bundled font subset. Pure, no host measurement, builds for wasm32 |
+| `opendoc-pdf` | PDF export, drawn from `opendoc-layout`'s painted result and embedding the same font subset it measured with. Measures nothing itself; builds for wasm32 |
 | `opendoc-api` | Command registry/specs, typed command enum, arg DTOs, JSON parsing, contract generator binary |
 | `opendoc-app` | Application facade composing domain services; the runtime-facing entry point |
 | `opendoc-wasm` | wasm-bindgen adapter (`cdylib`) |

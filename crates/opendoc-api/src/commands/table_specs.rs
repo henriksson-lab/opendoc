@@ -20,6 +20,38 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         Some("write")
     ),
     command!(
+        "insert_horizontal_rule_after",
+        AppDocument,
+        [arg!("afterBlockId", String)],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
+        "add_horizontal_rule",
+        AppDocument,
+        [],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
+        "insert_table_of_contents_after",
+        AppDocument,
+        [arg!("afterBlockId", String)],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
+        "insert_bibliography_after",
+        AppDocument,
+        [arg!("afterBlockId", String)],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
         "insert_table_after",
         AppDocument,
         [
@@ -117,6 +149,87 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         Some("write")
     ),
     command!(
+        "set_table_row_height",
+        AppDocument,
+        [
+            arg!("tableBlockId", String),
+            arg!("rowId", String),
+            arg!("twips", Number)
+        ],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
+        "clear_table_row_height",
+        AppDocument,
+        [arg!("tableBlockId", String), arg!("rowId", String)],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
+        "set_table_row_header",
+        AppDocument,
+        [
+            arg!("tableBlockId", String),
+            arg!("rowId", String),
+            arg!("header", Boolean)
+        ],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
+        "sort_table_rows",
+        AppDocument,
+        [
+            arg!("tableBlockId", String),
+            arg!("columnId", String),
+            arg!("descending", Boolean)
+        ],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
+        "set_table_border",
+        AppDocument,
+        [
+            arg!("tableBlockId", String),
+            arg!("style", String),
+            arg!("twips", Number),
+            arg!("color", String)
+        ],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
+        "clear_table_border",
+        AppDocument,
+        [arg!("tableBlockId", String)],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
+        "set_table_alignment",
+        AppDocument,
+        [arg!("tableBlockId", String), arg!("alignment", String)],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
+        "clear_table_alignment",
+        AppDocument,
+        [arg!("tableBlockId", String)],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
         "merge_table_cells",
         AppDocument,
         [
@@ -162,6 +275,14 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         "set_table_cell_vertical_alignment",
         AppDocument,
         [arg!("cellId", String), arg!("alignment", String)],
+        true,
+        false,
+        Some("write")
+    ),
+    command!(
+        "set_table_cell_row_header",
+        AppDocument,
+        [arg!("cellId", String), arg!("rowHeader", Boolean)],
         true,
         false,
         Some("write")

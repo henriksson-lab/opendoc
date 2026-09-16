@@ -15,7 +15,7 @@ impl OpenDocApp {
             .map(|sheet| sheet.id.clone())
             .unwrap_or_else(|| "sheet-1".to_string());
         self.mutate_spreadsheet(SpreadsheetEvaluationPolicy::RespectDeferred, |workbook| {
-            workbook.set_cell(&address, value.clone());
+            workbook.set_cell_in_sheet(&sheet_id, &address, value.clone())?;
             Ok(())
         })?;
         self.journal_spreadsheet_operation(
@@ -73,7 +73,7 @@ impl OpenDocApp {
             .collect::<Result<Vec<_>, _>>()?;
         self.mutate_spreadsheet(SpreadsheetEvaluationPolicy::Force, |workbook| {
             for (address, value) in &entries {
-                workbook.set_cell(address, value.clone());
+                workbook.set_cell_in_sheet(&sheet_id, address, value.clone())?;
             }
             Ok(())
         })?;
@@ -394,7 +394,7 @@ impl OpenDocApp {
             deleted: false,
         }
         .validate_source()?;
-        let comment_id = format!("cell-comment-{}-{}", self.actor_id, self.next_seq);
+        let comment_id = format!("cell-comment-{}-{}", self.actor_id, self.next_envelope_seq);
         self.mutate_spreadsheet(SpreadsheetEvaluationPolicy::Force, |workbook| {
             workbook
                 .add_cell_comment(&sheet_id, &address, &comment_id, &author, &body)
@@ -701,6 +701,95 @@ impl OpenDocApp {
         Ok(self.document())
     }
 
+    /// Set the PDF print area to one inclusive selection.  The spreadsheet
+    /// model owns canonicalization and bounds checks, so the UI and replay
+    /// cannot disagree about what A1 syntax means.
+    pub fn set_spreadsheet_print_area(
+        &mut self,
+        sheet_id: impl AsRef<str>,
+        range: impl AsRef<str>,
+    ) -> Result<AppDocument, AppApiError> {
+        let sheet_id = normalize_sheet_id(sheet_id.as_ref())?;
+        let range = normalize_cell_range(range.as_ref())?;
+        self.mutate_spreadsheet(SpreadsheetEvaluationPolicy::Force, |workbook| {
+            workbook
+                .set_print_area(&sheet_id, Some(&range))
+                .ok_or_else(|| {
+                    AppApiError::NotFound(format!("sheet {sheet_id} was not found"))
+                })??;
+            Ok(())
+        })?;
+        self.journal_spreadsheet_operation(
+            &format!("set print area {sheet_id}!{range}"),
+            AppSpreadsheetOperation::SetPrintArea { sheet_id, range },
+        );
+        Ok(self.document())
+    }
+
+    /// Clear the area that was actually visible to this command. The journal
+    /// retains that target so replay does not clear a newer concurrent area.
+    pub fn clear_spreadsheet_print_area(
+        &mut self,
+        sheet_id: impl AsRef<str>,
+    ) -> Result<AppDocument, AppApiError> {
+        let sheet_id = normalize_sheet_id(sheet_id.as_ref())?;
+        let range = self
+            .workbook
+            .sheets
+            .iter()
+            .find(|sheet| sheet.id == sheet_id)
+            .ok_or_else(|| AppApiError::NotFound(format!("sheet {sheet_id} was not found")))?
+            .print_settings
+            .print_area
+            .clone()
+            .ok_or_else(|| AppApiError::NotFound(format!("sheet {sheet_id} has no print area")))?;
+        self.mutate_spreadsheet(SpreadsheetEvaluationPolicy::Force, |workbook| {
+            workbook.set_print_area(&sheet_id, None).ok_or_else(|| {
+                AppApiError::NotFound(format!("sheet {sheet_id} was not found"))
+            })??;
+            Ok(())
+        })?;
+        self.journal_spreadsheet_operation(
+            &format!("clear print area {sheet_id}!{range}"),
+            AppSpreadsheetOperation::ClearPrintArea { sheet_id, range },
+        );
+        Ok(self.document())
+    }
+
+    /// Selects the orientation used for this sheet's fixed Letter PDF page.
+    /// The string is parsed at the command edge; the workbook and journal only
+    /// ever see the closed model enum.
+    pub fn set_spreadsheet_print_orientation(
+        &mut self,
+        sheet_id: impl AsRef<str>,
+        orientation: impl AsRef<str>,
+    ) -> Result<AppDocument, AppApiError> {
+        let sheet_id = normalize_sheet_id(sheet_id.as_ref())?;
+        let orientation = match orientation.as_ref() {
+            "portrait" => AppSheetPrintOrientation::Portrait,
+            "landscape" => AppSheetPrintOrientation::Landscape,
+            other => {
+                return Err(AppApiError::Format(format!(
+                    "spreadsheet print orientation must be portrait or landscape, got {other:?}"
+                )));
+            }
+        };
+        self.mutate_spreadsheet(SpreadsheetEvaluationPolicy::Force, |workbook| {
+            workbook
+                .set_print_orientation(&sheet_id, orientation)
+                .ok_or_else(|| AppApiError::NotFound(format!("sheet {sheet_id} was not found")))?;
+            Ok(())
+        })?;
+        self.journal_spreadsheet_operation(
+            &format!("set print orientation {sheet_id}!{orientation:?}"),
+            AppSpreadsheetOperation::SetPrintOrientation {
+                sheet_id,
+                orientation,
+            },
+        );
+        Ok(self.document())
+    }
+
     pub fn set_spreadsheet_basic_filter_options(
         &mut self,
         sheet_id: impl AsRef<str>,
@@ -932,9 +1021,7 @@ impl OpenDocApp {
         let address = normalize_cell_address(address.as_ref())?;
         let value = value.into();
         self.mutate_spreadsheet(SpreadsheetEvaluationPolicy::Force, |workbook| {
-            workbook
-                .set_cell_in_sheet(&sheet_id, &address, value.clone())
-                .ok_or_else(|| AppApiError::NotFound(format!("sheet {sheet_id} was not found")))?;
+            workbook.set_cell_in_sheet(&sheet_id, &address, value.clone())?;
             Ok(())
         })?;
         self.journal_spreadsheet_operation(
@@ -962,11 +1049,7 @@ impl OpenDocApp {
             .collect::<Result<Vec<_>, _>>()?;
         self.mutate_spreadsheet(SpreadsheetEvaluationPolicy::Force, |workbook| {
             for (address, value) in &entries {
-                workbook
-                    .set_cell_in_sheet(&sheet_id, address, value.clone())
-                    .ok_or_else(|| {
-                        AppApiError::NotFound(format!("sheet {sheet_id} was not found"))
-                    })?;
+                workbook.set_cell_in_sheet(&sheet_id, address, value.clone())?;
             }
             Ok(())
         })?;
@@ -1194,17 +1277,43 @@ impl OpenDocApp {
         self.set_spreadsheet_cells_in_sheet(sheet_id, cells)
     }
 
-    /// Serializes one sheet as CSV/TSV using display text (SH-47).
+    /// Serializes one sheet as CSV/TSV using display text (SH-47), plus
+    /// everything a grid of text could not carry.
+    ///
+    /// An `AppExport` rather than a bare `String` for the reason
+    /// `export_google_sheets_json` is one: the caller needs the media type and
+    /// the extension — which are not the same for a comma file and a tab file
+    /// — and it needs to be told what the format dropped. Returning a string
+    /// made every one of those the frontend's guess, and made the losses
+    /// unreportable.
     pub fn export_spreadsheet_csv(
         &self,
         sheet_id: impl AsRef<str>,
         delimiter: Option<&str>,
-    ) -> Result<String, AppApiError> {
+    ) -> Result<AppExport, AppApiError> {
         let sheet_id = normalize_sheet_id(sheet_id.as_ref())?;
         let delimiter = delimiter
             .map(str::trim)
             .filter(|delimiter| !delimiter.is_empty());
-        Ok(self.workbook.evaluated().export_csv(&sheet_id, delimiter)?)
+        let workbook = self.workbook.evaluated();
+        let text = workbook.export_csv(&sheet_id, delimiter)?;
+        // A tab-delimited file is not a CSV file, and saying it is names the
+        // wrong extension in the save dialog and the wrong media type in the
+        // file. The delimiter is the only thing that decides it.
+        let tab_separated = matches!(delimiter, Some("tab") | Some("\t"));
+        let (media_type, extension) = if tab_separated {
+            ("text/tab-separated-values;charset=utf-8", "tsv")
+        } else {
+            ("text/csv;charset=utf-8", "csv")
+        };
+        Ok(AppExport::text(
+            text,
+            media_type,
+            extension,
+            crate::import_export_service::model_warnings(
+                crate::import_export_service::csv_export_warnings(&workbook, &sheet_id),
+            ),
+        ))
     }
 
     /// Replaces the workbook with an imported XLSX file (SH-47), mirroring
@@ -1215,19 +1324,59 @@ impl OpenDocApp {
         base64: impl AsRef<str>,
     ) -> Result<AppDocument, AppApiError> {
         let title = normalize_sheet_title(title.as_ref());
-        let imported = AppSpreadsheetWorkbook::from_xlsx_base64(base64.as_ref(), &title)?;
+        let imported =
+            AppSpreadsheetWorkbook::from_xlsx_base64_with_warnings(base64.as_ref(), &title)?;
+        let import_warnings = imported.warnings;
+        let imported = imported.workbook;
         imported.validate_source()?;
+        let journalled = imported.clone();
         self.mutate_spreadsheet(SpreadsheetEvaluationPolicy::Force, |workbook| {
             *workbook = imported;
             Ok(())
         })?;
-        self.push_app_operation("import-spreadsheet-xlsx", "import XLSX workbook");
+        // The envelope carries the imported workbook, not the bare marker it
+        // used to. A marker has no spreadsheet payload, and every replay path
+        // skips those — so crash recovery and repository merge both replayed
+        // the workbook as it stood *before* the import.
+        self.journal_spreadsheet_operation(
+            "import XLSX workbook",
+            AppSpreadsheetOperation::ReplaceWorkbook {
+                workbook: Box::new(journalled),
+            },
+        );
+        for warning in import_warnings {
+            self.push_model_warning(&warning.code, warning.message);
+        }
         Ok(self.document())
     }
 
-    /// Serializes the workbook as a base64-encoded XLSX file (SH-47).
-    pub fn export_spreadsheet_xlsx(&self) -> Result<String, AppApiError> {
-        Ok(self.workbook.evaluated().to_xlsx_base64()?)
+    /// Serializes the workbook as a base64-encoded XLSX file (SH-47), plus the
+    /// handful of model properties the writer has no code for.
+    pub fn export_spreadsheet_xlsx(&self) -> Result<AppExport, AppApiError> {
+        let workbook = self.workbook.evaluated();
+        Ok(AppExport::base64_content(
+            workbook.to_xlsx_base64()?,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "xlsx",
+            crate::import_export_service::model_warnings(
+                crate::import_export_service::xlsx_export_warnings(&workbook),
+            ),
+        ))
+    }
+
+    /// Renders every visible workbook sheet to a paginated landscape PDF.
+    /// Unlike CSV, this is a workbook export: tabs are preserved as separate
+    /// page sequences and formula cells use their evaluated display values.
+    pub fn export_spreadsheet_pdf(&self) -> Result<AppExport, AppApiError> {
+        let export = opendoc_pdf::export_spreadsheet_pdf(&self.workbook);
+        Ok(AppExport::binary(
+            &export.bytes,
+            "application/pdf",
+            "pdf",
+            crate::import_export_service::model_warnings(
+                crate::import_export_service::collapse_by_code(export.warnings),
+            ),
+        ))
     }
 
     pub fn add_spreadsheet_named_range(

@@ -64,6 +64,64 @@ pub(crate) fn update_mention_label(
     update_mention_label_in_blocks(&mut document.blocks, inline_id_to_update, label)
 }
 
+pub(crate) fn update_date_chip(
+    document: &mut Document,
+    inline_id_to_update: &StableId,
+    date: &str,
+) -> Option<bool> {
+    update_date_chip_in_blocks(&mut document.blocks, inline_id_to_update, date)
+}
+
+fn update_date_chip_in_blocks(
+    blocks: &mut [Block],
+    inline_id_to_update: &StableId,
+    date: &str,
+) -> Option<bool> {
+    for block in blocks {
+        for inline in &mut block.content {
+            match inline {
+                Inline::DateChip { id, date: current } if id == inline_id_to_update => {
+                    *current = date.to_string();
+                    return Some(true);
+                }
+                Inline::Text { id, .. }
+                | Inline::Link { id, .. }
+                | Inline::Citation { id, .. }
+                | Inline::FootnoteRef { id, .. }
+                | Inline::Mention { id, .. }
+                | Inline::Dropdown { id, .. }
+                | Inline::Equation { id, .. }
+                | Inline::PageNumber { id, .. }
+                    if id == inline_id_to_update =>
+                {
+                    return Some(false)
+                }
+                _ => {}
+            }
+        }
+        if let BlockKind::Table { rows, .. } = &mut block.kind {
+            for row in rows {
+                for cell in &mut row.cells {
+                    if let Some(result) =
+                        update_date_chip_in_blocks(&mut cell.blocks, inline_id_to_update, date)
+                    {
+                        return Some(result);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+pub(crate) fn select_dropdown_option(
+    document: &mut Document,
+    inline_id_to_update: &StableId,
+    option_id: &str,
+) -> Option<bool> {
+    select_dropdown_option_in_blocks(&mut document.blocks, inline_id_to_update, option_id)
+}
+
 /// Byte index of the `offset`-th Unicode scalar value, clamped to the end.
 pub fn byte_index_for_char_offset(value: &str, offset: usize) -> usize {
     value
@@ -203,6 +261,56 @@ pub(crate) fn update_mention_label_in_blocks(
                     if let Some(updated) =
                         update_mention_label_in_blocks(&mut cell.blocks, inline_id_to_update, label)
                     {
+                        return Some(updated);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+pub(crate) fn select_dropdown_option_in_blocks(
+    blocks: &mut [Block],
+    inline_id_to_update: &StableId,
+    option_id: &str,
+) -> Option<bool> {
+    for block in blocks {
+        for inline in &mut block.content {
+            match inline {
+                Inline::Dropdown {
+                    id,
+                    options,
+                    selected_option_id,
+                } if id == inline_id_to_update => {
+                    if !options.iter().any(|option| option.id == option_id) {
+                        return Some(false);
+                    }
+                    *selected_option_id = option_id.to_string();
+                    return Some(true);
+                }
+                Inline::Text { id, .. }
+                | Inline::Link { id, .. }
+                | Inline::Citation { id, .. }
+                | Inline::FootnoteRef { id, .. }
+                | Inline::Mention { id, .. }
+                | Inline::Equation { id, .. }
+                | Inline::PageNumber { id, .. }
+                    if id == inline_id_to_update =>
+                {
+                    return Some(false)
+                }
+                _ => {}
+            }
+        }
+        if let BlockKind::Table { rows, .. } = &mut block.kind {
+            for row in rows {
+                for cell in &mut row.cells {
+                    if let Some(updated) = select_dropdown_option_in_blocks(
+                        &mut cell.blocks,
+                        inline_id_to_update,
+                        option_id,
+                    ) {
                         return Some(updated);
                     }
                 }

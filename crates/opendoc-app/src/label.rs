@@ -6,6 +6,7 @@ pub(crate) fn anchor_label(anchor: &Anchor) -> String {
     match anchor {
         Anchor::TextRange(range) => format!("{}..{}", range.start, range.end),
         Anchor::NearestBlock { block_id, .. } => format!("nearest:{block_id}"),
+        Anchor::Orphaned { .. } => "orphaned".to_string(),
         Anchor::Document => "document".to_string(),
     }
 }
@@ -16,6 +17,9 @@ pub(crate) fn anchor_display_label(anchor: &Anchor, blocks: &[Block]) -> String 
         Anchor::NearestBlock { block_id, .. } => find_block_in_blocks(blocks, block_id)
             .map(|block| format!("On: \"{}\"", truncate_label(&block_display_text(block), 60)))
             .unwrap_or_else(|| "On a removed block".to_string()),
+        Anchor::Orphaned { quote, .. } => {
+            format!("Deleted text: \"{}\"", truncate_label(quote, 80))
+        }
         Anchor::Document => "Document".to_string(),
     }
 }
@@ -26,9 +30,51 @@ pub(crate) fn suggestion_anchor_display_label(
 ) -> Option<String> {
     match kind {
         SuggestionKind::Insert { anchor, .. } => Some(anchor_display_label(anchor, blocks)),
-        SuggestionKind::Delete { range } | SuggestionKind::Format { range, .. } => {
-            Some(range_display_label(range, blocks))
+        SuggestionKind::Delete { range }
+        | SuggestionKind::Format { range, .. }
+        | SuggestionKind::FormatRemove { range, .. }
+        | SuggestionKind::FormatReplace { range, .. } => Some(range_display_label(range, blocks)),
+        SuggestionKind::BlockDelete { block_id } => find_block_in_blocks(blocks, block_id)
+            .map(|block| {
+                format!(
+                    "Delete: \"{}\"",
+                    truncate_label(&block_display_text(block), 60)
+                )
+            })
+            .or_else(|| Some("Delete a removed block".to_string())),
+        SuggestionKind::BlockInsert { position, .. } => Some(match position.anchor() {
+            Some(anchor) => format!("Insert beside block {anchor}"),
+            None => "Insert at document boundary".to_string(),
+        }),
+        SuggestionKind::BlockReplace { block_id, .. } => find_block_in_blocks(blocks, block_id)
+            .map(|block| {
+                format!(
+                    "Replace: \"{}\"",
+                    truncate_label(&block_display_text(block), 60)
+                )
+            })
+            .or_else(|| Some("Replace a removed block".to_string())),
+        SuggestionKind::ParagraphStyleChange { block_id, .. } => {
+            find_block_in_blocks(blocks, block_id)
+                .map(|block| {
+                    format!(
+                        "Style: \"{}\"",
+                        truncate_label(&block_display_text(block), 60)
+                    )
+                })
+                .or_else(|| Some("Change style on a removed block".to_string()))
         }
+        SuggestionKind::LinkChange {
+            inline_id, href, ..
+        } => find_inline_in_blocks(blocks, inline_id)
+            .map(|inline| {
+                format!(
+                    "{} link on: \"{}\"",
+                    if href.is_some() { "Change" } else { "Remove" },
+                    truncate_label(&inline_display_text(inline), 60)
+                )
+            })
+            .or_else(|| Some("Change link on removed text".to_string())),
     }
 }
 
@@ -68,7 +114,19 @@ fn inline_display_text(inline: &Inline) -> String {
         } => text.clone(),
         Inline::Citation { citation_id, .. } => format!("[{citation_id}]"),
         Inline::FootnoteRef { footnote_id, .. } => format!("[{footnote_id}]"),
-        Inline::Mention { label, .. } => label.clone(),
+        Inline::Mention { label, .. }
+        | Inline::GooglePersonChip { label, .. }
+        | Inline::GoogleRichLinkChip { label, .. } => label.clone(),
+        Inline::Dropdown {
+            options,
+            selected_option_id,
+            ..
+        } => options
+            .iter()
+            .find(|option| option.id == *selected_option_id)
+            .map(|option| option.label.clone())
+            .unwrap_or_default(),
+        Inline::DateChip { date, .. } => date.clone(),
         Inline::Equation { equation, .. } => equation.source.clone(),
         // Shown as the field it is, the way a word processor shows an
         // unresolved field, because it has no resolved value outside a page.
@@ -87,7 +145,15 @@ pub(crate) fn suggestion_text(kind: &SuggestionKind) -> String {
             .map(inline_display_text)
             .collect::<Vec<_>>()
             .join(""),
-        SuggestionKind::Delete { .. } | SuggestionKind::Format { .. } => String::new(),
+        SuggestionKind::Delete { .. }
+        | SuggestionKind::Format { .. }
+        | SuggestionKind::FormatRemove { .. }
+        | SuggestionKind::FormatReplace { .. }
+        | SuggestionKind::LinkChange { .. }
+        | SuggestionKind::BlockDelete { .. } => String::new(),
+        SuggestionKind::BlockInsert { block, .. } => block_display_text(block),
+        SuggestionKind::BlockReplace { replacement, .. } => block_display_text(replacement),
+        SuggestionKind::ParagraphStyleChange { .. } => String::new(),
     }
 }
 

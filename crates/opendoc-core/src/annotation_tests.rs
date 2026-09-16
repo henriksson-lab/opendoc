@@ -14,8 +14,11 @@ fn footnote_references_require_live_targets() {
         id: StableId::new("table"),
         kind: BlockKind::Table {
             columns: vec![TableColumn::auto()],
+            properties: Default::default(),
             rows: vec![TableRow {
                 id: StableId::new("row"),
+                height: None,
+                header: false,
                 cells: vec![TableCell {
                     id: StableId::new("cell"),
                     span: CellSpan::SINGLE,
@@ -97,6 +100,14 @@ fn comment_threads_require_auditable_comments() {
             created_at_ms: 1,
             deleted: false,
         }],
+        state: CommentThreadState::Open,
+        resolved_by: None,
+        resolved_at_ms: None,
+        action_assignee: None,
+        action_due_at_ms: None,
+        action_completed_by: None,
+        action_completed_at_ms: None,
+        reactions: Vec::new(),
         deleted: false,
     });
     doc.validate().unwrap();
@@ -116,6 +127,49 @@ fn comment_threads_require_auditable_comments() {
     assert!(matches!(
         doc.validate(),
         Err(ModelError::InvalidDocument("comment body is empty"))
+    ));
+}
+
+#[test]
+fn comment_action_due_date_requires_assignment() {
+    let mut thread = CommentThread {
+        id: StableId::parse("comment-thread-due").unwrap(),
+        anchor: Anchor::Document,
+        comments: vec![Comment {
+            id: StableId::parse("comment-due").unwrap(),
+            author: "Reviewer".to_string(),
+            body: vec![Inline::text("Do this")],
+            created_at_ms: 1,
+            deleted: false,
+        }],
+        state: CommentThreadState::Open,
+        resolved_by: None,
+        resolved_at_ms: None,
+        action_assignee: None,
+        action_due_at_ms: Some(1_700_000_000_000),
+        action_completed_by: None,
+        action_completed_at_ms: None,
+        reactions: Vec::new(),
+        deleted: false,
+    };
+    assert!(matches!(
+        thread.validate(),
+        Err(ModelError::InvalidDocument(
+            "comment action due date has no assignee"
+        ))
+    ));
+    thread.action_assignee = Some("Ada".to_string());
+    thread.validate().unwrap();
+
+    thread.action_due_at_ms = None;
+    thread.action_assignee = None;
+    thread.action_completed_by = Some("Reviewer".to_string());
+    thread.action_completed_at_ms = Some(1);
+    assert!(matches!(
+        thread.validate(),
+        Err(ModelError::InvalidDocument(
+            "comment action completion has no assignee"
+        ))
     ));
 }
 
@@ -142,6 +196,14 @@ fn comment_threads_reject_duplicate_comment_ids() {
                 deleted: true,
             },
         ],
+        state: CommentThreadState::Open,
+        resolved_by: None,
+        resolved_at_ms: None,
+        action_assignee: None,
+        action_due_at_ms: None,
+        action_completed_by: None,
+        action_completed_at_ms: None,
+        reactions: Vec::new(),
         deleted: false,
     });
 
@@ -168,6 +230,14 @@ fn comment_and_suggestion_anchors_require_auditable_payloads() {
             created_at_ms: 1,
             deleted: false,
         }],
+        state: CommentThreadState::Open,
+        resolved_by: None,
+        resolved_at_ms: None,
+        action_assignee: None,
+        action_due_at_ms: None,
+        action_completed_by: None,
+        action_completed_at_ms: None,
+        reactions: Vec::new(),
         deleted: false,
     });
     doc.validate().unwrap();
@@ -298,12 +368,141 @@ fn suggestions_require_auditable_payloads() {
         ))
     ));
 
+    doc.suggestions[0].provenance = vec!["imported".to_string(), "imported".to_string()];
+    assert!(matches!(
+        doc.validate(),
+        Err(ModelError::InvalidDocument(
+            "duplicate suggestion provenance entry"
+        ))
+    ));
+
     doc.suggestions[0].provenance = Vec::new();
     doc.suggestions[0].author = " Reviewer ".to_string();
     assert!(matches!(
         doc.validate(),
         Err(ModelError::InvalidDocument(
             "suggestion author has surrounding whitespace"
+        ))
+    ));
+}
+
+#[test]
+fn comment_history_rejects_duplicate_operations_and_restore_bodies() {
+    let thread_id = StableId::parse("history-thread").unwrap();
+    let comment_id = StableId::parse("history-comment").unwrap();
+    let mut doc = Document::new("Comment history");
+    doc.comments.push(CommentThread {
+        id: thread_id.clone(),
+        anchor: Anchor::Document,
+        comments: vec![Comment {
+            id: comment_id.clone(),
+            author: "Reviewer".to_string(),
+            body: vec![Inline::text("live body")],
+            created_at_ms: 1,
+            deleted: false,
+        }],
+        state: CommentThreadState::Open,
+        resolved_by: None,
+        resolved_at_ms: None,
+        action_assignee: None,
+        action_due_at_ms: None,
+        action_completed_by: None,
+        action_completed_at_ms: None,
+        reactions: Vec::new(),
+        deleted: false,
+    });
+    let edited = CommentHistoryEntry {
+        thread_id: thread_id.clone(),
+        comment_id: comment_id.clone(),
+        kind: "edited".to_string(),
+        actor: "editor".to_string(),
+        at_ms: 7,
+        previous_body: Some(vec![Inline::text("old body")]),
+    };
+    doc.comment_history.push(edited.clone());
+    doc.validate().unwrap();
+
+    doc.comment_history.push(edited);
+    assert!(matches!(
+        doc.validate(),
+        Err(ModelError::InvalidDocument(
+            "duplicate comment history operation id"
+        ))
+    ));
+    doc.comment_history.truncate(1);
+    doc.comment_history.push(CommentHistoryEntry {
+        thread_id,
+        comment_id,
+        kind: "restored".to_string(),
+        actor: "restorer".to_string(),
+        at_ms: 8,
+        previous_body: Some(vec![Inline::text("fabricated revision")]),
+    });
+    assert!(matches!(
+        doc.validate(),
+        Err(ModelError::InvalidDocument(
+            "restored comment history event has prior body"
+        ))
+    ));
+}
+
+#[test]
+fn comment_activity_is_bounded_canonical_and_tombstone_aware() {
+    let thread_id = StableId::parse("activity-thread").unwrap();
+    let comment_id = StableId::parse("activity-comment").unwrap();
+    let mut doc = Document::new("Comment activity");
+    doc.comments.push(CommentThread {
+        id: thread_id.clone(),
+        anchor: Anchor::Document,
+        comments: vec![Comment {
+            id: comment_id.clone(),
+            author: "Reviewer".to_string(),
+            body: vec![Inline::text("body")],
+            created_at_ms: 1,
+            deleted: true,
+        }],
+        state: CommentThreadState::Open,
+        resolved_by: None,
+        resolved_at_ms: None,
+        action_assignee: None,
+        action_due_at_ms: None,
+        action_completed_by: None,
+        action_completed_at_ms: None,
+        reactions: Vec::new(),
+        deleted: true,
+    });
+    doc.comment_activity.push(CommentActivityEntry {
+        operation_actor: "reviewer".to_string(),
+        operation_seq: 3,
+        actor: "reviewer".to_string(),
+        at_ms: 3,
+        thread_id: thread_id.clone(),
+        comment_id: Some(comment_id.clone()),
+        kind: CommentActivityKind::CommentDeleted,
+    });
+    doc.validate().unwrap();
+
+    doc.comment_activity.push(doc.comment_activity[0].clone());
+    assert!(matches!(
+        doc.validate(),
+        Err(ModelError::InvalidDocument(
+            "duplicate comment activity operation id"
+        ))
+    ));
+    doc.comment_activity.truncate(1);
+    doc.comment_activity[0].operation_seq = 0;
+    assert!(matches!(
+        doc.validate(),
+        Err(ModelError::InvalidDocument(
+            "comment activity operation sequence is zero"
+        ))
+    ));
+    doc.comment_activity[0].operation_seq = 3;
+    doc.comment_activity[0].thread_id = StableId::parse("missing-thread").unwrap();
+    assert!(matches!(
+        doc.validate(),
+        Err(ModelError::InvalidDocument(
+            "comment activity references missing thread"
         ))
     ));
 }

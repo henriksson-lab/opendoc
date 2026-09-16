@@ -29,8 +29,37 @@ use std::sync::Arc;
 
 /// Marks a file as an OpenDoc recovery segment and pins its frame layout.
 pub(crate) const RECOVERY_SEGMENT_MAGIC: &[u8] = b"opendoc-recovery-v0\n";
-/// `source_format` of the base snapshot carried by a segment header.
-pub(crate) const RECOVERY_SEGMENT_FORMAT: &str = "opendoc.recovery-segment.v0";
+/// Format of the segment header itself.
+///
+/// `v2` is `v1` plus the two things a `v1` header could not say about itself:
+/// which record shape its `base` snapshot is
+/// ([`RecoverySegmentHeader::base_format`]) and which document signatures the
+/// crash caught unsaved ([`RecoverySegmentHeader::signatures`]). The frame
+/// layout did not change, so [`RECOVERY_SEGMENT_MAGIC`] did not either.
+pub(crate) const RECOVERY_SEGMENT_FORMAT: &str = "opendoc.recovery-segment.v2";
+/// The pre-`base_format` format, still readable.
+///
+/// `v1` carries the numbering watermarks but embeds a whole `AppDocument` as
+/// `base` without recording which `app-document` format that is, so one
+/// `recovery-segment.v1` file can carry either shape and nothing inside the
+/// segment can tell them apart. Read, and reported, rather than guessed at
+/// silently.
+pub(crate) const RECOVERY_SEGMENT_FORMAT_V1: &str = "opendoc.recovery-segment.v1";
+/// The pre-split format, still readable.
+///
+/// In `v0` a single counter numbered envelopes and operations alike, so a
+/// `v0` segment does not carry the watermarks — but it does not need to be
+/// guessed at either: its shared numbering *is* both of them.
+pub(crate) const RECOVERY_SEGMENT_FORMAT_V0: &str = "opendoc.recovery-segment.v0";
+
+/// Warning code for a recovery offer that carries a signature the crash caught
+/// before it was saved.
+///
+/// `AppRecoverySession` counts *operations*, and signing is not one, so a
+/// session whose only unsaved work is a signature is offered as "0 changes".
+/// Discarding it is then presented as throwing away nothing, when it in fact
+/// destroys a signature. See `refresh_recovery_sessions`.
+pub(crate) const UNSAVED_SIGNATURE_WARNING: &str = "recovery-journal-unsaved-signature";
 
 /// Header of a recovery segment: everything needed to replay it without the
 /// repository being reachable.
@@ -53,6 +82,45 @@ pub(crate) struct RecoverySegmentHeader {
     /// Source state the operations replay onto. Imports and new documents are
     /// not typed operations, so a segment cannot start from "empty".
     pub base: AppDocument,
+    /// Which record shape [`RecoverySegmentHeader::base`] is — whatever
+    /// `APP_DOCUMENT_FORMAT` says today, the same string a repository snapshot
+    /// declares. An earlier format this build still reads is replayed and
+    /// reported; one it does not is refused by name.
+    ///
+    /// A `v1` header embedded the whole `AppDocument` and said nothing about
+    /// its format, so the next `AppDocument` bump would have been undetectable
+    /// from inside a segment: the CBOR would decode into whatever fields
+    /// happened to line up and the replay would produce a document nobody
+    /// wrote. Declaring it is what makes that a refusal instead. Empty in a
+    /// `v0`/`v1` segment, which is reported rather than assumed away.
+    #[serde(default)]
+    pub base_format: String,
+    /// Document signatures held in memory when the base snapshot was taken.
+    ///
+    /// Signing is not a typed operation and it makes the document dirty, so a
+    /// signature is exactly the kind of unsaved work this journal exists for —
+    /// and it lived nowhere in a `v1` segment, so `recover_session` could only
+    /// `clear()` it. A crash after signing and before saving silently lost the
+    /// signature and offered the user an `unsigned` document with no warning.
+    #[serde(default)]
+    pub signatures: Vec<opendoc_format::SignatureRecord>,
+    /// The envelope counter as it stood when this segment's base snapshot was
+    /// taken.
+    ///
+    /// ADR 0005's invariant is that a segment replays to *exactly* the state
+    /// it shadows, and the numbering watermarks are part of that state: a
+    /// replica that resumed below one would re-mint an identity the repository
+    /// already holds. They cannot be reconstructed from the segment's frames
+    /// alone, because the frames start at the base snapshot and everything
+    /// issued before it is behind that snapshot, not in front of it.
+    ///
+    /// Absent (zero) in a `v0` segment; see [`RECOVERY_SEGMENT_FORMAT_V0`].
+    #[serde(default)]
+    pub next_envelope_seq: u64,
+    /// The document-operation counter at the same moment. See
+    /// [`RecoverySegmentHeader::next_envelope_seq`].
+    #[serde(default)]
+    pub next_operation_seq: u64,
 }
 
 /// A decoded recovery segment.
@@ -173,6 +241,72 @@ fn split_frames(bytes: &[u8]) -> Result<(Vec<&[u8]>, bool), AppApiError> {
     Ok((frames, truncated))
 }
 
+/// The numbering watermarks a recovered session continues from.
+///
+/// Both are a **maximum**, never a count: the segment's frames are the tail of
+/// a journal whose head is behind the base snapshot, so counting what is
+/// visible would re-mint identities the repository already holds.
+///
+/// A `v1` segment carries the watermarks as they stood when its base snapshot
+/// was taken, and the appended frames can only have pushed them higher, so the
+/// answer is the larger of the two. A `v0` segment predates the split and
+/// carries neither — but nothing is guessed: in `v0` one counter numbered
+/// envelopes and operations alike, so this actor's highest envelope number is
+/// exactly what both counters stood at. That is an equality, not an
+/// approximation, and it is still reported, because a segment written by an
+/// older build is a fact the user is entitled to see rather than something to
+/// read silently.
+struct RecoveredSequenceCounters {
+    next_envelope_seq: u64,
+    next_operation_seq: u64,
+    warning: Option<String>,
+}
+
+fn recovered_sequence_counters(
+    segment: &RecoverySegment,
+    actor_id: &str,
+) -> RecoveredSequenceCounters {
+    let highest_envelope = segment
+        .operations
+        .iter()
+        .filter(|envelope| envelope.record.actor == actor_id)
+        .map(|envelope| envelope.record.seq)
+        .max()
+        .unwrap_or(0);
+    if segment.header.format == RECOVERY_SEGMENT_FORMAT_V0 {
+        let next = highest_envelope + 1;
+        return RecoveredSequenceCounters {
+            next_envelope_seq: next,
+            next_operation_seq: next,
+            warning: Some(format!(
+                "recovery segment {} was written before envelope and operation numbering were separated; both continue from sequence {next}, which is what its single counter stood at",
+                segment.header.session_id
+            )),
+        };
+    }
+    let highest_operation = segment
+        .operations
+        .iter()
+        .filter_map(|envelope| envelope.operation.as_ref())
+        .filter(|operation| operation.id.actor.0 == actor_id)
+        .map(|operation| operation.id.seq)
+        .max()
+        .unwrap_or(0);
+    RecoveredSequenceCounters {
+        next_envelope_seq: segment
+            .header
+            .next_envelope_seq
+            .max(highest_envelope + 1)
+            .max(1),
+        next_operation_seq: segment
+            .header
+            .next_operation_seq
+            .max(highest_operation + 1)
+            .max(1),
+        warning: None,
+    }
+}
+
 pub(crate) fn decode_segment(bytes: &[u8]) -> Result<RecoverySegment, AppApiError> {
     let (frames, truncated) = split_frames(bytes)?;
     let mut frames = frames.into_iter();
@@ -181,10 +315,34 @@ pub(crate) fn decode_segment(bytes: &[u8]) -> Result<RecoverySegment, AppApiErro
         .ok_or_else(|| AppApiError::Format("recovery segment has no header frame".to_string()))?;
     let header: RecoverySegmentHeader = decode_cbor(header_bytes)
         .map_err(|err| AppApiError::Format(format!("recovery segment header: {err}")))?;
-    if header.format != RECOVERY_SEGMENT_FORMAT {
+    if header.format != RECOVERY_SEGMENT_FORMAT
+        && header.format != RECOVERY_SEGMENT_FORMAT_V1
+        && header.format != RECOVERY_SEGMENT_FORMAT_V0
+    {
         return Err(AppApiError::Format(format!(
             "unsupported recovery segment format {}",
             header.format
+        )));
+    }
+    // A `v2` header says what shape its base snapshot is, so a segment written
+    // against a different `app-document` format is refused by name instead of
+    // being decoded into whichever fields happen to line up. `v0`/`v1` headers
+    // carry no such declaration; that is reported at replay
+    // (`recovery-journal-undeclared-base-format`), not guessed at here.
+    //
+    // An *earlier* app-document format this build still reads is not one of
+    // those cases. Refusing it would throw away the unsaved work a crash
+    // caught for no better reason than that this crate's encoder changed
+    // between the crash and the restart — which is precisely when a recovery
+    // segment matters most. It is replayed and reported instead
+    // (`recovery-journal-earlier-base-format`).
+    if !header.base_format.is_empty()
+        && header.base_format != crate::APP_DOCUMENT_FORMAT
+        && !crate::is_superseded_app_document_format(&header.base_format)
+    {
+        return Err(AppApiError::Format(format!(
+            "recovery segment {} carries a {} base snapshot, which this build cannot replay",
+            header.session_id, header.base_format
         )));
     }
     let mut operations = Vec::new();
@@ -266,6 +424,13 @@ impl OpenDocApp {
 
     /// Re-read the store and project every segment it holds.
     pub(crate) fn refresh_recovery_sessions(&mut self) {
+        // Owned here rather than accumulated, because this warning describes
+        // exactly the set of segments currently on offer: recovering or
+        // discarding one has to take its warning with it, and the offers are
+        // rebuilt from the store on every call anyway.
+        self.document
+            .warnings
+            .retain(|warning| warning.code != UNSAVED_SIGNATURE_WARNING);
         let Some(store) = self.recovery.store.clone() else {
             self.recovery.sessions.clear();
             return;
@@ -315,18 +480,35 @@ impl OpenDocApp {
                                 .map(|envelope| envelope.record.clone()),
                         )
                         .collect::<Vec<_>>();
+                    // Signing is not a typed operation, so a crash that caught
+                    // a signature and nothing else is offered as a session
+                    // with *zero* changes — and the user is asked whether to
+                    // throw away "nothing" when a signature is what is at
+                    // stake. The offer DTO has no field for this, so it is
+                    // said in the one channel that reaches the user without a
+                    // contract change.
+                    let unsaved_signatures = segment.header.signatures.len();
+                    let operation_count = operations.len();
                     sessions.push(AppRecoverySession {
                         id: id.clone(),
                         document_uuid: segment.header.document_uuid.clone(),
                         title: segment.header.title.clone(),
                         started_at_ms: segment.header.started_at_ms,
-                        operation_count: operations.len(),
+                        operation_count,
                         repository_root: segment.header.repository_root.clone(),
                         repository_backend: segment.header.repository_backend.clone(),
                         base_manifest: segment.header.base_manifest.clone(),
                         operations,
                         truncated: segment.truncated,
-                    })
+                    });
+                    if unsaved_signatures > 0 {
+                        self.push_model_warning(
+                            UNSAVED_SIGNATURE_WARNING,
+                            format!(
+                                "recovery session {id} holds {unsaved_signatures} signature(s) that never reached the repository; they are not among its {operation_count} recorded change(s), so recovering it brings them back and discarding it destroys them"
+                            ),
+                        );
+                    }
                 }
                 Err(err) => self.push_model_warning(
                     "recovery-journal-unreadable",
@@ -355,6 +537,22 @@ impl OpenDocApp {
             return;
         }
         if let Err(err) = self.sync_recovery_journal_inner() {
+            // Drop the cursor. It names a segment this process could not
+            // write — most likely because another runtime over the same store
+            // was offered this process's *live* journal as a crash and
+            // discarded it, which deletes the file `append_segment` opens.
+            // Without this the cursor stayed, every later sync re-tried the
+            // same failing append, and `push_model_warning` deduped the
+            // warning after the first one: crash protection was gone for the
+            // rest of the session, permanently and silently. Clearing it makes
+            // the next dispatch re-snapshot under a fresh session id, so the
+            // failure heals itself.
+            //
+            // This is not the fix for two runtimes sharing a store — that is
+            // leader election, PLAN77 F2, and ADR 0005/0008 both record "one
+            // session at a time" as a known limitation. It is the difference
+            // between a limitation and a permanent, non-self-healing failure.
+            self.recovery.cursor = None;
             self.push_model_warning(
                 "recovery-journal-unavailable",
                 format!("crash recovery journal is not being written: {err}"),
@@ -458,6 +656,14 @@ impl OpenDocApp {
             base_operations: self.operation_journal[saved.min(self.operation_journal.len())..]
                 .to_vec(),
             base: self.snapshot_document(),
+            base_format: crate::APP_DOCUMENT_FORMAT.to_string(),
+            // Signing makes the document dirty, so a segment exists precisely
+            // when a just-minted signature has not reached the repository yet.
+            // ADR 0005's invariant is that a segment replays to exactly the
+            // state it shadows, and a signature is part of that state.
+            signatures: self.signatures.clone(),
+            next_envelope_seq: self.next_envelope_seq,
+            next_operation_seq: self.next_operation_seq,
         };
         let bytes = encode_segment_header(&header)?;
         store
@@ -552,6 +758,7 @@ impl OpenDocApp {
             &[segment.operations.as_slice()],
         )?;
 
+        let counters = recovered_sequence_counters(&segment, &self.actor_id);
         self.document = replayed.document;
         self.workbook = workbook.evaluated();
         self.blobs = blobs;
@@ -559,7 +766,14 @@ impl OpenDocApp {
         self.blob_signatures.clear();
         self.blob_tombstones.clear();
         self.blob_tombstone_records.clear();
-        self.signatures.clear();
+        // Carried, not cleared. A segment exists only while the document
+        // differs from the repository, and signing is one of the things that
+        // makes it differ — so a signature found in a segment is by
+        // construction one the crash caught before it was saved. Clearing it
+        // here handed the user a document that said `unsigned`, with
+        // `warnings: []`, and nothing anywhere to say a signature had been
+        // thrown away.
+        self.signatures = segment.header.signatures.clone();
         self.is_open = true;
         self.defer_spreadsheet_evaluation = false;
         self.invalidate_projection();
@@ -578,18 +792,41 @@ impl OpenDocApp {
             .collect();
         self.saved_operation_count = 0;
         self.saved_signature_count = 0;
-        self.next_seq = self
-            .operation_envelopes
-            .iter()
-            .filter(|envelope| envelope.record.actor == self.actor_id)
-            .map(|envelope| envelope.record.seq)
-            .max()
-            .map_or(1, |seq| seq + 1);
+        self.next_envelope_seq = counters.next_envelope_seq;
+        self.next_operation_seq = counters.next_operation_seq;
         self.repository_root = segment.header.repository_root.clone().map(Into::into);
         self.repository_backend = segment.header.repository_backend.clone();
         self.repository_namespace = segment.header.repository_namespace.clone();
         self.last_manifest = segment.header.base_manifest.clone();
 
+        if let Some(message) = counters.warning {
+            self.push_model_warning("recovery-journal-legacy-numbering", message);
+        }
+        if crate::is_superseded_app_document_format(&segment.header.base_format) {
+            self.push_model_warning(
+                "recovery-journal-earlier-base-format",
+                format!(
+                    "recovery segment {session_id} holds a {} base snapshot, which this build reads but no longer writes; it was replayed as {}",
+                    segment.header.base_format,
+                    crate::APP_DOCUMENT_FORMAT
+                ),
+            );
+        }
+        if segment.header.base_format.is_empty() {
+            self.push_model_warning(
+                "recovery-journal-undeclared-base-format",
+                format!(
+                    "recovery segment {session_id} does not record which snapshot format its base state is; it was replayed as {}",
+                    crate::APP_DOCUMENT_FORMAT
+                ),
+            );
+        }
+        if !self.signatures.is_empty() && !self.document_signatures_cover_current_state() {
+            self.push_model_warning(
+                "recovery-journal-broken-signature",
+                "a signature recovered from the crash journal does not cover the recovered state; sign again before saving",
+            );
+        }
         for warning in replayed.warnings {
             self.push_model_warning(&warning.code, warning.message);
         }
@@ -984,6 +1221,198 @@ ZfG1KaT0PtFDJ/XFSqtiAAAAEHVzZXJAZXhhbXBsZS5jb20BAgMEBQ==
         app
     }
 
+    /// The segment replays to *exactly* the in-memory state, and the numbering
+    /// watermarks are part of that state.
+    ///
+    /// The case that proves it: a session whose only unsaved envelope is a
+    /// blob upload, from an actor whose earlier operations are behind the base
+    /// snapshot. Reconstructing the counters from the segment's frames would
+    /// find no operation at all and restart at 1 — re-minting ids the
+    /// repository already holds. The header's watermark is what makes it
+    /// impossible.
+    #[test]
+    fn a_recovered_session_continues_the_numbering_the_header_recorded() {
+        let store = MemoryStore::default();
+        {
+            let mut app = OpenDocApp::new_empty_document();
+            app.install_recovery_journal(Arc::new(store.clone()))
+                .expect("journal installs");
+            app.dispatch_command("create_document", json!({ "title": "Watermarks" }))
+                .expect("create");
+            for text in ["alpha", "beta"] {
+                app.dispatch_command("add_paragraph", json!({ "text": text }))
+                    .expect("paragraph");
+            }
+            // Pretend the repository already holds everything so far, then add
+            // one envelope that carries no operation. The segment that follows
+            // starts from a snapshot and holds only that envelope.
+            app.saved_operation_count = app.operation_envelopes.len();
+            app.dispatch_command(
+                "add_binary_blob",
+                json!({ "name": "n.txt", "mediaType": "text/plain", "bytes": [1] }),
+            )
+            .expect("blob");
+            assert_eq!(app.next_operation_seq, 3);
+        }
+
+        let session_id = store.only_segment_id();
+        let segment = decode_segment(&store.read_segment(&session_id).unwrap().unwrap())
+            .expect("the segment decodes");
+        assert!(
+            !segment
+                .operations
+                .iter()
+                .any(|envelope| envelope.operation.is_some()),
+            "the segment carries no typed operation, which is the point"
+        );
+
+        let mut app = OpenDocApp::new_empty_document();
+        app.install_recovery_journal(Arc::new(store.clone()))
+            .expect("journal installs");
+        app.recover_session(&session_id).expect("recovery");
+        assert_eq!(
+            app.next_operation_seq, 3,
+            "the operation counter must not restart under the repository's own history"
+        );
+        assert!(app.next_envelope_seq >= 4);
+        assert!(
+            !app.document()
+                .warnings
+                .iter()
+                .any(|warning| warning.code == "recovery-journal-legacy-numbering"),
+            "a segment this build wrote is not a legacy segment"
+        );
+    }
+
+    /// A segment written before the counters were split still replays, and it
+    /// is not read silently.
+    ///
+    /// Nothing is guessed: in that format one counter numbered envelopes and
+    /// operations alike, so the shared numbering *is* both watermarks,
+    /// exactly. The warning is there because a file written by an older build
+    /// is a fact the user is entitled to see.
+    #[test]
+    fn a_pre_split_recovery_segment_replays_and_says_which_format_it_was() {
+        let store = MemoryStore::default();
+        let session_id = {
+            let mut app = OpenDocApp::new_empty_document();
+            app.install_recovery_journal(Arc::new(store.clone()))
+                .expect("journal installs");
+            app.dispatch_command("create_document", json!({ "title": "Legacy" }))
+                .expect("create");
+            app.saved_operation_count = app.operation_envelopes.len();
+            for text in ["alpha", "beta"] {
+                app.dispatch_command("add_paragraph", json!({ "text": text }))
+                    .expect("paragraph");
+            }
+            store.only_segment_id()
+        };
+
+        // Rewrite the segment the way the previous format wrote it: one
+        // counter, so every envelope's record number is also its operation's,
+        // and the header carries no watermark at all.
+        let bytes = store.read_segment(&session_id).unwrap().unwrap();
+        let segment = decode_segment(&bytes).expect("the segment decodes");
+        let mut header = segment.header.clone();
+        header.format = RECOVERY_SEGMENT_FORMAT_V0.to_string();
+        header.next_envelope_seq = 0;
+        header.next_operation_seq = 0;
+        let mut legacy = encode_segment_header(&header).expect("header");
+        let mut rewritten = Vec::new();
+        let mut highest = 0u64;
+        for envelope in &segment.operations {
+            let mut envelope = envelope.clone();
+            if let Some(operation) = envelope.operation.as_mut() {
+                operation.id.seq = envelope.record.seq;
+            }
+            highest = highest.max(envelope.record.seq);
+            legacy.extend_from_slice(&encode_operation_frame(&envelope).expect("frame"));
+            rewritten.push(envelope);
+        }
+        store.overwrite(&session_id, legacy);
+
+        let mut app = OpenDocApp::new_empty_document();
+        app.install_recovery_journal(Arc::new(store.clone()))
+            .expect("journal installs");
+        let document = app.recover_session(&session_id).expect("recovery");
+        assert_eq!(
+            ["alpha", "beta"]
+                .into_iter()
+                .filter(|text| document.visible_text().contains(text))
+                .count(),
+            2,
+            "a pre-split segment still replays its work"
+        );
+        let warning = document
+            .warnings
+            .iter()
+            .find(|warning| warning.code == "recovery-journal-legacy-numbering")
+            .expect("the older format is named, not read silently");
+        assert!(warning.message.contains(&session_id), "{warning:?}");
+
+        // And the watermarks a replica with that segment's own actor would
+        // continue from are exactly what the single counter stood at. (A
+        // recovering process mints its own actor id, so it numbers from 1
+        // under a name nothing else has used; this is the case where it does
+        // not.)
+        let legacy_segment = RecoverySegment {
+            header: header.clone(),
+            operations: rewritten,
+            truncated: false,
+        };
+        let counters = recovered_sequence_counters(&legacy_segment, &header.actor);
+        assert_eq!(counters.next_envelope_seq, highest + 1);
+        assert_eq!(counters.next_operation_seq, highest + 1);
+        assert!(counters.warning.is_some());
+
+        // The same segment under this build's format keeps the two apart.
+        let mut modern = legacy_segment.clone();
+        modern.header.format = RECOVERY_SEGMENT_FORMAT.to_string();
+        modern.header.next_envelope_seq = 9;
+        modern.header.next_operation_seq = 4;
+        let counters = recovered_sequence_counters(&modern, &header.actor);
+        assert_eq!(
+            counters.next_envelope_seq,
+            9.max(highest + 1),
+            "the header's watermark is a floor, never a ceiling"
+        );
+        assert_eq!(counters.next_operation_seq, 4.max(highest + 1));
+        assert!(counters.warning.is_none());
+    }
+
+    /// A segment in a format this build does not know is refused, not guessed
+    /// at.
+    #[test]
+    fn an_unknown_recovery_segment_format_is_refused() {
+        let store = MemoryStore::default();
+        let session_id = {
+            let mut app = OpenDocApp::new_empty_document();
+            app.install_recovery_journal(Arc::new(store.clone()))
+                .expect("journal installs");
+            app.dispatch_command("create_document", json!({ "title": "Future" }))
+                .expect("create");
+            app.dispatch_command("add_paragraph", json!({ "text": "alpha" }))
+                .expect("paragraph");
+            store.only_segment_id()
+        };
+        let segment = decode_segment(&store.read_segment(&session_id).unwrap().unwrap())
+            .expect("the segment decodes");
+        let mut header = segment.header.clone();
+        header.format = "opendoc.recovery-segment.v99".to_string();
+        store.overwrite(&session_id, encode_segment_header(&header).expect("header"));
+
+        let mut app = OpenDocApp::new_empty_document();
+        app.install_recovery_journal(Arc::new(store.clone()))
+            .expect("journal installs");
+        let error = app
+            .recover_session(&session_id)
+            .expect_err("an unknown format is refused");
+        assert!(
+            matches!(&error, AppApiError::Format(message) if message.contains("v99")),
+            "{error:?}"
+        );
+    }
+
     #[test]
     fn a_killed_session_replays_to_the_same_document_and_still_signs() {
         let store = MemoryStore::default();
@@ -1004,7 +1433,7 @@ ZfG1KaT0PtFDJ/XFSqtiAAAAEHVzZXJAZXhhbXBsZS5jb20BAgMEBQ==
         let session_id = session.id.clone();
         let recovered = app.recover_session(&session_id).expect("replay");
         assert_eq!(recovered.title, "Crash test");
-        assert_eq!(recovered.visible_text, crashed.visible_text);
+        assert_eq!(recovered.visible_text(), crashed.visible_text());
         assert_eq!(recovered.blocks.len(), crashed.blocks.len());
         assert!(recovered.has_unsaved_changes);
         assert!(recovered.recovery_sessions.is_empty());
@@ -1025,6 +1454,385 @@ ZfG1KaT0PtFDJ/XFSqtiAAAAEHVzZXJAZXhhbXBsZS5jb20BAgMEBQ==
             app.verify_current_signatures().expect("verify"),
             "signed".to_string()
         );
+    }
+
+    /// A signature caught by the crash comes back with the work it covers.
+    ///
+    /// Signing is not a typed operation and it makes the document dirty, so a
+    /// segment exists precisely when a just-minted signature has not reached
+    /// the repository yet. `recover_session` used to `clear()` the signature
+    /// list and the header had nowhere to carry one, so the user was handed an
+    /// `unsigned` document with `warnings: []` — nothing anywhere said a
+    /// signature had been thrown away.
+    #[test]
+    fn a_signature_caught_by_the_crash_is_recovered_with_the_document() {
+        let store = MemoryStore::default();
+        let signed_target = {
+            let mut app = OpenDocApp::new_empty_document();
+            app.install_recovery_journal(Arc::new(store.clone()))
+                .expect("journal installs");
+            app.dispatch_command("create_document", json!({ "title": "Signed crash" }))
+                .expect("create");
+            app.dispatch_command("add_paragraph", json!({ "text": "the signed prose" }))
+                .expect("paragraph");
+            // Pretend the repository holds everything so far, so the signature
+            // is the only unsaved change left.
+            app.saved_operation_count = app.operation_envelopes.len();
+            app.sync_recovery_journal();
+            let signed = app
+                .sign_with_openssh_private_key(TEST_ED25519_PRIVATE_KEY, "Tester")
+                .expect("sign");
+            assert_eq!(signed.signature_state, "signed");
+            assert!(signed.has_unsaved_changes);
+            app.sync_recovery_journal();
+            app.signatures[0].target.clone()
+            // The process dies here. The signature was never saved.
+        };
+
+        let session_id = store.only_segment_id();
+        let segment = decode_segment(&store.read_segment(&session_id).unwrap().unwrap())
+            .expect("the segment decodes");
+        assert_eq!(
+            segment.header.signatures.len(),
+            1,
+            "the segment carries the unsaved signature"
+        );
+
+        let mut app = OpenDocApp::new_empty_document();
+        app.install_recovery_journal(Arc::new(store.clone()))
+            .expect("journal installs");
+        let recovered = app.recover_session(&session_id).expect("replay");
+        assert_eq!(
+            recovered.signatures.len(),
+            1,
+            "recovery discarded the signature"
+        );
+        assert_eq!(app.signatures[0].target, signed_target);
+        assert!(
+            app.document_signatures_cover_current_state(),
+            "the recovered signature must still cover the recovered state"
+        );
+        assert!(
+            recovered.has_unsaved_changes,
+            "the signature has still not reached the repository"
+        );
+    }
+
+    /// The *offer* says a signature is at stake, because its change count
+    /// cannot.
+    ///
+    /// Signing is not a typed operation, so a crash that caught a signature
+    /// and nothing else is offered as a session with zero changes and an empty
+    /// operation list — the UI reads that as "this session still had 0 unsaved
+    /// changes" and the user decides whether to discard a signature on the
+    /// strength of it. The warning is the only channel that can say otherwise
+    /// without a contract change, and it belongs to the set of segments
+    /// currently on offer: discarding one takes its warning with it.
+    #[test]
+    fn a_recovery_offer_names_the_signature_its_change_count_cannot_show() {
+        let store = MemoryStore::default();
+        {
+            let mut app = OpenDocApp::new_empty_document();
+            app.install_recovery_journal(Arc::new(store.clone()))
+                .expect("journal installs");
+            app.dispatch_command("create_document", json!({ "title": "Signed crash" }))
+                .expect("create");
+            app.dispatch_command("add_paragraph", json!({ "text": "the signed prose" }))
+                .expect("paragraph");
+            // Everything so far is in the repository, so the signature is the
+            // only unsaved work the crash catches.
+            app.saved_operation_count = app.operation_envelopes.len();
+            app.sync_recovery_journal();
+            app.sign_with_openssh_private_key(TEST_ED25519_PRIVATE_KEY, "Tester")
+                .expect("sign");
+            app.sync_recovery_journal();
+            // The process dies here.
+        }
+
+        let mut app = OpenDocApp::new_empty_document();
+        let offered = app
+            .install_recovery_journal(Arc::new(store.clone()))
+            .expect("journal installs");
+        let session_id = store.only_segment_id();
+        assert_eq!(
+            offered.recovery_sessions.len(),
+            1,
+            "the crash left exactly one session"
+        );
+        assert_eq!(
+            offered.recovery_sessions[0].operation_count, 0,
+            "the fixture must be the case the change count cannot describe"
+        );
+        let warning = offered
+            .warnings
+            .iter()
+            .find(|warning| warning.code == UNSAVED_SIGNATURE_WARNING)
+            .unwrap_or_else(|| {
+                panic!(
+                    "a recovery offer holding an unsaved signature must say so: {:?}",
+                    offered.warnings
+                )
+            });
+        assert!(
+            warning.message.contains(&session_id),
+            "the warning must name the session it is about: {}",
+            warning.message
+        );
+
+        // Discarding the offer takes the warning with it: the signature is
+        // gone and there is no longer anything at stake to report.
+        app.discard_recovery_session(&session_id)
+            .expect("the offer is discarded");
+        let after = app.document();
+        assert!(
+            !after
+                .warnings
+                .iter()
+                .any(|warning| warning.code == UNSAVED_SIGNATURE_WARNING),
+            "a discarded offer must not keep warning about its signature: {:?}",
+            after.warnings
+        );
+    }
+
+    /// The negative control for the offer warning: an ordinary crash with no
+    /// signature must not claim one.
+    ///
+    /// Without this an implementation that warns unconditionally passes the
+    /// test above, and the warning would appear on every recovery offer — which
+    /// is the same as saying nothing.
+    #[test]
+    fn a_recovery_offer_without_a_signature_does_not_claim_one() {
+        let store = MemoryStore::default();
+        crashed_session(&store);
+        let app = reopened(&store);
+        let document = app.document();
+        assert_eq!(
+            document.recovery_sessions.len(),
+            1,
+            "the crash left exactly one session"
+        );
+        assert!(
+            document.recovery_sessions[0].operation_count > 0,
+            "this crash caught ordinary edits"
+        );
+        assert!(
+            !document
+                .warnings
+                .iter()
+                .any(|warning| warning.code == UNSAVED_SIGNATURE_WARNING),
+            "nothing was signed, so nothing may say a signature is at stake: {:?}",
+            document.warnings
+        );
+    }
+
+    /// A segment says which snapshot format its base state is, and a segment
+    /// that names one this build cannot replay is refused rather than decoded
+    /// into whichever fields happen to line up.
+    #[test]
+    fn a_recovery_segment_declares_the_format_of_its_base_snapshot() {
+        let store = MemoryStore::default();
+        let session_id = {
+            let mut app = OpenDocApp::new_empty_document();
+            app.install_recovery_journal(Arc::new(store.clone()))
+                .expect("journal installs");
+            app.dispatch_command("create_document", json!({ "title": "Formats" }))
+                .expect("create");
+            app.dispatch_command("add_paragraph", json!({ "text": "alpha" }))
+                .expect("paragraph");
+            store.only_segment_id()
+        };
+        let segment = decode_segment(&store.read_segment(&session_id).unwrap().unwrap())
+            .expect("the segment decodes");
+        assert_eq!(segment.header.base_format, crate::APP_DOCUMENT_FORMAT);
+
+        // A base snapshot in a format this build does not know.
+        let mut header = segment.header.clone();
+        header.base_format = "opendoc.app-document.v99".to_string();
+        let mut foreign = encode_segment_header(&header).expect("header");
+        for envelope in &segment.operations {
+            foreign.extend_from_slice(&encode_operation_frame(envelope).expect("frame"));
+        }
+        store.overwrite(&session_id, foreign);
+
+        let mut app = OpenDocApp::new_empty_document();
+        app.install_recovery_journal(Arc::new(store.clone()))
+            .expect("journal installs");
+        let error = app
+            .recover_session(&session_id)
+            .expect_err("a foreign base snapshot format is refused");
+        assert!(
+            matches!(&error, AppApiError::Format(message) if message.contains("v99")),
+            "{error:?}"
+        );
+
+        // A segment written before the declaration existed still replays, and
+        // says that it was read on an assumption.
+        let mut header = segment.header.clone();
+        header.format = RECOVERY_SEGMENT_FORMAT_V1.to_string();
+        header.base_format = String::new();
+        let mut undeclared = encode_segment_header(&header).expect("header");
+        for envelope in &segment.operations {
+            undeclared.extend_from_slice(&encode_operation_frame(envelope).expect("frame"));
+        }
+        store.overwrite(&session_id, undeclared);
+
+        let mut app = OpenDocApp::new_empty_document();
+        app.install_recovery_journal(Arc::new(store.clone()))
+            .expect("journal installs");
+        let recovered = app.recover_session(&session_id).expect("replay");
+        assert!(recovered.visible_text().contains("alpha"));
+        assert!(
+            recovered
+                .warnings
+                .iter()
+                .any(|warning| warning.code == "recovery-journal-undeclared-base-format"),
+            "{:?}",
+            recovered.warnings
+        );
+    }
+
+    /// A crash journal written by the *previous* build replays, and says so.
+    ///
+    /// The base snapshot in a segment is an `AppDocument`, and the format bump
+    /// that reaches this crate's signature reader reaches here too. Refusing a
+    /// segment because its base declares the format this build read last week
+    /// throws away the unsaved work a crash caught — for no reason except that
+    /// our own encoder changed in between, which is exactly the moment a user
+    /// has to restart and exactly when a recovery segment is worth most.
+    #[test]
+    fn a_recovery_segment_from_an_earlier_payload_format_replays_and_says_so() {
+        let store = MemoryStore::default();
+        let session_id = {
+            let mut app = OpenDocApp::new_empty_document();
+            app.install_recovery_journal(Arc::new(store.clone()))
+                .expect("journal installs");
+            app.dispatch_command("create_document", json!({ "title": "Formats" }))
+                .expect("create");
+            app.dispatch_command("add_paragraph", json!({ "text": "unsaved prose" }))
+                .expect("paragraph");
+            store.only_segment_id()
+        };
+        let segment = decode_segment(&store.read_segment(&session_id).unwrap().unwrap())
+            .expect("the segment decodes");
+
+        // Spelled out, not read back from the list under test: this is the
+        // string the build before the bump actually wrote.
+        let earlier = "opendoc.app-document.v1";
+        assert_ne!(
+            earlier,
+            crate::APP_DOCUMENT_FORMAT,
+            "the fixture has to name a format this build no longer writes"
+        );
+        let mut header = segment.header.clone();
+        header.base_format = earlier.to_string();
+        let mut restated = encode_segment_header(&header).expect("header");
+        for envelope in &segment.operations {
+            restated.extend_from_slice(&encode_operation_frame(envelope).expect("frame"));
+        }
+        store.overwrite(&session_id, restated);
+
+        let mut app = OpenDocApp::new_empty_document();
+        app.install_recovery_journal(Arc::new(store.clone()))
+            .expect("journal installs");
+        let recovered = app
+            .recover_session(&session_id)
+            .expect("a segment from the previous build still replays");
+        assert!(
+            recovered.visible_text().contains("unsaved prose"),
+            "the unsaved work came back"
+        );
+        let warning = recovered
+            .warnings
+            .iter()
+            .find(|warning| warning.code == "recovery-journal-earlier-base-format")
+            .unwrap_or_else(|| panic!("the format difference is named: {:?}", recovered.warnings));
+        assert!(
+            warning.message.contains(earlier)
+                && warning.message.contains(crate::APP_DOCUMENT_FORMAT),
+            "{warning:?}"
+        );
+        assert!(
+            !recovered
+                .warnings
+                .iter()
+                .any(|warning| warning.code == "recovery-journal-undeclared-base-format"),
+            "the segment did declare its format: {:?}",
+            recovered.warnings
+        );
+    }
+
+    /// A segment this process could not append to does not end crash
+    /// protection for the rest of the session.
+    ///
+    /// The way it happens in the wild: a second runtime over the same store is
+    /// offered this process's *live* journal as a crash — `refresh_recovery_sessions`
+    /// only skips its own cursor — and discarding it deletes the file the
+    /// first process is appending to. The cursor used to stay on that dead
+    /// segment, every later sync re-tried the same failing append, and
+    /// `push_model_warning` deduped the warning after the first one: journal
+    /// writing was over, silently, until the document was closed.
+    ///
+    /// Leader election is the fix for two runtimes sharing a store (PLAN77 F2;
+    /// ADR 0005 and 0008 both record "one session at a time"). This is the
+    /// difference between that limitation and a permanent failure.
+    #[test]
+    fn a_segment_deleted_under_a_live_session_does_not_end_crash_protection() {
+        let store = MemoryStore::default();
+        let mut app = OpenDocApp::new_empty_document();
+        app.install_recovery_journal(Arc::new(store.clone()))
+            .expect("journal installs");
+        app.dispatch_command("create_document", json!({ "title": "Two windows" }))
+            .expect("create");
+        app.dispatch_command("add_paragraph", json!({ "text": "alpha" }))
+            .expect("paragraph");
+        let first_session = store.only_segment_id();
+
+        // A second runtime is offered the live journal as a crash — the
+        // limitation ADR 0005 records — and discards it.
+        let mut second = OpenDocApp::new_empty_document();
+        second
+            .install_recovery_journal(Arc::new(store.clone()))
+            .expect("journal installs");
+        assert_eq!(
+            second.document().recovery_sessions.len(),
+            1,
+            "the fixture must reproduce the second window seeing the live segment"
+        );
+        second
+            .discard_recovery_session(&first_session)
+            .expect("discard");
+        assert!(store.segments().is_empty());
+
+        // The first window keeps working. Its next append cannot land, and it
+        // says so — once.
+        app.dispatch_command("add_paragraph", json!({ "text": "beta" }))
+            .expect("paragraph");
+        assert!(
+            app.document()
+                .warnings
+                .iter()
+                .any(|warning| warning.code == "recovery-journal-unavailable"),
+            "a failed journal write must not be silent"
+        );
+
+        // And the very next gesture re-snapshots under a fresh session id, so
+        // the work after the discard is protected again.
+        app.dispatch_command("add_paragraph", json!({ "text": "gamma" }))
+            .expect("paragraph");
+        let session_id = store.only_segment_id();
+        assert_ne!(session_id, first_session);
+
+        let mut recovered = OpenDocApp::new_empty_document();
+        recovered
+            .install_recovery_journal(Arc::new(store.clone()))
+            .expect("journal installs");
+        let document = recovered.recover_session(&session_id).expect("replay");
+        for text in ["alpha", "beta", "gamma"] {
+            assert!(
+                document.visible_text().contains(text),
+                "crash protection did not resume: {text} is missing"
+            );
+        }
     }
 
     #[test]
@@ -1069,8 +1877,8 @@ ZfG1KaT0PtFDJ/XFSqtiAAAAEHVzZXJAZXhhbXBsZS5jb20BAgMEBQ==
         assert_eq!(session.operation_count, 2, "the torn change is not offered");
 
         let recovered = app.recover_session(session.id.clone()).expect("replay");
-        assert!(recovered.visible_text.contains("beta"));
-        assert!(!recovered.visible_text.contains("gamma"));
+        assert!(recovered.visible_text().contains("beta"));
+        assert!(!recovered.visible_text().contains("gamma"));
         assert!(recovered
             .warnings
             .iter()
@@ -1092,16 +1900,16 @@ ZfG1KaT0PtFDJ/XFSqtiAAAAEHVzZXJAZXhhbXBsZS5jb20BAgMEBQ==
         app.dispatch_command("undo_current_edit", json!({}))
             .expect("undo");
         let expected = app.document();
-        assert!(expected.visible_text.contains("kept"));
-        assert!(!expected.visible_text.contains("undone"));
+        assert!(expected.visible_text().contains("kept"));
+        assert!(!expected.visible_text().contains("undone"));
         drop(app);
 
         let mut app = reopened(&store);
         let session_id = app.document().recovery_sessions[0].id.clone();
         let recovered = app.recover_session(&session_id).expect("replay");
-        assert!(recovered.visible_text.contains("kept"));
+        assert!(recovered.visible_text().contains("kept"));
         assert!(
-            !recovered.visible_text.contains("undone"),
+            !recovered.visible_text().contains("undone"),
             "the recovery segment must not replay work the user undid"
         );
     }
@@ -1140,8 +1948,116 @@ ZfG1KaT0PtFDJ/XFSqtiAAAAEHVzZXJAZXhhbXBsZS5jb20BAgMEBQ==
         assert_eq!(segments.len(), 1);
         let segment = decode_segment(segments.values().next().expect("segment")).expect("decode");
         assert!(segment.header.base_manifest.is_some());
-        assert!(segment.header.base.visible_text.contains("durable"));
+        assert!(segment.header.base.visible_text().contains("durable"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A seeded collaboration session: one paragraph holding one run, with a
+    /// recovery journal installed.
+    fn collaborating(store: &MemoryStore) -> OpenDocApp {
+        let mut app = OpenDocApp::new_sample();
+        app.install_recovery_journal(Arc::new(store.clone()))
+            .expect("journal installs");
+        let mut base = opendoc_core::Document::new("Shared");
+        base.blocks.push(opendoc_core::Block {
+            id: opendoc_core::StableId::parse("blk-recovery-0001").expect("block id"),
+            kind: opendoc_core::BlockKind::Paragraph,
+            properties: Default::default(),
+            content: vec![opendoc_core::Inline::Text {
+                id: opendoc_core::StableId::parse("inl-recovery-0001").expect("run id"),
+                text: "abcdefgh".to_string(),
+                marks: Vec::new(),
+            }],
+        });
+        app.join_collaboration_session(
+            crate::OpenDocServiceSession::new(
+                "local",
+                "actor-local",
+                "doc-recovery",
+                crate::OpenDocServiceRole::Editor,
+            ),
+            base,
+            Vec::new(),
+        )
+        .expect("joining a session");
+        app
+    }
+
+    fn remote_insert(seq: u64, offset: usize, text: &str) -> crate::Operation {
+        crate::Operation::in_context(
+            crate::OperationId {
+                actor: crate::ActorId("actor-remote".to_string()),
+                seq,
+            },
+            crate::OperationKind::InsertText {
+                inline_id: opendoc_core::StableId::parse("inl-recovery-0001").expect("run id"),
+                offset,
+                text: text.to_string(),
+            },
+            crate::CausalContext::default(),
+        )
+    }
+
+    /// Remote work was durable on the service before it was acknowledged, so
+    /// there is nothing here that only this process has. Writing a recovery
+    /// segment for it would claim otherwise.
+    #[test]
+    fn remote_work_alone_leaves_no_recovery_segment() {
+        let store = MemoryStore::default();
+        let mut app = collaborating(&store);
+        assert!(store.segments().is_empty());
+
+        app.apply_remote_operations(vec![remote_insert(1, 3, "XY")], None)
+            .expect("the operation merges");
+
+        assert!(
+            store.segments().is_empty(),
+            "someone else's keystroke is not this process's to recover"
+        );
+    }
+
+    /// Once there *is* local work to recover, the segment has to carry the
+    /// remote operations too: ADR 0005's invariant is that a segment replays to
+    /// exactly the in-memory state, and leaving them out would roll a
+    /// collaborator's edits back on recovery.
+    #[test]
+    fn a_segment_covering_local_work_also_covers_the_remote_work_under_it() {
+        let store = MemoryStore::default();
+        let mut app = collaborating(&store);
+        app.dispatch_command("add_paragraph", json!({ "text": "local work" }))
+            .expect("a local command");
+        assert_eq!(store.segments().len(), 1);
+        let before_frames = store
+            .read_segment(&store.only_segment_id())
+            .expect("read")
+            .expect("segment")
+            .len();
+
+        app.apply_remote_operations(vec![remote_insert(1, 3, "XY")], None)
+            .expect("the operation merges");
+
+        let after = store
+            .read_segment(&store.only_segment_id())
+            .expect("read")
+            .expect("segment");
+        assert!(
+            after.len() > before_frames,
+            "the remote operation must be journalled next to the local one"
+        );
+        let live = app.document();
+
+        // And a replay of that segment reaches the document that was in memory,
+        // remote work included.
+        let session_id = store.only_segment_id();
+        drop(app);
+        let mut reopened = reopened(&store);
+        let recovered = reopened.recover_session(&session_id).expect("replay");
+        assert_eq!(recovered.visible_text(), live.visible_text());
+        assert!(
+            recovered.visible_text().contains("abcXYdefgh"),
+            "{:?}",
+            recovered.visible_text()
+        );
     }
 
     #[test]
@@ -1352,7 +2268,7 @@ mod volume_journal_tests {
 
         let recovered = app.recover_session(session.id.clone()).expect("replay");
         assert_eq!(recovered.title, "Browser crash");
-        assert_eq!(recovered.visible_text, crashed.visible_text);
+        assert_eq!(recovered.visible_text(), crashed.visible_text());
         assert!(recovered.has_unsaved_changes);
     }
 
@@ -1385,8 +2301,8 @@ mod volume_journal_tests {
         let recovered = app
             .recover_session(offered.recovery_sessions[0].id.clone())
             .expect("replay");
-        assert!(recovered.visible_text.contains("flushed"));
-        assert!(!recovered.visible_text.contains("unflushed"));
+        assert!(recovered.visible_text().contains("flushed"));
+        assert!(!recovered.visible_text().contains("unflushed"));
     }
 
     #[test]

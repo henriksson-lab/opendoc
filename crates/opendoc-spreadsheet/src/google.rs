@@ -9,8 +9,10 @@ use super::address::{
     normalize_column_label, normalize_merge_range, normalize_named_range_name, number_to_column,
     parse_cell_range, ranges_overlap, split_cell_address, CellRange,
 };
-use super::format::{export_sheet_color, import_sheet_rgb, trim_sheet_number};
-use super::model::validate_spreadsheet_cell_source;
+use super::format::{
+    export_sheet_color, import_sheet_rgb, trim_sheet_number, validate_sheet_color,
+};
+use super::model::{validate_axis_size_px, validate_spreadsheet_cell_source};
 use super::structure::{
     add_sheet_protected_range, merge_sheet_cells, set_sheet_basic_filter,
     set_sheet_basic_filter_options, upsert_sheet_cell,
@@ -36,7 +38,6 @@ pub fn import_google_sheets_workbook(
 ) -> Result<ImportedGoogleSheetsWorkbook, SpreadsheetError> {
     let value: Value =
         serde_json::from_str(json_text).map_err(|err| SpreadsheetError::Import(err.to_string()))?;
-    reject_google_sheets_high_risk(&value)?;
     let properties = google_optional_object(&value, "properties")?.unwrap_or(&Value::Null);
     let title = google_optional_string(properties, "title")?
         .unwrap_or("Imported Sheet")
@@ -58,16 +59,32 @@ pub fn import_google_sheets_workbook(
     }
 
     let mut workbook = SpreadsheetWorkbook::empty("Imported Sheet");
-    let mut warnings = Vec::new();
+    // Google returns a single workbook resource even when only a small part of
+    // it uses a feature this codec does not model.  Keep the independently
+    // representable grid, but make every omitted feature explicit.  This scan
+    // deliberately happens before importing cells so an unsupported formula,
+    // link, or chip is never accidentally interpreted by a later code path.
+    let mut warnings = google_sheets_unsupported_warnings(&value);
     workbook.set_metadata(title, locale, timezone)?;
     let mut sheet_id_map = BTreeMap::new();
     let mut google_sheet_ids = BTreeSet::new();
     let mut sheet_titles = BTreeSet::new();
+    // Google assigns protected-range IDs across the workbook, not per sheet.
+    // Retain those native identities in the model's existing opaque ID slot so
+    // a JSON import/export/re-import does not manufacture different resources.
+    let mut google_protected_range_ids = BTreeSet::new();
 
-    for (index, sheet_value) in sheets.iter().enumerate() {
+    // `sheets` is usually returned in tab order, but the native resource has
+    // an explicit SheetProperties.index. Use that authoritative order when it
+    // is supplied: a partial/reordered API response must not silently change
+    // the workbook's ordered sheet list. Older/minimal fixtures that omit it
+    // altogether retain their array order for compatibility.
+    let sheets = google_sheets_in_tab_order(sheets)?;
+    for (index, sheet_value) in sheets.into_iter().enumerate() {
         let properties = google_optional_object(sheet_value, "properties")?.unwrap_or(&Value::Null);
         let app_sheet_id = format!("sheet-{}", index + 1);
-        if let Some(google_sheet_id) = google_optional_non_negative_i64(properties, "sheetId")? {
+        let google_sheet_id = google_optional_non_negative_i64(properties, "sheetId")?;
+        if let Some(google_sheet_id) = google_sheet_id {
             if !google_sheet_ids.insert(google_sheet_id) {
                 return Err(SpreadsheetError::Import(format!(
                     "duplicate Google Sheets sheetId {google_sheet_id}"
@@ -103,35 +120,56 @@ pub fn import_google_sheets_workbook(
         let mut sheet = super::io::blank_sheet(&app_sheet_id, &title, row_count, column_count);
         sheet.frozen_rows = frozen_rows;
         sheet.frozen_columns = frozen_columns;
-        import_google_sheets_grid_data(sheet_value, &mut sheet)?;
-        import_google_sheets_merges(sheet_value, &mut sheet)?;
-        import_google_sheets_basic_filter(sheet_value, &mut sheet)?;
-        import_google_sheets_protected_ranges(sheet_value, &mut sheet, &mut warnings)?;
+        sheet.hidden = google_optional_bool(properties, "hidden")?.unwrap_or(false);
+        sheet.tab_color = import_google_sheet_tab_color(properties, &mut warnings)?;
+        import_google_sheets_grid_data(sheet_value, &mut sheet, &mut warnings)?;
+        import_google_sheets_axis_metadata(sheet_value, &mut sheet)?;
+        import_google_sheets_merges(sheet_value, &mut sheet, google_sheet_id)?;
+        import_google_sheets_basic_filter(sheet_value, &mut sheet, &mut warnings)?;
+        import_google_sheets_protected_ranges(
+            sheet_value,
+            &mut sheet,
+            &mut warnings,
+            &mut google_protected_range_ids,
+        )?;
         sheet.ensure_axis_metadata();
         workbook.sheets.push(sheet);
     }
+
+    // Sheets will not allow every tab in a spreadsheet to be hidden.  This is
+    // not merely a UI preference: accepting such a native resource would let
+    // a later export manufacture a payload the Google service cannot apply.
+    // Keep the source boundary honest rather than quietly making one tab
+    // visible, which would change the imported workbook.
+    ensure_google_sheets_has_visible_sheet(&workbook.sheets, "import")?;
 
     if let Some(named_ranges) = google_optional_array(&value, "namedRanges")? {
         let mut named_range_ids = BTreeSet::new();
         let mut named_range_names = BTreeSet::new();
         for named_range in named_ranges {
-            if let Some(named_range_id) = google_optional_string(named_range, "namedRangeId")? {
-                if named_range_id.trim().is_empty() {
-                    return Err(SpreadsheetError::Import(
-                        "named range id is empty".to_string(),
-                    ));
-                }
-                if !named_range_ids.insert(named_range_id.to_string()) {
-                    return Err(SpreadsheetError::Import(format!(
-                        "duplicate Google Sheets namedRangeId {named_range_id}"
-                    )));
-                }
-            }
             let name = google_required_string(named_range, "name", "named range missing name")?;
             let name = normalize_named_range_name(name)?;
             if !named_range_names.insert(name.clone()) {
                 return Err(SpreadsheetError::Import(format!(
                     "duplicate Google Sheets named range {name}"
+                )));
+            }
+            // `namedRangeId` is server-generated identity, but it is still
+            // part of the native resource and our model has an exact home for
+            // it.  Older/minimal fixtures may omit it; use the model's normal
+            // deterministic ID in that case, while checking it against
+            // explicit source IDs so the returned workbook is always valid.
+            let named_range_id = google_optional_string(named_range, "namedRangeId")?
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("named-{}", name.to_ascii_lowercase()));
+            if named_range_id.trim().is_empty() {
+                return Err(SpreadsheetError::Import(
+                    "named range id is empty".to_string(),
+                ));
+            }
+            if !named_range_ids.insert(named_range_id.clone()) {
+                return Err(SpreadsheetError::Import(format!(
+                    "duplicate Google Sheets namedRangeId {named_range_id}"
                 )));
             }
             let google_range =
@@ -152,10 +190,53 @@ pub fn import_google_sheets_workbook(
                 .ok_or_else(|| {
                     SpreadsheetError::Import(format!("named range sheet {sheet_id} missing"))
                 })??;
+            // `add_named_range` supplies the local default identity for UI
+            // creation.  Native import must instead retain Google's identity
+            // so export/re-import does not manufacture a different resource.
+            let imported = workbook
+                .named_ranges
+                .iter_mut()
+                .find(|item| item.name == name)
+                .expect("named range was just inserted or updated");
+            imported.id = named_range_id;
         }
     }
 
     Ok(ImportedGoogleSheetsWorkbook { workbook, warnings })
+}
+
+/// Reads the Sheets API's current `tabColorStyle` and its deprecated
+/// `tabColor` fallback.  If both are sent, `tabColorStyle` is authoritative:
+/// accepting the deprecated field first would change a document whose current
+/// style deliberately replaced it. The model owns literal RGB only, so a
+/// themed colour remains intentionally undisclosed rather than being guessed.
+fn import_google_sheet_tab_color(
+    properties: &Value,
+    warnings: &mut Vec<SpreadsheetWarning>,
+) -> Result<Option<String>, SpreadsheetError> {
+    if let Some(style) = google_optional_object(properties, "tabColorStyle")? {
+        if style.get("rgbColor").is_some_and(|value| !value.is_null()) {
+            return import_sheet_rgb(style.get("rgbColor"), "tabColorStyle.rgbColor");
+        }
+        if style
+            .get("themeColor")
+            .is_some_and(|value| !value.is_null())
+        {
+            push_unique_warning(
+                warnings,
+                "google-sheets-unsupported-tab-theme-color",
+                "Google Sheets tabColorStyle.themeColor has no durable literal-RGB OpenDoc mapping, so the tab colour was not imported".to_string(),
+            );
+            return Ok(None);
+        }
+    }
+    if properties
+        .get("tabColor")
+        .is_some_and(|value| !value.is_null())
+    {
+        return import_sheet_rgb(properties.get("tabColor"), "tabColor");
+    }
+    Ok(None)
 }
 
 fn import_google_sheet_title(value: &str) -> Result<String, SpreadsheetError> {
@@ -166,6 +247,30 @@ fn import_google_sheet_title(value: &str) -> Result<String, SpreadsheetError> {
         ));
     }
     Ok(title.to_string())
+}
+
+/// Google Sheets requires at least one visible tab in a spreadsheet.  The
+/// model intentionally permits an all-hidden workbook for formats with a
+/// different contract, so enforce this native invariant only at the Sheets
+/// interchange boundary.
+fn ensure_google_sheets_has_visible_sheet(
+    sheets: &[Sheet],
+    direction: &str,
+) -> Result<(), SpreadsheetError> {
+    if sheets.iter().any(|sheet| !sheet.hidden) {
+        return Ok(());
+    }
+    Err(match direction {
+        "import" => SpreadsheetError::Import(
+            "Google Sheets workbook has every sheet hidden; Google Sheets requires at least one visible sheet"
+                .to_string(),
+        ),
+        "export" => SpreadsheetError::Format(
+            "Google Sheets export requires at least one visible sheet; every OpenDoc sheet is hidden"
+                .to_string(),
+        ),
+        _ => unreachable!("only the native Sheets import/export boundaries use this helper"),
+    })
 }
 
 fn import_google_grid_dimension(
@@ -228,6 +333,42 @@ fn google_optional_array<'a>(
             .map(Some)
             .ok_or_else(|| SpreadsheetError::Import(format!("{key} must be an array"))),
     }
+}
+
+/// Returns the native sheet resources in their tab order.
+///
+/// Google documents `SheetProperties.index` as the zero-based tab position.
+/// Either every returned sheet carries that native order, or none does (the
+/// latter occurs in intentionally minimal legacy payloads). A mixed or
+/// duplicate set has no unambiguous exact projection, so reject it instead of
+/// privileging response-array order.
+fn google_sheets_in_tab_order(sheets: &[Value]) -> Result<Vec<&Value>, SpreadsheetError> {
+    let mut indexed = Vec::with_capacity(sheets.len());
+    let mut index_count = 0;
+    for (array_index, sheet) in sheets.iter().enumerate() {
+        let properties = google_optional_object(sheet, "properties")?.unwrap_or(&Value::Null);
+        if let Some(tab_index) = google_optional_non_negative_i64(properties, "index")? {
+            index_count += 1;
+            indexed.push((tab_index, array_index, sheet));
+        }
+    }
+    if index_count == 0 {
+        return Ok(sheets.iter().collect());
+    }
+    if index_count != sheets.len() {
+        return Err(SpreadsheetError::Import(
+            "Google Sheets sheet properties.index is missing on part of the workbook".to_string(),
+        ));
+    }
+    indexed.sort_by_key(|(tab_index, _, _)| *tab_index);
+    for (expected, (tab_index, _, _)) in indexed.iter().enumerate() {
+        if *tab_index != expected as i64 {
+            return Err(SpreadsheetError::Import(format!(
+                "Google Sheets sheet properties.index must be the unique contiguous tab order; expected {expected}, found {tab_index}"
+            )));
+        }
+    }
+    Ok(indexed.into_iter().map(|(_, _, sheet)| sheet).collect())
 }
 
 fn google_optional_object<'a>(
@@ -319,34 +460,177 @@ fn google_optional_bool(value: &Value, key: &str) -> Result<Option<bool>, Spread
     }
 }
 
-fn reject_google_sheets_high_risk(value: &Value) -> Result<(), SpreadsheetError> {
-    for key in ["charts", "pivotTables", "dataSourceSheetProperties"] {
-        if value.pointer(&format!("/{key}")).is_some() {
-            return Err(SpreadsheetError::Import(format!(
-                "unsupported high-risk Google Sheets field {key}"
-            )));
+fn google_sheets_unsupported_warnings(value: &Value) -> Vec<SpreadsheetWarning> {
+    let mut locations = BTreeMap::<&'static str, BTreeSet<String>>::new();
+    let mut record = |feature, location: String| {
+        locations.entry(feature).or_default().insert(location);
+    };
+    for feature in ["charts", "pivotTables", "dataSourceSheetProperties"] {
+        if value.get(feature).is_some() {
+            record(feature, "workbook".to_string());
         }
     }
-    for sheet in value
+    for (sheet_index, sheet) in value
         .get("sheets")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
+        .enumerate()
     {
-        for key in ["charts", "pivotTables", "filterViews"] {
-            if sheet.get(key).is_some() {
-                return Err(SpreadsheetError::Import(format!(
-                    "unsupported high-risk Google Sheets sheet field {key}"
-                )));
+        let sheet_location = format!("sheet {}", sheet_index + 1);
+        for feature in [
+            "charts",
+            "pivotTables",
+            "filterViews",
+            "dataSourceSheetProperties",
+        ] {
+            if sheet.get(feature).is_some()
+                || sheet
+                    .get("properties")
+                    .and_then(Value::as_object)
+                    .is_some_and(|properties| properties.contains_key(feature))
+            {
+                record(feature, sheet_location.clone());
+            }
+        }
+        // The model owns grid dimensions and frozen leading axes exactly, but
+        // it deliberately has no sheet-wide gridline visibility or outline
+        // grouping/control placement. Do not silently turn a source that
+        // hides gridlines or moves outline controls after their group into the
+        // Google default. Explicit `false` is the source default and has no
+        // observable state to retain, so it needs no loss warning.
+        if let Some(grid) = sheet
+            .get("properties")
+            .and_then(Value::as_object)
+            .and_then(|properties| properties.get("gridProperties"))
+            .and_then(Value::as_object)
+        {
+            for key in [
+                "hideGridlines",
+                "rowGroupControlAfter",
+                "columnGroupControlAfter",
+            ] {
+                if !matches!(
+                    grid.get(key),
+                    None | Some(Value::Null) | Some(Value::Bool(false))
+                ) {
+                    record(
+                        "gridProperties",
+                        format!("{sheet_location} properties.gridProperties.{key}"),
+                    );
+                }
+            }
+        }
+        // A conditional-format rule applies presentation dynamically over a
+        // range. `CellFormat` intentionally contains only durable, authored
+        // per-cell facts, so importing a rule as an ordinary format would
+        // freeze one contingent display state and be untruthful. Retain the
+        // independently usable sheet and name every discarded rule at its
+        // native resource location instead.
+        match sheet.get("conditionalFormats") {
+            Some(Value::Array(rules)) => {
+                for (rule_index, _) in rules.iter().enumerate() {
+                    record(
+                        "conditionalFormats",
+                        format!("{sheet_location} conditionalFormats[{rule_index}]"),
+                    );
+                }
+            }
+            Some(_) => record("conditionalFormats", sheet_location.clone()),
+            None => {}
+        }
+        for (data_index, grid_data) in sheet
+            .get("data")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            for (row_index, row) in grid_data
+                .get("rowData")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .enumerate()
+            {
+                for (column_index, cell) in row
+                    .get("values")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .enumerate()
+                {
+                    let location = google_sheets_grid_cell_warning_location(
+                        sheet_index,
+                        data_index,
+                        grid_data,
+                        row_index,
+                        column_index,
+                    );
+                    for feature in GOOGLE_SHEETS_UNSUPPORTED_CELL_FEATURES {
+                        if cell.get(feature).is_some() {
+                            record(feature, location.clone());
+                        }
+                    }
+                    // `effectiveValue` is a calculated/read-only projection,
+                    // not an authored cell source.  A response which omits
+                    // `userEnteredValue` (for example because of a narrow
+                    // field mask) must not turn that cache into an editable
+                    // literal or formula.  The ordinary import path retains
+                    // other authored metadata such as a note or format on
+                    // the blank cell, but names the absent source/result.
+                    if cell.get("effectiveValue").is_some()
+                        && cell.get("userEnteredValue").is_none_or(Value::is_null)
+                    {
+                        record("effectiveValueWithoutUserEnteredValue", location);
+                    }
+                }
             }
         }
     }
-    Ok(())
+    locations
+        .into_iter()
+        .map(|(feature, locations)| SpreadsheetWarning {
+            code: format!(
+                "google-sheets-unsupported-{}",
+                google_sheets_warning_slug(feature)
+            ),
+            message: format!(
+                "Google Sheets {feature} was not imported at {}",
+                locations.into_iter().collect::<Vec<_>>().join(", ")
+            ),
+        })
+        .collect()
+}
+
+const GOOGLE_SHEETS_UNSUPPORTED_CELL_FEATURES: [&str; 6] = [
+    "pivotTable",
+    "dataSourceTable",
+    "dataSourceFormula",
+    "chipRuns",
+    "hyperlink",
+    "textFormatRuns",
+];
+
+fn google_sheets_warning_slug(feature: &str) -> String {
+    let mut slug = String::new();
+    for (index, character) in feature.chars().enumerate() {
+        if character.is_ascii_uppercase() {
+            if index > 0 {
+                slug.push('-');
+            }
+            slug.push(character.to_ascii_lowercase());
+        } else {
+            slug.push(character);
+        }
+    }
+    slug
 }
 
 fn import_google_sheets_grid_data(
     sheet_value: &Value,
     sheet: &mut Sheet,
+    warnings: &mut Vec<SpreadsheetWarning>,
 ) -> Result<(), SpreadsheetError> {
     let mut imported_cells = BTreeSet::new();
     let Some(data_ranges) = google_optional_array(sheet_value, "data")? else {
@@ -369,6 +653,13 @@ fn import_google_sheets_grid_data(
                 {
                     continue;
                 }
+                // A pivot/data-source payload can carry a cached value or a
+                // formula.  Importing either would turn an omitted object into
+                // an ordinary editable cell, so omit the entire cell.  The
+                // preflight warning above records its exact source location.
+                if google_sheets_cell_requires_omission(cell_value) {
+                    continue;
+                }
                 let address =
                     google_grid_data_address(start_column, start_row, column_offset, row_offset)?;
                 if !imported_cells.insert(address.clone()) {
@@ -376,9 +667,106 @@ fn import_google_sheets_grid_data(
                         "duplicate Google Sheets cell {address}"
                     )));
                 }
-                let mut cell = import_google_sheets_cell(&address, cell_value)?;
+                let mut cell = import_google_sheets_cell(&address, cell_value, warnings)?;
                 cell.address = address;
                 upsert_sheet_cell(sheet, cell);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Imports the dimension properties that belong to `GridData`, rather than to
+/// `SheetProperties`.  Google may return more than one grid-data segment, so
+/// conflicting repeats fail instead of depending on response order.
+fn import_google_sheets_axis_metadata(
+    sheet_value: &Value,
+    sheet: &mut Sheet,
+) -> Result<(), SpreadsheetError> {
+    let Some(data_ranges) = google_optional_array(sheet_value, "data")? else {
+        return Ok(());
+    };
+    let mut row_hidden = BTreeMap::new();
+    let mut column_hidden = BTreeMap::new();
+    for grid_data in data_ranges {
+        import_google_sheets_dimension_metadata(
+            grid_data,
+            "rowMetadata",
+            google_grid_data_start(grid_data, "startRow")?,
+            &sheet.rows,
+            &mut sheet.row_heights,
+            &mut sheet.hidden_rows,
+            &mut row_hidden,
+        )?;
+        import_google_sheets_dimension_metadata(
+            grid_data,
+            "columnMetadata",
+            google_grid_data_start(grid_data, "startColumn")?,
+            &sheet.columns,
+            &mut sheet.column_widths,
+            &mut sheet.hidden_columns,
+            &mut column_hidden,
+        )?;
+    }
+    sheet
+        .hidden_rows
+        .sort_by_key(|label| label.parse::<u32>().unwrap_or(0));
+    sheet.hidden_rows.dedup();
+    sheet
+        .hidden_columns
+        .sort_by_key(|label| column_to_number(label).unwrap_or(0));
+    sheet.hidden_columns.dedup();
+    Ok(())
+}
+
+fn import_google_sheets_dimension_metadata(
+    grid_data: &Value,
+    key: &str,
+    start: u64,
+    labels: &[String],
+    sizes: &mut BTreeMap<String, u32>,
+    hidden_labels: &mut Vec<String>,
+    seen_hidden: &mut BTreeMap<String, bool>,
+) -> Result<(), SpreadsheetError> {
+    let Some(metadata) = google_optional_array(grid_data, key)? else {
+        return Ok(());
+    };
+    for (offset, dimension) in metadata.iter().enumerate() {
+        google_expect_object(dimension, key)?;
+        let index = start
+            .checked_add(
+                u64::try_from(offset)
+                    .map_err(|_| SpreadsheetError::Import(format!("{key} offset is too large")))?,
+            )
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| SpreadsheetError::Import(format!("{key} index is too large")))?;
+        let label = labels.get(index).ok_or_else(|| {
+            SpreadsheetError::Import(format!("{key} index {} is outside the visible grid", index))
+        })?;
+        if let Some(size) = google_optional_u64(dimension, "pixelSize")? {
+            let size = u32::try_from(size).map_err(|_| {
+                SpreadsheetError::Import(format!("{key} pixelSize exceeds supported u32 range"))
+            })?;
+            validate_axis_size_px(&format!("Google Sheets {key} pixelSize"), size)
+                .map_err(|error| SpreadsheetError::Import(error.to_string()))?;
+            if let Some(previous) = sizes.insert(label.clone(), size) {
+                if previous != size {
+                    return Err(SpreadsheetError::Import(format!(
+                        "conflicting Google Sheets {key} pixelSize for {label}"
+                    )));
+                }
+            }
+        }
+        if let Some(hidden) = google_optional_bool(dimension, "hiddenByUser")? {
+            if let Some(previous) = seen_hidden.insert(label.clone(), hidden) {
+                if previous != hidden {
+                    return Err(SpreadsheetError::Import(format!(
+                        "conflicting Google Sheets {key} hiddenByUser for {label}"
+                    )));
+                }
+            }
+            if hidden {
+                hidden_labels.push(label.clone());
             }
         }
     }
@@ -392,6 +780,44 @@ fn google_grid_data_start(value: &Value, key: &str) -> Result<u64, SpreadsheetEr
             SpreadsheetError::Import(format!("grid data {key} must be a non-negative integer"))
         }),
     }
+}
+
+/// Gives an omission disclosure both a human-usable cell address and the
+/// native JSON path that identifies the payload. A `GridData` response can
+/// start at an arbitrary row/column, so `rowData[0].values[0]` alone is not a
+/// cell address. Keep the JSON path when malformed offsets prevent a safe
+/// address calculation; the importer will subsequently report that malformed
+/// input through its normal validation path.
+fn google_sheets_grid_cell_warning_location(
+    sheet_index: usize,
+    data_index: usize,
+    grid_data: &Value,
+    row_index: usize,
+    column_index: usize,
+) -> String {
+    let path = format!(
+        "sheet {} data[{data_index}] rowData[{row_index}].values[{column_index}]",
+        sheet_index + 1
+    );
+    let Some(start_row) = grid_data
+        .get("startRow")
+        .map(Value::as_u64)
+        .unwrap_or(Some(0))
+    else {
+        return path;
+    };
+    let Some(start_column) = grid_data
+        .get("startColumn")
+        .map(Value::as_u64)
+        .unwrap_or(Some(0))
+    else {
+        return path;
+    };
+    let Ok(address) = google_grid_data_address(start_column, start_row, column_index, row_index)
+    else {
+        return path;
+    };
+    format!("sheet {} {address} ({path})", sheet_index + 1)
 }
 
 fn google_grid_data_address(
@@ -423,6 +849,7 @@ fn google_grid_data_address(
 fn import_google_sheets_merges(
     sheet_value: &Value,
     sheet: &mut Sheet,
+    expected_sheet_id: Option<i64>,
 ) -> Result<(), SpreadsheetError> {
     let mut merge_ranges = BTreeSet::new();
     let Some(merges) = google_optional_array(sheet_value, "merges")? else {
@@ -430,6 +857,16 @@ fn import_google_sheets_merges(
     };
     for merge in merges {
         google_expect_object(merge, "merge")?;
+        if let (Some(expected_sheet_id), Some(merge_sheet_id)) = (
+            expected_sheet_id,
+            google_optional_non_negative_i64(merge, "sheetId")?,
+        ) {
+            if merge_sheet_id != expected_sheet_id {
+                return Err(SpreadsheetError::Import(format!(
+                    "Google Sheets merge belongs to sheetId {merge_sheet_id}, not sheetId {expected_sheet_id}"
+                )));
+            }
+        }
         let range = google_grid_range_to_a1(merge)?;
         let normalized = normalize_merge_range(&range)?;
         if !merge_ranges.insert(normalized.clone()) {
@@ -445,6 +882,7 @@ fn import_google_sheets_merges(
 fn import_google_sheets_basic_filter(
     sheet_value: &Value,
     sheet: &mut Sheet,
+    warnings: &mut Vec<SpreadsheetWarning>,
 ) -> Result<(), SpreadsheetError> {
     if let Some(filter) = sheet_value.get("basicFilter") {
         if filter.is_null() {
@@ -454,7 +892,7 @@ fn import_google_sheets_basic_filter(
         let range_value = google_required_object(filter, "range", "basicFilter missing range")?;
         let range = google_grid_range_to_a1(range_value)?;
         set_sheet_basic_filter(sheet, &range)?;
-        import_google_sheets_basic_filter_options(filter, sheet)?;
+        import_google_sheets_basic_filter_options(filter, sheet, warnings)?;
     }
     Ok(())
 }
@@ -462,6 +900,7 @@ fn import_google_sheets_basic_filter(
 fn import_google_sheets_basic_filter_options(
     filter: &Value,
     sheet: &mut Sheet,
+    warnings: &mut Vec<SpreadsheetWarning>,
 ) -> Result<(), SpreadsheetError> {
     let range = sheet
         .filters
@@ -472,47 +911,99 @@ fn import_google_sheets_basic_filter_options(
             SpreadsheetError::Import("basicFilter missing normalized range".to_string())
         })?;
     let mut criteria = Vec::new();
+    let mut dropped_criteria = Vec::new();
     if let Some(criteria_value) = google_optional_object(filter, "criteria")? {
         for (offset, criterion_value) in criteria_value.as_object().ok_or_else(|| {
             SpreadsheetError::Import("basicFilter criteria must be an object".to_string())
         })? {
-            let offset = offset.parse::<u32>().map_err(|_| {
-                SpreadsheetError::Import(format!(
-                    "basicFilter criteria key {offset} is not a column offset"
-                ))
-            })?;
-            let column = cell_address(range.start_column + offset, 1)?
+            let Ok(offset) = offset.parse::<u32>() else {
+                dropped_criteria.push(format!("criteria key {offset:?} is not a column offset"));
+                continue;
+            };
+            let Some(column_number) = range.start_column.checked_add(offset) else {
+                dropped_criteria.push(format!("criteria column offset {offset} is too large"));
+                continue;
+            };
+            if column_number >= range.start_column + range.width {
+                dropped_criteria.push(format!(
+                    "criteria column offset {offset} is outside filter range {}",
+                    sheet.filters[0].range
+                ));
+                continue;
+            }
+            let column = cell_address(column_number, 1)?
                 .trim_end_matches('1')
                 .to_string();
-            let condition_value = google_required_object(
-                criterion_value,
-                "condition",
-                "basicFilter criterion missing condition",
-            )?;
-            let google_condition =
-                google_required_string(condition_value, "type", "filter condition")?;
-            let condition = import_google_filter_condition(google_condition)?;
-            let values = google_optional_array(condition_value, "values")?.ok_or_else(|| {
-                SpreadsheetError::Import("filter condition missing values".to_string())
-            })?;
-            let Some(first) = values.first() else {
-                return Err(SpreadsheetError::Import(
-                    "filter condition has no userEnteredValue".to_string(),
-                ));
+            let Some(condition_value) = google_optional_object(criterion_value, "condition")?
+            else {
+                dropped_criteria.push(format!("criterion {column} has no condition"));
+                continue;
             };
-            let value = google_required_string(first, "userEnteredValue", "filter value")?;
+            let Some(google_condition) = google_optional_string(condition_value, "type")? else {
+                dropped_criteria.push(format!("criterion {column} condition has no type"));
+                continue;
+            };
+            let Ok(condition) = import_google_filter_condition(google_condition) else {
+                dropped_criteria.push(format!(
+                    "criterion {column} uses unsupported condition {google_condition}"
+                ));
+                continue;
+            };
+            let Some(values) = google_optional_array(condition_value, "values")? else {
+                dropped_criteria.push(format!("criterion {column} condition has no value"));
+                continue;
+            };
+            if values.len() != 1 {
+                dropped_criteria.push(format!(
+                    "criterion {column} has {} values (the model owns one)",
+                    values.len()
+                ));
+                continue;
+            }
+            let Some(value) = google_optional_string(&values[0], "userEnteredValue")? else {
+                dropped_criteria.push(format!(
+                    "criterion {column} value is not a string userEnteredValue"
+                ));
+                continue;
+            };
+            if value.trim().is_empty() {
+                dropped_criteria.push(format!("criterion {column} value is empty"));
+                continue;
+            }
             criteria.push(SheetFilterCriterion {
                 column,
                 condition,
                 value: value.to_string(),
             });
+            if criterion_value.get("hiddenValues").is_some()
+                || criterion_value.get("visibleBackgroundColor").is_some()
+                || criterion_value.get("visibleBackgroundColorStyle").is_some()
+            {
+                dropped_criteria.push(format!(
+                    "criterion {} has Google-only hidden-value or colour state",
+                    criteria.last().expect("criterion was just pushed").column
+                ));
+            }
         }
     }
     let mut sort_specs = Vec::new();
+    let mut dropped_sorts = Vec::new();
     if let Some(sort_values) = google_optional_array(filter, "sortSpecs")? {
-        for sort_value in sort_values {
+        for (sort_index, sort_value) in sort_values.iter().enumerate() {
             google_expect_object(sort_value, "sortSpec")?;
-            let index = google_range_required_u64(sort_value, "dimensionIndex")?;
+            let Some(index) = google_range_optional_u64(sort_value, "dimensionIndex")? else {
+                dropped_sorts.push(format!("sort spec {sort_index} has no dimensionIndex"));
+                continue;
+            };
+            if index < u64::from(range.start_column - 1)
+                || index >= u64::from(range.start_column + range.width - 1)
+            {
+                dropped_sorts.push(format!(
+                    "sort spec {sort_index} dimensionIndex {index} is outside filter range {}",
+                    sheet.filters[0].range
+                ));
+                continue;
+            }
             let column = cell_address(
                 u32::try_from(index + 1).map_err(|_| {
                     SpreadsheetError::Import("sortSpec dimensionIndex is too large".to_string())
@@ -526,15 +1017,39 @@ fn import_google_sheets_basic_filter_options(
                 "ASCENDING" => false,
                 "DESCENDING" => true,
                 other => {
-                    return Err(SpreadsheetError::Import(format!(
-                        "unsupported sort order {other}"
-                    )));
+                    dropped_sorts.push(format!(
+                        "sort spec {sort_index} uses unsupported sort order {other}"
+                    ));
+                    continue;
                 }
             };
             sort_specs.push(SheetFilterSortSpec { column, descending });
         }
     }
-    set_sheet_basic_filter_options(sheet, criteria, sort_specs)
+    set_sheet_basic_filter_options(sheet, criteria, sort_specs)?;
+    if !dropped_criteria.is_empty() {
+        push_unique_warning(
+            warnings,
+            "google-sheets-basic-filter-criteria-unimported",
+            format!(
+                "Google Sheets basic filter {} retained its range, but omitted unsupported criteria: {}",
+                sheet.filters[0].range,
+                dropped_criteria.join("; ")
+            ),
+        );
+    }
+    if !dropped_sorts.is_empty() {
+        push_unique_warning(
+            warnings,
+            "google-sheets-basic-filter-sorts-unimported",
+            format!(
+                "Google Sheets basic filter {} retained its range, but omitted unsupported sorts: {}",
+                sheet.filters[0].range,
+                dropped_sorts.join("; ")
+            ),
+        );
+    }
+    Ok(())
 }
 
 fn import_google_filter_condition(value: &str) -> Result<String, SpreadsheetError> {
@@ -567,25 +1082,38 @@ fn import_google_sheets_protected_ranges(
     sheet_value: &Value,
     sheet: &mut Sheet,
     warnings: &mut Vec<SpreadsheetWarning>,
+    protected_range_ids: &mut BTreeSet<i64>,
 ) -> Result<(), SpreadsheetError> {
-    let mut protected_range_ids = BTreeSet::new();
     let mut protected_ranges = BTreeSet::new();
     let Some(ranges) = google_optional_array(sheet_value, "protectedRanges")? else {
         return Ok(());
     };
-    for protected_range in ranges {
+    for (index, protected_range) in ranges.iter().enumerate() {
         google_expect_object(protected_range, "protected range")?;
-        if let Some(protected_range_id) =
-            google_optional_non_negative_i64(protected_range, "protectedRangeId")?
-        {
+        let protected_range_id =
+            google_optional_non_negative_i64(protected_range, "protectedRangeId")?;
+        if let Some(protected_range_id) = protected_range_id {
             if !protected_range_ids.insert(protected_range_id) {
                 return Err(SpreadsheetError::Import(format!(
                     "duplicate Google Sheets protectedRangeId {protected_range_id}"
                 )));
             }
         }
-        let range_value =
-            google_required_object(protected_range, "range", "protected range missing range")?;
+        let location = format!("{} protectedRanges[{index}]", sheet.id);
+        // A native protected range may name a NamedRange instead of embedding a
+        // rectangle.  The durable advisory model intentionally owns only an
+        // explicit rectangle, so leave that independent source feature out
+        // rather than failing the whole workbook or guessing its target.
+        let Some(range_value) = google_optional_object(protected_range, "range")? else {
+            push_unique_warning(
+                warnings,
+                "google-sheets-protected-range-unimported",
+                format!(
+                    "Google Sheets protected range at {location} was not imported because it has no explicit rectangular range"
+                ),
+            );
+            continue;
+        };
         let range = google_grid_range_to_a1(range_value)?;
         let normalized = normalize_cell_range(&range)?;
         if !protected_ranges.insert(normalized.clone()) {
@@ -593,11 +1121,19 @@ fn import_google_sheets_protected_ranges(
                 "duplicate Google Sheets protected range {normalized}"
             )));
         }
-        let description = google_required_string(
-            protected_range,
-            "description",
-            "protected range missing description",
-        )?;
+        // Google permits an omitted description.  OpenDoc does not have an
+        // empty-description state, and inventing one would make an apparently
+        // exact export lie about authored metadata.
+        let Some(description) = google_optional_string(protected_range, "description")? else {
+            push_unique_warning(
+                warnings,
+                "google-sheets-protected-range-unimported",
+                format!(
+                    "Google Sheets protected range at {location} was not imported because its optional description is absent"
+                ),
+            );
+            continue;
+        };
         let warning_only = google_optional_bool(protected_range, "warningOnly")?.unwrap_or(true);
         if !warning_only {
             push_unique_warning(
@@ -610,19 +1146,44 @@ fn import_google_sheets_protected_ranges(
             );
         }
         add_sheet_protected_range(sheet, &range, description, warning_only)?;
+        if let Some(protected_range_id) = protected_range_id {
+            // IDs are opaque outside the Google adapter.  A namespaced spelling
+            // cannot collide with OpenDoc's normal `protected-...` IDs, while
+            // retaining the exact native integer for later export.
+            let imported = sheet
+                .protected_ranges
+                .iter_mut()
+                .find(|item| item.range == normalized)
+                .expect("protected range was just inserted or updated");
+            imported.id = format!("google-protected-range-{protected_range_id}");
+        }
     }
     Ok(())
 }
 
-fn import_google_sheets_cell(address: &str, value: &Value) -> Result<Cell, SpreadsheetError> {
-    reject_google_sheets_cell_high_risk(value)?;
+fn import_google_sheets_cell(
+    address: &str,
+    value: &Value,
+    warnings: &mut Vec<SpreadsheetWarning>,
+) -> Result<Cell, SpreadsheetError> {
     let user_value = value.get("userEnteredValue").unwrap_or(&Value::Null);
     let mut cell = import_google_sheets_user_entered_value(address, user_value)?;
     if let Some(format) = google_optional_object(value, "userEnteredFormat")? {
-        cell.format = import_google_sheets_format(format)?;
+        cell.format = import_google_sheets_format(address, format, warnings)?;
     }
     if let Some(validation) = google_optional_object(value, "dataValidation")? {
-        cell.validation = Some(import_google_sheets_validation(validation)?);
+        // Validation is independent metadata: an unfamiliar Google-only
+        // condition must not prevent importing the otherwise safe cell value.
+        // Do not coerce it into a nearby OpenDoc rule; name the exact cell and
+        // leave the rule absent instead.
+        match import_google_sheets_validation(validation) {
+            Ok(validation) => cell.validation = Some(validation),
+            Err(error) => push_unique_warning(
+                warnings,
+                "google-sheets-data-validation-unimported",
+                format!("data validation at {address} was omitted: {error}"),
+            ),
+        }
     }
     if let Some(note) = google_optional_string(value, "note")? {
         if !note.trim().is_empty() {
@@ -738,22 +1299,20 @@ fn import_google_sheets_user_entered_value(
     }
 }
 
-fn reject_google_sheets_cell_high_risk(value: &Value) -> Result<(), SpreadsheetError> {
-    for key in [
-        "pivotTable",
-        "dataSourceTable",
-        "dataSourceFormula",
-        "chipRuns",
-        "hyperlink",
-        "textFormatRuns",
-    ] {
-        if value.get(key).is_some() {
-            return Err(SpreadsheetError::Import(format!(
-                "unsupported high-risk Google Sheets cell field {key}"
-            )));
-        }
-    }
-    Ok(())
+fn google_sheets_cell_requires_omission(value: &Value) -> bool {
+    // Data-source and pivot cells do not have an independent user-entered
+    // value.  A chip or hyperlink may, but a formula carrying either is still
+    // an unsafe formula (for example HYPERLINK()), so it must not be parsed.
+    ["pivotTable", "dataSourceTable", "dataSourceFormula"]
+        .into_iter()
+        .any(|feature| value.get(feature).is_some())
+        || (value
+            .get("userEnteredValue")
+            .and_then(Value::as_object)
+            .is_some_and(|user_value| user_value.contains_key("formulaValue"))
+            && ["chipRuns", "hyperlink", "textFormatRuns"]
+                .into_iter()
+                .any(|feature| value.get(feature).is_some()))
 }
 
 fn import_google_sheets_cell_comment(value: &Value) -> Result<CellComment, SpreadsheetError> {
@@ -769,9 +1328,31 @@ fn import_google_sheets_cell_comment(value: &Value) -> Result<CellComment, Sprea
 
 fn import_google_sheets_validation(value: &Value) -> Result<CellValidation, SpreadsheetError> {
     let condition = google_optional_object(value, "condition")?.unwrap_or(&Value::Null);
-    let kind = google_optional_string(condition, "type")?
-        .unwrap_or("CUSTOM_FORMULA")
-        .to_ascii_lowercase();
+    let google_type = google_optional_string(condition, "type")?.unwrap_or("CUSTOM_FORMULA");
+    let kind = match google_type {
+        "ONE_OF_LIST" => "list".to_string(),
+        "ONE_OF_RANGE" => "one_of_range".to_string(),
+        "CUSTOM_FORMULA" => "custom_formula".to_string(),
+        "NUMBER_GREATER" => "number_greater".to_string(),
+        "NUMBER_LESS" => "number_less".to_string(),
+        "NUMBER_BETWEEN" => "number_between".to_string(),
+        "TEXT_CONTAINS" => "text_contains".to_string(),
+        other => other.to_ascii_lowercase(),
+    };
+    if !matches!(
+        kind.as_str(),
+        "list"
+            | "one_of_range"
+            | "custom_formula"
+            | "number_greater"
+            | "number_less"
+            | "number_between"
+            | "text_contains"
+    ) {
+        return Err(SpreadsheetError::Import(format!(
+            "unsupported Google Sheets data-validation condition {google_type}"
+        )));
+    }
     let values = import_google_sheets_validation_values(condition)?;
     let mut validation = CellValidation::new(
         &kind,
@@ -779,6 +1360,7 @@ fn import_google_sheets_validation(value: &Value) -> Result<CellValidation, Spre
         google_optional_bool(value, "strict")?.unwrap_or(false),
     )?;
     validation.show_dropdown = google_optional_bool(value, "showCustomUi")?.unwrap_or(true);
+    validation.validate_source()?;
     Ok(validation)
 }
 
@@ -821,7 +1403,11 @@ fn import_google_sheets_validation_values(
         .collect()
 }
 
-fn import_google_sheets_format(value: &Value) -> Result<CellFormat, SpreadsheetError> {
+fn import_google_sheets_format(
+    address: &str,
+    value: &Value,
+    warnings: &mut Vec<SpreadsheetWarning>,
+) -> Result<CellFormat, SpreadsheetError> {
     let text_format = google_optional_object(value, "textFormat")?.unwrap_or(&Value::Null);
     let number_format = google_optional_object(value, "numberFormat")?.unwrap_or(&Value::Null);
     let format = CellFormat {
@@ -829,12 +1415,109 @@ fn import_google_sheets_format(value: &Value) -> Result<CellFormat, SpreadsheetE
         italic: google_optional_bool(text_format, "italic")?.unwrap_or(false),
         text_color: import_sheet_rgb(text_format.get("foregroundColor"), "foregroundColor")?,
         background_color: import_sheet_rgb(value.get("backgroundColor"), "backgroundColor")?,
-        horizontal_align: google_optional_string(value, "horizontalAlignment")?
-            .map(|value| value.to_ascii_lowercase()),
-        number_format: google_optional_string(number_format, "type")?.map(ToString::to_string),
+        horizontal_align: import_google_horizontal_alignment(address, value, warnings)?,
+        wrap_strategy: import_google_wrap_strategy(address, value, warnings)?,
+        vertical_align: import_google_vertical_alignment(address, value, warnings)?,
+        // `type` is only a broad category.  Sheets uses `pattern` for the
+        // authored display contract (including accounting, elapsed-time, and
+        // locale-specific custom formats), so prefer it when present rather
+        // than irreversibly collapsing it to the category.
+        number_format: import_google_number_format(number_format)?,
     };
     format.validate_source()?;
     Ok(format)
+}
+
+/// Google represents the model default with an optional omitted field, but
+/// its public enum also has an explicit `*_ALIGN_UNSPECIFIED` spelling. That
+/// spelling is not an authored alignment and must not turn an otherwise
+/// importable cell into an invalid OpenDoc `CellFormat`. Conversely, an enum
+/// member outside the three model-owned positions cannot be quietly copied
+/// into an invalid format or coerced into a nearby position.
+fn import_google_horizontal_alignment(
+    address: &str,
+    value: &Value,
+    warnings: &mut Vec<SpreadsheetWarning>,
+) -> Result<Option<String>, SpreadsheetError> {
+    let Some(alignment) = google_optional_string(value, "horizontalAlignment")? else {
+        return Ok(None);
+    };
+    let normalized = alignment.to_ascii_uppercase();
+    match normalized.as_str() {
+        "LEFT" => Ok(Some("left".to_string())),
+        "CENTER" => Ok(Some("center".to_string())),
+        "RIGHT" => Ok(Some("right".to_string())),
+        "HORIZONTAL_ALIGN_UNSPECIFIED" => Ok(None),
+        _ => {
+            push_unique_warning(
+                warnings,
+                "google-sheets-unsupported-horizontal-alignment",
+                format!(
+                    "Google Sheets cell {address} uses horizontalAlignment {alignment:?}; only LEFT, CENTER, and RIGHT have a durable OpenDoc mapping, so the alignment was not imported"
+                ),
+            );
+            Ok(None)
+        }
+    }
+}
+
+fn import_google_vertical_alignment(
+    address: &str,
+    value: &Value,
+    warnings: &mut Vec<SpreadsheetWarning>,
+) -> Result<Option<String>, SpreadsheetError> {
+    let Some(alignment) = google_optional_string(value, "verticalAlignment")? else {
+        return Ok(None);
+    };
+    let normalized = alignment.to_ascii_uppercase();
+    match normalized.as_str() {
+        "TOP" => Ok(Some("top".to_string())),
+        "MIDDLE" | "CENTER" => Ok(Some("middle".to_string())),
+        "BOTTOM" => Ok(Some("bottom".to_string())),
+        "VERTICAL_ALIGN_UNSPECIFIED" => Ok(None),
+        _ => {
+            push_unique_warning(
+                warnings,
+                "google-sheets-unsupported-vertical-alignment",
+                format!(
+                    "Google Sheets cell {address} uses verticalAlignment {alignment:?}; only TOP, MIDDLE, and BOTTOM have a durable OpenDoc mapping, so the alignment was not imported"
+                ),
+            );
+            Ok(None)
+        }
+    }
+}
+
+fn import_google_number_format(value: &Value) -> Result<Option<String>, SpreadsheetError> {
+    if let Some(pattern) = google_optional_string(value, "pattern")? {
+        if !pattern.is_empty() {
+            return Ok(Some(pattern.to_string()));
+        }
+    }
+    Ok(google_optional_string(value, "type")?.map(ToString::to_string))
+}
+
+fn import_google_wrap_strategy(
+    address: &str,
+    value: &Value,
+    warnings: &mut Vec<SpreadsheetWarning>,
+) -> Result<Option<String>, SpreadsheetError> {
+    let Some(strategy) = google_optional_string(value, "wrapStrategy")? else {
+        return Ok(None);
+    };
+    if strategy.eq_ignore_ascii_case("WRAP") {
+        return Ok(Some("wrap".to_string()));
+    }
+    // `OVERFLOW_CELL` and `CLIP` are meaningful authored choices in Sheets;
+    // treating either as our absent default would lie about source intent.
+    push_unique_warning(
+        warnings,
+        "google-sheets-unsupported-wrap-strategy",
+        format!(
+            "Google Sheets cell {address} uses wrapStrategy {strategy:?}; only WRAP has a durable OpenDoc mapping, so the strategy was not imported"
+        ),
+    );
+    Ok(None)
 }
 
 fn google_grid_range_to_a1(value: &Value) -> Result<String, SpreadsheetError> {
@@ -897,11 +1580,14 @@ pub fn export_google_sheets_workbook(
         .enumerate()
         .map(|(index, sheet)| (sheet.id.clone(), index as i64))
         .collect::<BTreeMap<_, _>>();
+    let protected_range_id_map = assign_google_protected_range_ids(workbook)?;
     let sheets = workbook
         .sheets
         .iter()
         .enumerate()
-        .map(|(index, sheet)| export_google_sheets_sheet(index as i64, sheet))
+        .map(|(index, sheet)| {
+            export_google_sheets_sheet(index as i64, sheet, &protected_range_id_map)
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let named_ranges = workbook
         .named_ranges
@@ -919,6 +1605,46 @@ pub fn export_google_sheets_workbook(
         "namedRanges": named_ranges,
     }))
     .map_err(|err| SpreadsheetError::Import(err.to_string()))
+}
+
+fn assign_google_protected_range_ids(
+    workbook: &SpreadsheetWorkbook,
+) -> Result<BTreeMap<(String, String), i64>, SpreadsheetError> {
+    let mut assigned = BTreeMap::new();
+    let mut used = BTreeSet::new();
+    for sheet in &workbook.sheets {
+        for protected_range in &sheet.protected_ranges {
+            if let Some(native_id) = google_protected_range_native_id(&protected_range.id) {
+                if !used.insert(native_id) {
+                    return Err(SpreadsheetError::Format(format!(
+                        "duplicate native Google protected range id {native_id}"
+                    )));
+                }
+                assigned.insert((sheet.id.clone(), protected_range.id.clone()), native_id);
+            }
+        }
+    }
+    let mut next_id = 1_i64;
+    for sheet in &workbook.sheets {
+        for protected_range in &sheet.protected_ranges {
+            let key = (sheet.id.clone(), protected_range.id.clone());
+            if assigned.contains_key(&key) {
+                continue;
+            }
+            while used.contains(&next_id) {
+                next_id += 1;
+            }
+            used.insert(next_id);
+            assigned.insert(key, next_id);
+            next_id += 1;
+        }
+    }
+    Ok(assigned)
+}
+
+fn google_protected_range_native_id(id: &str) -> Option<i64> {
+    let parsed = id.strip_prefix("google-protected-range-")?.parse().ok()?;
+    (parsed >= 0).then_some(parsed)
 }
 
 fn validate_google_sheets_export_workbook(
@@ -945,6 +1671,7 @@ fn validate_google_sheets_export_workbook(
             "spreadsheet workbook has no sheets".to_string(),
         ));
     }
+    ensure_google_sheets_has_visible_sheet(&workbook.sheets, "export")?;
 
     let mut sheet_ids = BTreeSet::new();
     let mut sheet_titles = BTreeSet::new();
@@ -1000,7 +1727,11 @@ fn validate_google_sheets_export_named_ranges(
     Ok(())
 }
 
-fn export_google_sheets_sheet(sheet_id: i64, sheet: &Sheet) -> Result<Value, SpreadsheetError> {
+fn export_google_sheets_sheet(
+    sheet_id: i64,
+    sheet: &Sheet,
+    protected_range_id_map: &BTreeMap<(String, String), i64>,
+) -> Result<Value, SpreadsheetError> {
     validate_google_sheets_export_sheet(sheet)?;
     let cell_map = sheet
         .cells
@@ -1022,22 +1753,51 @@ fn export_google_sheets_sheet(sheet_id: i64, sheet: &Sheet) -> Result<Value, Spr
         }
         rows.push(json!({ "values": values }));
     }
+    let mut properties = serde_json::Map::new();
+    properties.insert("sheetId".to_string(), json!(sheet_id));
+    // The exporter assigns deterministic IDs in workbook order, so this is
+    // also the exact zero-based native tab position.
+    properties.insert("index".to_string(), json!(sheet_id));
+    properties.insert("title".to_string(), json!(sheet.title));
+    properties.insert("hidden".to_string(), json!(sheet.hidden));
+    properties.insert(
+        "gridProperties".to_string(),
+        json!({
+            "rowCount": sheet.rows.len(),
+            "columnCount": sheet.columns.len(),
+            "frozenRowCount": sheet.frozen_rows,
+            "frozenColumnCount": sheet.frozen_columns,
+        }),
+    );
+    if let Some(color) = &sheet.tab_color {
+        // `tabColor` is accepted by old payloads but deprecated by the
+        // Sheets API. New native output uses the current ColorStyle shape.
+        properties.insert(
+            "tabColorStyle".to_string(),
+            json!({ "rgbColor": export_sheet_color(color) }),
+        );
+    }
+
+    let mut data = serde_json::Map::new();
+    data.insert("startRow".to_string(), json!(0));
+    data.insert("startColumn".to_string(), json!(0));
+    data.insert("rowData".to_string(), Value::Array(rows));
+    if let Some(metadata) =
+        export_google_sheets_dimension_metadata(&sheet.rows, &sheet.row_heights, &sheet.hidden_rows)
+    {
+        data.insert("rowMetadata".to_string(), metadata);
+    }
+    if let Some(metadata) = export_google_sheets_dimension_metadata(
+        &sheet.columns,
+        &sheet.column_widths,
+        &sheet.hidden_columns,
+    ) {
+        data.insert("columnMetadata".to_string(), metadata);
+    }
+
     Ok(json!({
-        "properties": {
-            "sheetId": sheet_id,
-            "title": sheet.title,
-                "gridProperties": {
-                    "rowCount": sheet.rows.len(),
-                    "columnCount": sheet.columns.len(),
-                    "frozenRowCount": sheet.frozen_rows,
-                    "frozenColumnCount": sheet.frozen_columns,
-                },
-            },
-        "data": [{
-            "startRow": 0,
-            "startColumn": 0,
-            "rowData": rows,
-        }],
+        "properties": Value::Object(properties),
+        "data": [Value::Object(data)],
         "merges": sheet
             .merges
             .iter()
@@ -1051,12 +1811,45 @@ fn export_google_sheets_sheet(sheet_id: i64, sheet: &Sheet) -> Result<Value, Spr
         "protectedRanges": sheet
             .protected_ranges
             .iter()
-            .enumerate()
-            .map(|(index, protected_range)| {
-                export_google_sheets_protected_range(sheet_id, index, protected_range)
+            .map(|protected_range| {
+                let protected_range_id = protected_range_id_map
+                    .get(&(sheet.id.clone(), protected_range.id.clone()))
+                    .copied()
+                    .expect("every protected range was assigned a Google ID");
+                export_google_sheets_protected_range(
+                    sheet_id,
+                    protected_range_id,
+                    protected_range,
+                )
             })
             .collect::<Result<Vec<_>, _>>()?,
     }))
+}
+
+fn export_google_sheets_dimension_metadata(
+    labels: &[String],
+    sizes: &BTreeMap<String, u32>,
+    hidden_labels: &[String],
+) -> Option<Value> {
+    if sizes.is_empty() && hidden_labels.is_empty() {
+        return None;
+    }
+    let hidden = hidden_labels.iter().collect::<BTreeSet<_>>();
+    Some(Value::Array(
+        labels
+            .iter()
+            .map(|label| {
+                let mut dimension = serde_json::Map::new();
+                if let Some(size) = sizes.get(label) {
+                    dimension.insert("pixelSize".to_string(), json!(size));
+                }
+                if hidden.contains(&label) {
+                    dimension.insert("hiddenByUser".to_string(), Value::Bool(true));
+                }
+                Value::Object(dimension)
+            })
+            .collect(),
+    ))
 }
 
 fn validate_google_sheets_export_sheet(sheet: &Sheet) -> Result<(), SpreadsheetError> {
@@ -1083,6 +1876,9 @@ fn validate_google_sheets_export_sheet(sheet: &Sheet) -> Result<(), SpreadsheetE
             "sheet {} frozen columns exceed visible columns",
             sheet.id
         )));
+    }
+    if let Some(color) = &sheet.tab_color {
+        validate_sheet_color(color)?;
     }
     validate_google_sheets_export_axis_labels(sheet)?;
     validate_google_sheets_export_ranges(sheet)?;
@@ -1321,20 +2117,55 @@ fn export_google_sheets_format(format: &CellFormat) -> Result<Value, Spreadsheet
             json!(align.to_ascii_uppercase()),
         );
     }
+    if format.wrap_strategy.as_deref() == Some("wrap") {
+        out.insert("wrapStrategy".to_string(), json!("WRAP"));
+    }
+    if let Some(align) = &format.vertical_align {
+        let align = match align.as_str() {
+            "middle" => "MIDDLE",
+            "top" => "TOP",
+            "bottom" => "BOTTOM",
+            _ => unreachable!("CellFormat validation accepts only known vertical alignment"),
+        };
+        out.insert("verticalAlignment".to_string(), json!(align));
+    }
     if let Some(number_format) = &format.number_format {
-        out.insert("numberFormat".to_string(), json!({ "type": number_format }));
+        out.insert(
+            "numberFormat".to_string(),
+            export_google_number_format(number_format),
+        );
     }
     Ok(Value::Object(out))
 }
 
+fn export_google_number_format(number_format: &str) -> Value {
+    // Google calls these values `NumberFormatType`; a raw OpenDoc pattern is
+    // not itself an enum member.  Custom patterns therefore use NUMBER as
+    // their broad category and preserve the actual authored string in
+    // `pattern`, which is the field Sheets itself uses for display.
+    let format_type = number_format.to_ascii_uppercase();
+    match format_type.as_str() {
+        "GENERAL" | "AUTOMATIC" => json!({ "type": "NUMBER" }),
+        "NUMBER" | "PERCENT" | "CURRENCY" | "DATE" | "TIME" | "DATE_TIME" | "DATETIME"
+        | "SCIENTIFIC" | "TEXT" => json!({
+            "type": if format_type == "DATETIME" {
+                "DATE_TIME"
+            } else {
+                format_type.as_str()
+            }
+        }),
+        _ => json!({ "type": "NUMBER", "pattern": number_format }),
+    }
+}
+
 fn export_google_sheets_protected_range(
     sheet_id: i64,
-    index: usize,
+    protected_range_id: i64,
     protected_range: &SheetProtectedRange,
 ) -> Result<Value, SpreadsheetError> {
     protected_range.validate_source()?;
     Ok(json!({
-        "protectedRangeId": index + 1,
+        "protectedRangeId": protected_range_id,
         "range": export_google_sheets_grid_range(&protected_range.range, sheet_id)?,
         "description": protected_range.description,
         "warningOnly": protected_range.warning_only,
@@ -1436,4 +2267,1180 @@ fn export_google_sheets_basic_filter(
         );
     }
     Ok(Value::Object(out))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn google_effective_value_without_authored_source_is_disclosed_not_imported_as_a_literal() {
+        let payload = json!({
+            "sheets": [{
+                "properties": {
+                    "sheetId": 1,
+                    "title": "Partial response",
+                    "gridProperties": { "rowCount": 2, "columnCount": 2 }
+                },
+                "data": [{
+                    "startRow": 1,
+                    "startColumn": 1,
+                    "rowData": [{ "values": [{
+                        "effectiveValue": { "numberValue": 42 },
+                        "formattedValue": "42",
+                        "note": "the authored note survives"
+                    }] }]
+                }]
+            }]
+        });
+
+        let imported = import_google_sheets_workbook(&payload.to_string()).unwrap();
+        let cell = imported.workbook.sheets[0]
+            .cells
+            .iter()
+            .find(|cell| cell.address == "B2")
+            .expect("metadata-bearing cell remains addressable");
+        assert_eq!(cell.user_kind, "empty");
+        assert_eq!(cell.user_value, "");
+        assert_eq!(cell.comments[0].body, "the authored note survives");
+        let warning = imported
+            .warnings
+            .iter()
+            .find(|warning| {
+                warning.code
+                    == "google-sheets-unsupported-effective-value-without-user-entered-value"
+            })
+            .expect("result-only value is disclosed");
+        assert!(warning.message.contains("B2"));
+        assert!(warning.message.contains("data[0] rowData[0].values[0]"));
+
+        let exported: Value =
+            serde_json::from_str(&export_google_sheets_workbook(&imported.workbook).unwrap())
+                .unwrap();
+        let value = &exported["sheets"][0]["data"][0]["rowData"][1]["values"][1];
+        assert_eq!(value["userEnteredValue"], json!({}));
+        assert!(value.get("effectiveValue").is_none());
+        assert_eq!(value["note"], "the authored note survives");
+    }
+
+    #[test]
+    fn google_sheet_merges_round_trip_with_their_native_grid_ranges() {
+        let payload = json!({
+            "sheets": [{
+                "properties": {
+                    "sheetId": 37,
+                    "title": "Merged cells",
+                    "gridProperties": { "rowCount": 4, "columnCount": 4 }
+                },
+                "data": [{
+                    "rowData": [{
+                        "values": [{ "userEnteredValue": { "stringValue": "anchor" } }]
+                    }]
+                }],
+                "merges": [
+                    {
+                        "sheetId": 37,
+                        "endRowIndex": 2,
+                        "endColumnIndex": 3
+                    },
+                    {
+                        "sheetId": 37,
+                        "startRowIndex": 2,
+                        "endRowIndex": 4,
+                        "startColumnIndex": 1,
+                        "endColumnIndex": 4
+                    }
+                ]
+            }]
+        });
+
+        let imported = import_google_sheets_workbook(&payload.to_string()).unwrap();
+        let sheet = &imported.workbook.sheets[0];
+        assert_eq!(
+            sheet
+                .merges
+                .iter()
+                .map(|merge| merge.range.as_str())
+                .collect::<Vec<_>>(),
+            ["A1:C2", "B3:D4"]
+        );
+        assert_eq!(sheet.cells[0].address, "A1");
+        assert_eq!(sheet.cells[0].user_value, "anchor");
+
+        let exported: Value =
+            serde_json::from_str(&export_google_sheets_workbook(&imported.workbook).unwrap())
+                .unwrap();
+        assert_eq!(
+            exported["sheets"][0]["merges"],
+            json!([
+                {
+                    "sheetId": 0,
+                    "startRowIndex": 0,
+                    "endRowIndex": 2,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": 3
+                },
+                {
+                    "sheetId": 0,
+                    "startRowIndex": 2,
+                    "endRowIndex": 4,
+                    "startColumnIndex": 1,
+                    "endColumnIndex": 4
+                }
+            ])
+        );
+        let reread = import_google_sheets_workbook(&exported.to_string()).unwrap();
+        assert_eq!(reread.workbook.sheets[0].merges, sheet.merges);
+    }
+
+    #[test]
+    fn a_google_sheet_merge_cannot_point_to_another_sheet() {
+        let payload = json!({
+            "sheets": [{
+                "properties": {
+                    "sheetId": 37,
+                    "gridProperties": { "rowCount": 2, "columnCount": 2 }
+                },
+                "merges": [{
+                    "sheetId": 38,
+                    "endRowIndex": 2,
+                    "endColumnIndex": 2
+                }]
+            }]
+        });
+
+        let error = match import_google_sheets_workbook(&payload.to_string()) {
+            Ok(_) => panic!("a merge cannot belong to a different sheet"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("sheetId 38, not sheetId 37"));
+    }
+
+    #[test]
+    fn google_named_ranges_preserve_native_identity_and_grid_range() {
+        let payload = json!({
+            "sheets": [{
+                "properties": {
+                    "sheetId": 17,
+                    "title": "Data",
+                    "gridProperties": { "rowCount": 4, "columnCount": 3 }
+                }
+            }],
+            "namedRanges": [{
+                "namedRangeId": "native-range-9",
+                "name": "quarterly_total2",
+                "range": {
+                    "sheetId": 17,
+                    "startRowIndex": 1,
+                    "endRowIndex": 4,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": 2
+                }
+            }]
+        });
+
+        let imported = import_google_sheets_workbook(&payload.to_string()).unwrap();
+        assert_eq!(imported.workbook.named_ranges.len(), 1);
+        assert_eq!(
+            imported.workbook.named_ranges[0],
+            NamedRange {
+                id: "native-range-9".to_string(),
+                name: "QUARTERLY_TOTAL2".to_string(),
+                sheet_id: "sheet-1".to_string(),
+                range: "A2:B4".to_string(),
+            }
+        );
+
+        let exported: Value =
+            serde_json::from_str(&export_google_sheets_workbook(&imported.workbook).unwrap())
+                .unwrap();
+        assert_eq!(
+            exported["namedRanges"],
+            json!([{
+                "namedRangeId": "native-range-9",
+                "name": "QUARTERLY_TOTAL2",
+                "range": {
+                    "sheetId": 0,
+                    "startRowIndex": 1,
+                    "endRowIndex": 4,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": 2,
+                }
+            }])
+        );
+        let reread = import_google_sheets_workbook(&exported.to_string()).unwrap();
+        assert_eq!(reread.workbook.named_ranges, imported.workbook.named_ranges);
+    }
+
+    #[test]
+    fn google_named_range_identity_collisions_fail_before_returning_invalid_workbook() {
+        let payload = json!({
+            "sheets": [{
+                "properties": {
+                    "sheetId": 17,
+                    "gridProperties": { "rowCount": 1, "columnCount": 1 }
+                }
+            }],
+            "namedRanges": [
+                {
+                    "name": "first",
+                    "range": { "sheetId": 17, "endRowIndex": 1, "endColumnIndex": 1 }
+                },
+                {
+                    "namedRangeId": "named-first",
+                    "name": "second",
+                    "range": { "sheetId": 17, "endRowIndex": 1, "endColumnIndex": 1 }
+                }
+            ]
+        });
+
+        let error = import_google_sheets_workbook(&payload.to_string())
+            .err()
+            .unwrap();
+        assert!(error
+            .to_string()
+            .contains("duplicate Google Sheets namedRangeId named-first"));
+    }
+
+    #[test]
+    fn google_warning_only_protected_ranges_preserve_native_identity_and_rectangle() {
+        let payload = json!({
+            "sheets": [
+                {
+                    "properties": {
+                        "sheetId": 17,
+                        "title": "First",
+                        "gridProperties": { "rowCount": 3, "columnCount": 3 }
+                    },
+                    "protectedRanges": [{
+                        "protectedRangeId": 41,
+                        "range": {
+                            "sheetId": 17,
+                            "startRowIndex": 0,
+                            "endRowIndex": 2,
+                            "startColumnIndex": 1,
+                            "endColumnIndex": 3
+                        },
+                        "description": "Check before editing",
+                        "warningOnly": true
+                    }]
+                },
+                {
+                    "properties": {
+                        "sheetId": 18,
+                        "title": "Second",
+                        "gridProperties": { "rowCount": 2, "columnCount": 2 }
+                    },
+                    "protectedRanges": [{
+                        "protectedRangeId": 7,
+                        "range": { "sheetId": 18, "endRowIndex": 1, "endColumnIndex": 1 },
+                        "description": "Advisory only",
+                        "warningOnly": true
+                    }]
+                }
+            ]
+        });
+
+        let imported = import_google_sheets_workbook(&payload.to_string()).unwrap();
+        assert!(imported.warnings.is_empty());
+        assert_eq!(
+            imported.workbook.sheets[0].protected_ranges[0],
+            SheetProtectedRange {
+                id: "google-protected-range-41".to_string(),
+                range: "B1:C2".to_string(),
+                description: "Check before editing".to_string(),
+                warning_only: true,
+            }
+        );
+
+        let exported: Value =
+            serde_json::from_str(&export_google_sheets_workbook(&imported.workbook).unwrap())
+                .unwrap();
+        assert_eq!(
+            exported["sheets"][0]["protectedRanges"],
+            json!([{
+                "protectedRangeId": 41,
+                "range": {
+                    "sheetId": 0,
+                    "startRowIndex": 0,
+                    "endRowIndex": 2,
+                    "startColumnIndex": 1,
+                    "endColumnIndex": 3
+                },
+                "description": "Check before editing",
+                "warningOnly": true
+            }])
+        );
+        assert_eq!(
+            exported["sheets"][1]["protectedRanges"][0]["protectedRangeId"],
+            7
+        );
+        let reread = import_google_sheets_workbook(&exported.to_string()).unwrap();
+        assert_eq!(
+            reread.workbook.sheets[0].protected_ranges,
+            imported.workbook.sheets[0].protected_ranges
+        );
+        assert_eq!(
+            reread.workbook.sheets[1].protected_ranges,
+            imported.workbook.sheets[1].protected_ranges
+        );
+    }
+
+    #[test]
+    fn google_permission_protection_is_downgraded_and_nonrectangular_forms_are_disclosed() {
+        let payload = json!({
+            "sheets": [{
+                "properties": {
+                    "sheetId": 17,
+                    "title": "Data",
+                    "gridProperties": { "rowCount": 2, "columnCount": 2 }
+                },
+                "protectedRanges": [
+                    {
+                        "protectedRangeId": 2,
+                        "range": { "sheetId": 17, "endRowIndex": 1, "endColumnIndex": 1 },
+                        "description": "Permission boundary",
+                        "warningOnly": false,
+                        "editors": { "users": ["person@example.invalid"] }
+                    },
+                    {
+                        "protectedRangeId": 3,
+                        "namedRangeId": "native-range",
+                        "description": "Named range protection",
+                        "warningOnly": true
+                    },
+                    {
+                        "protectedRangeId": 4,
+                        "range": { "sheetId": 17, "startRowIndex": 1, "endRowIndex": 2, "startColumnIndex": 1, "endColumnIndex": 2 },
+                        "warningOnly": true
+                    }
+                ]
+            }]
+        });
+
+        let imported = import_google_sheets_workbook(&payload.to_string()).unwrap();
+        assert_eq!(imported.workbook.sheets[0].protected_ranges.len(), 1);
+        assert!(imported.workbook.sheets[0].protected_ranges[0].warning_only);
+        assert!(imported.warnings.iter().any(|warning| {
+            warning.code == "protected-range-warning-only" && warning.message.contains("sheet-1!A1")
+        }));
+        assert!(imported.warnings.iter().any(|warning| {
+            warning.code == "google-sheets-protected-range-unimported"
+                && warning.message.contains("sheet-1 protectedRanges[1]")
+                && warning.message.contains("explicit rectangular range")
+        }));
+        assert!(imported.warnings.iter().any(|warning| {
+            warning.code == "google-sheets-protected-range-unimported"
+                && warning.message.contains("sheet-1 protectedRanges[2]")
+                && warning.message.contains("description is absent")
+        }));
+    }
+
+    #[test]
+    fn unsupported_google_features_warn_but_do_not_reject_safe_grid() {
+        let payload = json!({
+            "properties": { "title": "Advanced but usable" },
+            "charts": [{ "chartId": 1 }],
+            "sheets": [{
+                "properties": {
+                    "sheetId": 7,
+                    "title": "Data",
+                    "gridProperties": { "rowCount": 3, "columnCount": 4 }
+                },
+                "filterViews": [{ "filterViewId": 2 }],
+                "conditionalFormats": [
+                    {
+                        "ranges": [{
+                            "sheetId": 7,
+                            "startRowIndex": 0,
+                            "endRowIndex": 1,
+                            "startColumnIndex": 0,
+                            "endColumnIndex": 1
+                        }],
+                        "booleanRule": {
+                            "condition": { "type": "TEXT_EQ", "values": [{ "userEnteredValue": "safe" }] },
+                            "format": { "backgroundColor": { "red": 1.0 } }
+                        }
+                    },
+                    {
+                        "ranges": [{
+                            "sheetId": 7,
+                            "startRowIndex": 1,
+                            "endRowIndex": 2,
+                            "startColumnIndex": 0,
+                            "endColumnIndex": 1
+                        }],
+                        "gradientRule": {}
+                    }
+                ],
+                "data": [{ "rowData": [{ "values": [
+                    { "userEnteredValue": { "stringValue": "safe" } },
+                    {
+                        "userEnteredValue": { "stringValue": "visible label" },
+                        "hyperlink": "https://example.invalid"
+                    },
+                    {
+                        "userEnteredValue": { "formulaValue": "=HYPERLINK(\"https://example.invalid\", \"unsafe\")" },
+                        "hyperlink": "https://example.invalid"
+                    },
+                    {
+                        "userEnteredValue": { "numberValue": 9 },
+                        "pivotTable": { "source": {} }
+                    }
+                ] }] }]
+            }]
+        });
+
+        let imported = import_google_sheets_workbook(&payload.to_string()).unwrap();
+        let sheet = &imported.workbook.sheets[0];
+        assert_eq!(sheet.cells.len(), 2);
+        assert!(sheet
+            .cells
+            .iter()
+            .any(|cell| cell.address == "A1" && cell.user_value == "safe"));
+        // A non-formula label remains useful grid data, but the URL itself is
+        // never imported as a link.
+        assert!(sheet
+            .cells
+            .iter()
+            .any(|cell| cell.address == "B1" && cell.user_value == "visible label"));
+        // Neither an unsupported link formula nor a pivot cache is interpreted
+        // as an ordinary formula/value cell.
+        assert!(!sheet.cells.iter().any(|cell| cell.address == "C1"));
+        assert!(!sheet.cells.iter().any(|cell| cell.address == "D1"));
+
+        let warnings = imported
+            .warnings
+            .iter()
+            .map(|warning| (&warning.code, &warning.message))
+            .collect::<Vec<_>>();
+        assert!(warnings.iter().any(|(code, message)| {
+            *code == "google-sheets-unsupported-charts" && message.contains("workbook")
+        }));
+        assert!(warnings.iter().any(|(code, message)| {
+            *code == "google-sheets-unsupported-filter-views" && message.contains("sheet 1")
+        }));
+        assert!(warnings.iter().any(|(code, message)| {
+            *code == "google-sheets-unsupported-conditional-formats"
+                && message.contains("sheet 1 conditionalFormats[0]")
+                && message.contains("sheet 1 conditionalFormats[1]")
+        }));
+        assert!(warnings.iter().any(|(code, message)| {
+            *code == "google-sheets-unsupported-hyperlink"
+                && message.contains("rowData[0].values[1]")
+                && message.contains("rowData[0].values[2]")
+        }));
+        assert!(warnings.iter().any(|(code, message)| {
+            *code == "google-sheets-unsupported-pivot-table"
+                && message.contains("D1")
+                && message.contains("rowData[0].values[3]")
+        }));
+    }
+
+    #[test]
+    fn google_unsupported_data_source_locations_include_offset_a1_addresses() {
+        let payload = json!({
+            "sheets": [{
+                "properties": {
+                    "sheetId": 1,
+                    "title": "Sparse",
+                    "gridProperties": { "rowCount": 8, "columnCount": 8 }
+                },
+                "data": [{
+                    "startRow": 3,
+                    "startColumn": 2,
+                    "rowData": [{ "values": [
+                        { "userEnteredValue": { "numberValue": 12 }, "dataSourceFormula": {} },
+                        { "userEnteredValue": { "stringValue": "safe" } }
+                    ] }]
+                }]
+            }]
+        });
+
+        let imported = import_google_sheets_workbook(&payload.to_string()).unwrap();
+        let sheet = &imported.workbook.sheets[0];
+        assert!(!sheet.cells.iter().any(|cell| cell.address == "C4"));
+        assert!(sheet
+            .cells
+            .iter()
+            .any(|cell| cell.address == "D4" && cell.user_value == "safe"));
+        let warning = imported
+            .warnings
+            .iter()
+            .find(|warning| warning.code == "google-sheets-unsupported-data-source-formula")
+            .expect("data-source formula warning");
+        assert!(warning.message.contains("C4"));
+        assert!(warning.message.contains("data[0] rowData[0].values[0]"));
+    }
+
+    #[test]
+    fn google_basic_filter_keeps_representable_options_and_discloses_the_rest() {
+        let payload = json!({
+            "sheets": [{
+                "properties": {
+                    "sheetId": 1,
+                    "title": "Filtered",
+                    "gridProperties": { "rowCount": 3, "columnCount": 2 }
+                },
+                "basicFilter": {
+                    "range": {
+                        "sheetId": 1,
+                        "startRowIndex": 0,
+                        "endRowIndex": 3,
+                        "startColumnIndex": 0,
+                        "endColumnIndex": 2
+                    },
+                    "criteria": {
+                        "0": {
+                            "condition": {
+                                "type": "TEXT_CONTAINS",
+                                "values": [{ "userEnteredValue": "keep" }]
+                            },
+                            "hiddenValues": ["not-modelled"]
+                        },
+                        "1": {
+                            "condition": {
+                                "type": "DATE_AFTER",
+                                "values": [{ "userEnteredValue": "2026-01-01" }]
+                            }
+                        }
+                    },
+                    "sortSpecs": [
+                        { "dimensionIndex": 1, "sortOrder": "DESCENDING" },
+                        { "dimensionIndex": 0, "sortOrder": "SORT_ORDER_UNSPECIFIED" }
+                    ]
+                }
+            }]
+        });
+
+        let imported = import_google_sheets_workbook(&payload.to_string()).unwrap();
+        let filter = imported.workbook.sheets[0].filters.first().unwrap();
+        assert_eq!(filter.range, "A1:B3");
+        assert_eq!(filter.criteria.len(), 1);
+        assert_eq!(filter.criteria[0].column, "A");
+        assert_eq!(filter.criteria[0].condition, "text_contains");
+        assert_eq!(filter.criteria[0].value, "keep");
+        assert_eq!(filter.sort_specs.len(), 1);
+        assert_eq!(filter.sort_specs[0].column, "B");
+        assert!(filter.sort_specs[0].descending);
+        assert!(imported.warnings.iter().any(|warning| {
+            warning.code == "google-sheets-basic-filter-criteria-unimported"
+                && warning.message.contains("DATE_AFTER")
+                && warning.message.contains("hidden-value")
+        }));
+        assert!(imported.warnings.iter().any(|warning| {
+            warning.code == "google-sheets-basic-filter-sorts-unimported"
+                && warning.message.contains("SORT_ORDER_UNSPECIFIED")
+        }));
+
+        let exported: Value =
+            serde_json::from_str(&export_google_sheets_workbook(&imported.workbook).unwrap())
+                .unwrap();
+        let filter = &exported["sheets"][0]["basicFilter"];
+        assert_eq!(filter["range"]["startColumnIndex"], 0);
+        assert_eq!(
+            filter["criteria"]["0"]["condition"]["type"],
+            "TEXT_CONTAINS"
+        );
+        assert!(filter["criteria"].get("1").is_none());
+        assert_eq!(filter["sortSpecs"][0]["dimensionIndex"], 1);
+        assert_eq!(filter["sortSpecs"].as_array().unwrap().len(), 1);
+
+        let reread = import_google_sheets_workbook(&exported.to_string()).unwrap();
+        assert_eq!(
+            reread.workbook.sheets[0].filters,
+            imported.workbook.sheets[0].filters
+        );
+    }
+
+    #[test]
+    fn google_cell_wrap_and_vertical_alignment_round_trip() {
+        let payload = json!({
+            "sheets": [{
+                "properties": { "sheetId": 1, "title": "Styled", "gridProperties": { "rowCount": 1, "columnCount": 1 } },
+                "data": [{ "rowData": [{ "values": [{
+                    "userEnteredValue": { "stringValue": "two words" },
+                    "userEnteredFormat": { "wrapStrategy": "WRAP", "verticalAlignment": "MIDDLE" }
+                }] }] }]
+            }]
+        });
+        let imported = import_google_sheets_workbook(&payload.to_string()).unwrap();
+        let cell = &imported.workbook.sheets[0].cells[0];
+        assert_eq!(cell.format.wrap_strategy.as_deref(), Some("wrap"));
+        assert_eq!(cell.format.vertical_align.as_deref(), Some("middle"));
+
+        let exported: Value =
+            serde_json::from_str(&export_google_sheets_workbook(&imported.workbook).unwrap())
+                .unwrap();
+        let format =
+            &exported["sheets"][0]["data"][0]["rowData"][0]["values"][0]["userEnteredFormat"];
+        assert_eq!(format["wrapStrategy"], "WRAP");
+        assert_eq!(format["verticalAlignment"], "MIDDLE");
+    }
+
+    #[test]
+    fn google_cell_alignment_unspecified_and_unowned_values_do_not_reject_the_grid() {
+        let payload = json!({
+            "sheets": [{
+                "properties": { "sheetId": 1, "title": "Aligned", "gridProperties": { "rowCount": 1, "columnCount": 3 } },
+                "data": [{ "rowData": [{ "values": [
+                    {
+                        "userEnteredValue": { "stringValue": "default" },
+                        "userEnteredFormat": {
+                            "horizontalAlignment": "HORIZONTAL_ALIGN_UNSPECIFIED",
+                            "verticalAlignment": "VERTICAL_ALIGN_UNSPECIFIED"
+                        }
+                    },
+                    {
+                        "userEnteredValue": { "stringValue": "kept" },
+                        "userEnteredFormat": {
+                            "horizontalAlignment": "LEFT",
+                            "verticalAlignment": "TOP"
+                        }
+                    },
+                    {
+                        "userEnteredValue": { "stringValue": "disclosed" },
+                        "userEnteredFormat": {
+                            "horizontalAlignment": "JUSTIFY",
+                            "verticalAlignment": "DISTRIBUTED"
+                        }
+                    }
+                ] }] }]
+            }]
+        });
+
+        let imported = import_google_sheets_workbook(&payload.to_string()).unwrap();
+        let cells = &imported.workbook.sheets[0].cells;
+        assert_eq!(cells.len(), 3);
+        assert_eq!(cells[0].format.horizontal_align, None);
+        assert_eq!(cells[0].format.vertical_align, None);
+        assert_eq!(cells[1].format.horizontal_align.as_deref(), Some("left"));
+        assert_eq!(cells[1].format.vertical_align.as_deref(), Some("top"));
+        assert_eq!(cells[2].format.horizontal_align, None);
+        assert_eq!(cells[2].format.vertical_align, None);
+        assert!(imported.warnings.iter().any(|warning| {
+            warning.code == "google-sheets-unsupported-horizontal-alignment"
+                && warning.message.contains("C1")
+                && warning.message.contains("JUSTIFY")
+        }));
+        assert!(imported.warnings.iter().any(|warning| {
+            warning.code == "google-sheets-unsupported-vertical-alignment"
+                && warning.message.contains("C1")
+                && warning.message.contains("DISTRIBUTED")
+        }));
+        assert!(!imported.warnings.iter().any(|warning| {
+            warning.code.starts_with("google-sheets-unsupported-") && warning.message.contains("A1")
+        }));
+    }
+
+    #[test]
+    fn google_custom_number_format_pattern_round_trips_without_becoming_a_type() {
+        let pattern = "$#,##0.00;[Red]($#,##0.00)";
+        let payload = json!({
+            "sheets": [{
+                "properties": {
+                    "sheetId": 1,
+                    "title": "Accounting",
+                    "gridProperties": { "rowCount": 1, "columnCount": 2 }
+                },
+                "data": [{ "rowData": [{ "values": [
+                    {
+                        "userEnteredValue": { "numberValue": 12.5 },
+                        "userEnteredFormat": {
+                            "numberFormat": { "type": "CURRENCY", "pattern": pattern }
+                        }
+                    },
+                    {
+                        "userEnteredValue": { "numberValue": 0.25 },
+                        "userEnteredFormat": { "numberFormat": { "type": "PERCENT" } }
+                    }
+                ] }] }]
+            }]
+        });
+
+        let imported = import_google_sheets_workbook(&payload.to_string()).unwrap();
+        let cells = &imported.workbook.sheets[0].cells;
+        assert_eq!(cells[0].format.number_format.as_deref(), Some(pattern));
+        assert_eq!(cells[1].format.number_format.as_deref(), Some("PERCENT"));
+
+        let exported: Value =
+            serde_json::from_str(&export_google_sheets_workbook(&imported.workbook).unwrap())
+                .unwrap();
+        let values = &exported["sheets"][0]["data"][0]["rowData"][0]["values"];
+        assert_eq!(
+            values[0]["userEnteredFormat"]["numberFormat"]["type"],
+            "NUMBER"
+        );
+        assert_eq!(
+            values[0]["userEnteredFormat"]["numberFormat"]["pattern"],
+            pattern
+        );
+        assert_eq!(
+            values[1]["userEnteredFormat"]["numberFormat"]["type"],
+            "PERCENT"
+        );
+        assert!(values[1]["userEnteredFormat"]["numberFormat"]
+            .get("pattern")
+            .is_none());
+
+        let reread = import_google_sheets_workbook(&exported.to_string()).unwrap();
+        assert_eq!(
+            reread.workbook.sheets[0].cells[0].format.number_format,
+            imported.workbook.sheets[0].cells[0].format.number_format
+        );
+        assert_eq!(
+            reread.workbook.sheets[0].cells[1].format.number_format,
+            imported.workbook.sheets[0].cells[1].format.number_format
+        );
+    }
+
+    #[test]
+    fn google_range_validation_and_note_round_trip_without_coercion() {
+        let payload = json!({
+            "sheets": [
+                {
+                    "properties": {
+                        "sheetId": 1,
+                        "title": "Data",
+                        "gridProperties": { "rowCount": 2, "columnCount": 2 }
+                    },
+                    "data": [{ "rowData": [{ "values": [
+                        {
+                            "userEnteredValue": { "stringValue": "Red" },
+                            "note": "Native Google note",
+                            "dataValidation": {
+                                "condition": {
+                                    "type": "ONE_OF_RANGE",
+                                    "values": [{ "userEnteredValue": "Choices!$A$1:$A$2" }]
+                                },
+                                "strict": true,
+                                "showCustomUi": false
+                            }
+                        },
+                        {
+                            "userEnteredValue": { "stringValue": "ordinary data" },
+                            "dataValidation": {
+                                "condition": {
+                                    "type": "DATE_AFTER",
+                                    "values": [{ "userEnteredValue": "2026-01-01" }]
+                                },
+                                "strict": true
+                            }
+                        }
+                    ] }] }]
+                },
+                {
+                    "properties": {
+                        "sheetId": 2,
+                        "title": "Choices",
+                        "gridProperties": { "rowCount": 2, "columnCount": 1 }
+                    },
+                    "data": [{ "rowData": [
+                        { "values": [{ "userEnteredValue": { "stringValue": "Red" } }] },
+                        { "values": [{ "userEnteredValue": { "stringValue": "Green" } }] }
+                    ] }]
+                }
+            ]
+        });
+
+        let imported = import_google_sheets_workbook(&payload.to_string()).unwrap();
+        let data = &imported.workbook.sheets[0];
+        let a1 = data.cells.iter().find(|cell| cell.address == "A1").unwrap();
+        assert_eq!(a1.validation.as_ref().unwrap().kind, "one_of_range");
+        assert_eq!(
+            a1.validation.as_ref().unwrap().values,
+            ["Choices!$A$1:$A$2"]
+        );
+        assert!(a1.validation.as_ref().unwrap().strict);
+        assert!(!a1.validation.as_ref().unwrap().show_dropdown);
+        assert_eq!(a1.comments[0].author, "Google Sheets note");
+        assert_eq!(a1.comments[0].body, "Native Google note");
+        let expected_validation = a1.validation.clone();
+        // The unsupported rule did not poison the nearby primitive cell.
+        assert!(data.cells.iter().any(|cell| cell.address == "B1"));
+        assert!(data
+            .cells
+            .iter()
+            .find(|cell| cell.address == "B1")
+            .unwrap()
+            .validation
+            .is_none());
+        assert!(imported.warnings.iter().any(|warning| {
+            warning.code == "google-sheets-data-validation-unimported"
+                && warning.message.contains("B1")
+                && warning.message.contains("DATE_AFTER")
+        }));
+
+        let exported: Value =
+            serde_json::from_str(&export_google_sheets_workbook(&imported.workbook).unwrap())
+                .unwrap();
+        let a1 = &exported["sheets"][0]["data"][0]["rowData"][0]["values"][0];
+        assert_eq!(a1["dataValidation"]["condition"]["type"], "ONE_OF_RANGE");
+        assert_eq!(
+            a1["dataValidation"]["condition"]["values"][0]["userEnteredValue"],
+            "Choices!$A$1:$A$2"
+        );
+        assert_eq!(a1["dataValidation"]["strict"], true);
+        assert_eq!(a1["dataValidation"]["showCustomUi"], false);
+        assert_eq!(a1["note"], "Native Google note");
+
+        let reread = import_google_sheets_workbook(&exported.to_string()).unwrap();
+        let reread_a1 = reread.workbook.sheets[0]
+            .cells
+            .iter()
+            .find(|cell| cell.address == "A1")
+            .unwrap();
+        assert_eq!(reread_a1.validation, expected_validation);
+        assert_eq!(reread_a1.comments[0].body, "Native Google note");
+    }
+
+    #[test]
+    fn google_sheet_properties_and_axis_metadata_round_trip() {
+        let payload = json!({
+            "sheets": [{
+                "properties": {
+                    "sheetId": 4,
+                    "title": "Metadata",
+                    "hidden": true,
+                    "tabColorStyle": {
+                        "rgbColor": { "red": 0.25, "green": 0.5, "blue": 0.75 }
+                    },
+                    "gridProperties": {
+                        "rowCount": 3,
+                        "columnCount": 3,
+                        "frozenRowCount": 1,
+                        "frozenColumnCount": 2
+                    }
+                },
+                "data": [{
+                    "startRow": 0,
+                    "startColumn": 0,
+                    "rowMetadata": [
+                        {},
+                        { "pixelSize": 37, "hiddenByUser": true },
+                        {}
+                    ],
+                    "columnMetadata": [
+                        {},
+                        {},
+                        { "pixelSize": 143, "hiddenByUser": true }
+                    ],
+                    "rowData": [{ "values": [{ "userEnteredValue": { "stringValue": "kept" } }] }]
+                }]
+            }, {
+                "properties": {
+                    "sheetId": 5,
+                    "title": "Visible companion",
+                    "hidden": false,
+                    "gridProperties": { "rowCount": 1, "columnCount": 1 }
+                }
+            }]
+        });
+
+        let imported = import_google_sheets_workbook(&payload.to_string()).unwrap();
+        let sheet = &imported.workbook.sheets[0];
+        assert!(sheet.hidden);
+        assert_eq!(sheet.tab_color.as_deref(), Some("#4080bf"));
+        assert_eq!(sheet.row_heights.get("2"), Some(&37));
+        assert_eq!(sheet.column_widths.get("C"), Some(&143));
+        assert_eq!(sheet.hidden_rows, ["2"]);
+        assert_eq!(sheet.hidden_columns, ["C"]);
+        assert_eq!(sheet.frozen_rows, 1);
+        assert_eq!(sheet.frozen_columns, 2);
+
+        let exported: Value =
+            serde_json::from_str(&export_google_sheets_workbook(&imported.workbook).unwrap())
+                .unwrap();
+        let properties = &exported["sheets"][0]["properties"];
+        assert_eq!(properties["hidden"], true);
+        assert_eq!(
+            properties["gridProperties"],
+            json!({
+                "rowCount": 3,
+                "columnCount": 3,
+                "frozenRowCount": 1,
+                "frozenColumnCount": 2,
+            })
+        );
+        assert_eq!(
+            properties["tabColorStyle"],
+            json!({ "rgbColor": {
+                "red": 64.0 / 255.0,
+                "green": 128.0 / 255.0,
+                "blue": 191.0 / 255.0,
+            }})
+        );
+        assert!(properties.get("tabColor").is_none());
+        let data = &exported["sheets"][0]["data"][0];
+        assert_eq!(
+            data["rowMetadata"][1],
+            json!({ "pixelSize": 37, "hiddenByUser": true })
+        );
+        assert_eq!(
+            data["columnMetadata"][2],
+            json!({ "pixelSize": 143, "hiddenByUser": true })
+        );
+
+        let reread = import_google_sheets_workbook(&exported.to_string()).unwrap();
+        let reread = &reread.workbook.sheets[0];
+        assert!(reread.hidden);
+        assert_eq!(reread.tab_color, sheet.tab_color);
+        assert_eq!(reread.row_heights, sheet.row_heights);
+        assert_eq!(reread.column_widths, sheet.column_widths);
+        assert_eq!(reread.hidden_rows, sheet.hidden_rows);
+        assert_eq!(reread.hidden_columns, sheet.hidden_columns);
+        assert_eq!(reread.frozen_rows, sheet.frozen_rows);
+        assert_eq!(reread.frozen_columns, sheet.frozen_columns);
+    }
+
+    #[test]
+    fn google_sheet_visibility_requires_a_visible_tab_at_both_native_boundaries() {
+        let all_hidden = json!({
+            "sheets": [{
+                "properties": {
+                    "sheetId": 7,
+                    "title": "Hidden",
+                    "hidden": true,
+                    "gridProperties": { "rowCount": 1, "columnCount": 1 }
+                }
+            }]
+        });
+        let error = match import_google_sheets_workbook(&all_hidden.to_string()) {
+            Ok(_) => panic!("an all-hidden native workbook is invalid"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("every sheet hidden"));
+        assert!(error.to_string().contains("at least one visible sheet"));
+
+        let mut workbook = SpreadsheetWorkbook::sample();
+        workbook.title = "Hidden export".to_string();
+        workbook.sheets[0].hidden = true;
+        let error = export_google_sheets_workbook(&workbook).unwrap_err();
+        assert!(error.to_string().contains("every OpenDoc sheet is hidden"));
+        assert!(error.to_string().contains("at least one visible sheet"));
+    }
+
+    #[test]
+    fn google_current_tab_color_style_beats_deprecated_tab_color() {
+        let payload = json!({
+            "sheets": [{
+                "properties": {
+                    "sheetId": 0,
+                    "title": "Current style",
+                    "tabColor": { "red": 1.0, "green": 0.0, "blue": 0.0 },
+                    "tabColorStyle": {
+                        "rgbColor": { "red": 0.0, "green": 0.5, "blue": 1.0 }
+                    },
+                    "gridProperties": { "rowCount": 1, "columnCount": 1 }
+                }
+            }]
+        });
+
+        let imported = import_google_sheets_workbook(&payload.to_string()).unwrap();
+        assert_eq!(
+            imported.workbook.sheets[0].tab_color.as_deref(),
+            Some("#0080ff")
+        );
+
+        let exported: Value =
+            serde_json::from_str(&export_google_sheets_workbook(&imported.workbook).unwrap())
+                .unwrap();
+        let properties = &exported["sheets"][0]["properties"];
+        assert_eq!(
+            properties["tabColorStyle"]["rgbColor"],
+            json!({ "red": 0.0, "green": 128.0 / 255.0, "blue": 1.0 })
+        );
+        assert!(properties.get("tabColor").is_none());
+    }
+
+    #[test]
+    fn google_deprecated_tab_color_remains_a_read_only_compatibility_input() {
+        let payload = json!({
+            "sheets": [{
+                "properties": {
+                    "sheetId": 0,
+                    "title": "Legacy",
+                    "tabColor": { "red": 1.0, "green": 0.0, "blue": 0.0 },
+                    "gridProperties": { "rowCount": 1, "columnCount": 1 }
+                }
+            }]
+        });
+
+        let imported = import_google_sheets_workbook(&payload.to_string()).unwrap();
+        assert_eq!(
+            imported.workbook.sheets[0].tab_color.as_deref(),
+            Some("#ff0000")
+        );
+        let exported: Value =
+            serde_json::from_str(&export_google_sheets_workbook(&imported.workbook).unwrap())
+                .unwrap();
+        let properties = &exported["sheets"][0]["properties"];
+        assert_eq!(
+            properties["tabColorStyle"]["rgbColor"],
+            json!({ "red": 1.0, "green": 0.0, "blue": 0.0 })
+        );
+        assert!(properties.get("tabColor").is_none());
+    }
+
+    #[test]
+    fn google_themed_tab_color_does_not_fall_back_to_deprecated_rgb() {
+        let payload = json!({
+            "sheets": [{
+                "properties": {
+                    "sheetId": 0,
+                    "title": "Themed",
+                    "tabColor": { "red": 1.0, "green": 0.0, "blue": 0.0 },
+                    "tabColorStyle": { "themeColor": "ACCENT1" },
+                    "gridProperties": { "rowCount": 1, "columnCount": 1 }
+                }
+            }]
+        });
+
+        let imported = import_google_sheets_workbook(&payload.to_string()).unwrap();
+        assert!(imported.workbook.sheets[0].tab_color.is_none());
+        assert!(imported
+            .warnings
+            .iter()
+            .any(|warning| { warning.code == "google-sheets-unsupported-tab-theme-color" }));
+    }
+
+    #[test]
+    fn google_unmodelled_nondefault_grid_properties_are_disclosed() {
+        let payload = json!({
+            "sheets": [{
+                "properties": {
+                    "gridProperties": {
+                        "rowCount": 2,
+                        "columnCount": 2,
+                        "hideGridlines": true,
+                        "rowGroupControlAfter": true,
+                        "columnGroupControlAfter": true
+                    }
+                }
+            }]
+        });
+
+        let imported = import_google_sheets_workbook(&payload.to_string()).unwrap();
+        assert_eq!(imported.workbook.sheets[0].rows.len(), 2);
+        assert_eq!(imported.workbook.sheets[0].columns.len(), 2);
+        let warning = imported
+            .warnings
+            .iter()
+            .find(|warning| warning.code == "google-sheets-unsupported-grid-properties")
+            .expect("one combined grid-properties loss warning");
+        assert!(warning.message.contains("hideGridlines"));
+        assert!(warning.message.contains("rowGroupControlAfter"));
+        assert!(warning.message.contains("columnGroupControlAfter"));
+    }
+
+    #[test]
+    fn google_non_wrap_strategy_is_disclosed_not_coerced() {
+        let payload = json!({ "sheets": [{
+            "properties": { "gridProperties": { "rowCount": 1, "columnCount": 1 } },
+            "data": [{ "rowData": [{ "values": [{
+                "userEnteredValue": { "stringValue": "plain" },
+                "userEnteredFormat": { "wrapStrategy": "OVERFLOW_CELL" }
+            }] }] }]
+        }] });
+        let imported = import_google_sheets_workbook(&payload.to_string()).unwrap();
+        assert_eq!(
+            imported.workbook.sheets[0].cells[0].format.wrap_strategy,
+            None
+        );
+        assert!(imported.warnings.iter().any(|warning| {
+            warning.code == "google-sheets-unsupported-wrap-strategy"
+                && warning.message.contains("A1")
+        }));
+    }
+
+    #[test]
+    fn unsupported_cell_feature_has_one_family_warning_with_all_locations() {
+        let payload = json!({
+            "sheets": [{
+                "properties": { "gridProperties": { "rowCount": 1, "columnCount": 2 } },
+                "data": [{ "rowData": [{ "values": [
+                    { "userEnteredValue": { "stringValue": "one" }, "chipRuns": [] },
+                    { "userEnteredValue": { "stringValue": "two" }, "chipRuns": [] }
+                ] }] }]
+            }]
+        });
+        let imported = import_google_sheets_workbook(&payload.to_string()).unwrap();
+        let chip_warnings = imported
+            .warnings
+            .iter()
+            .filter(|warning| warning.code == "google-sheets-unsupported-chip-runs")
+            .collect::<Vec<_>>();
+        assert_eq!(chip_warnings.len(), 1);
+        assert!(chip_warnings[0].message.contains("rowData[0].values[0]"));
+        assert!(chip_warnings[0].message.contains("rowData[0].values[1]"));
+        assert_eq!(imported.workbook.sheets[0].cells.len(), 2);
+    }
+
+    #[test]
+    fn google_sheet_properties_index_controls_tab_order_and_round_trips() {
+        // The response array is deliberately not tab order. Named ranges also
+        // prove that reordering happens before cross-sheet identities resolve.
+        let payload = json!({
+            "sheets": [
+                { "properties": { "sheetId": 41, "index": 1, "title": "Second", "gridProperties": { "rowCount": 1, "columnCount": 1 } } },
+                { "properties": { "sheetId": 12, "index": 0, "title": "First", "gridProperties": { "rowCount": 1, "columnCount": 1 } } }
+            ],
+            "namedRanges": [{
+                "namedRangeId": "first-cell",
+                "name": "FirstCell",
+                "range": { "sheetId": 12, "endRowIndex": 1, "endColumnIndex": 1 }
+            }]
+        });
+
+        let imported = import_google_sheets_workbook(&payload.to_string()).unwrap();
+        assert_eq!(
+            imported
+                .workbook
+                .sheets
+                .iter()
+                .map(|sheet| (sheet.id.as_str(), sheet.title.as_str()))
+                .collect::<Vec<_>>(),
+            [("sheet-1", "First"), ("sheet-2", "Second")]
+        );
+        assert_eq!(imported.workbook.named_ranges[0].sheet_id, "sheet-1");
+
+        let exported: Value =
+            serde_json::from_str(&export_google_sheets_workbook(&imported.workbook).unwrap())
+                .unwrap();
+        assert_eq!(exported["sheets"][0]["properties"]["index"], json!(0));
+        assert_eq!(exported["sheets"][1]["properties"]["index"], json!(1));
+        let reread = import_google_sheets_workbook(&exported.to_string()).unwrap();
+        assert_eq!(
+            reread
+                .workbook
+                .sheets
+                .iter()
+                .map(|sheet| sheet.title.as_str())
+                .collect::<Vec<_>>(),
+            ["First", "Second"]
+        );
+    }
+
+    #[test]
+    fn google_sheet_properties_index_must_be_complete_unique_and_contiguous() {
+        let duplicate = json!({ "sheets": [
+            { "properties": { "index": 0 } },
+            { "properties": { "index": 0 } }
+        ] });
+        let error = match import_google_sheets_workbook(&duplicate.to_string()) {
+            Ok(_) => panic!("duplicate tab indexes must be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("unique contiguous tab order"));
+
+        let mixed = json!({ "sheets": [
+            { "properties": { "index": 0 } },
+            { "properties": {} }
+        ] });
+        let error = match import_google_sheets_workbook(&mixed.to_string()) {
+            Ok(_) => panic!("mixed indexed and unindexed sheets must be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("index is missing on part"));
+    }
 }
