@@ -1056,6 +1056,11 @@ fn classify(operation: &Operation) -> OperationClass<'_> {
         | Kind::InsertBlock { .. }
         | Kind::DeleteBlock { .. }
         | Kind::MoveBlock { .. }
+        | Kind::InsertSection { .. }
+        | Kind::DeleteSection { .. }
+        | Kind::SetSectionPageSetup { .. }
+        | Kind::SetSectionFurniture { .. }
+        | Kind::ClearSectionFurnitureOverride { .. }
         | Kind::SetBlockTextStyle { .. }
         | Kind::InsertInline { .. }
         | Kind::MoveInlineToBlock { .. }

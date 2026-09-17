@@ -61,7 +61,8 @@ pub use lists::{
     ListItemNumber, ListMarker, ListNumbering, OpenList, STYLED_LIST_DEPTHS,
 };
 pub use paint::{
-    Estimate, EstimateReason, PaintItem, PaintRun, PaintedDocument, PaintedPage, Rgb, RunDecoration,
+    Estimate, EstimateReason, PageContext, PaintItem, PaintRun, PaintedDocument, PaintedPage, Rgb,
+    RunDecoration,
 };
 use paint::{Local, LocalRun};
 use style::TypeScale;
@@ -175,6 +176,7 @@ pub fn layout_painted_document(document: &Document) -> PaintedDocument {
     // The trailer's placements are not placements of blocks a caller can name,
     // so they do not go out with the ones that are.
     layout.blocks.truncate(body);
+    apply_page_contexts(document, &layout, &mut pages);
     engine.paint_furniture(document, &layout, &mut pages);
     let warnings = engine.paint_positioned_images(document, &layout, &mut pages, setup);
     PaintedDocument {
@@ -184,6 +186,49 @@ pub fn layout_painted_document(document: &Document) -> PaintedDocument {
         blocks: layout.blocks,
         estimates,
         warnings,
+    }
+}
+
+/// Attach source-owned section context after pagination has assigned each
+/// top-level block to a physical page. A section break itself still belongs to
+/// the page before the break; the following block opens page zero of the new
+/// section. This deliberately leaves global page-number fields unchanged.
+fn apply_page_contexts(document: &Document, layout: &DocumentLayout, pages: &mut [PaintedPage]) {
+    let root_id = document.root_section_id();
+    let root_setup = document
+        .sections
+        .get(&root_id)
+        .map(|section| section.page_setup)
+        .unwrap_or(document.page_setup);
+    let mut starts = vec![(0u32, root_id, root_setup)];
+    for (index, block) in document.blocks.iter().enumerate() {
+        let BlockKind::SectionBreak { section_id } = &block.kind else {
+            continue;
+        };
+        let Some(next) = document.blocks.get(index + 1) else {
+            continue;
+        };
+        let Some(placement) = layout.placement(next.id.as_str()) else {
+            continue;
+        };
+        let Some(section) = document.sections.get(section_id) else {
+            continue;
+        };
+        starts.push((placement.page, section_id.clone(), section.page_setup));
+    }
+    starts.sort_by_key(|(page, _, _)| *page);
+    for (page_index, page) in pages.iter_mut().enumerate() {
+        let page_index = page_index as u32;
+        let (start_page, section_id, page_setup) = starts
+            .iter()
+            .rev()
+            .find(|(start, _, _)| *start <= page_index)
+            .expect("root context always starts at page zero");
+        page.context = Some(PageContext {
+            section_id: section_id.clone(),
+            section_page_index: page_index - *start_page,
+            page_setup: *page_setup,
+        });
     }
 }
 

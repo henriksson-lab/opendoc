@@ -155,6 +155,51 @@ pub fn invert_operation(before: &Document, kind: &OperationKind) -> Inversion {
                 })
             }
         }
+        OperationKind::SetSectionPageSetup {
+            section_id,
+            page_setup,
+        } => match before.sections.get(section_id) {
+            Some(section) if section.page_setup != *page_setup => {
+                one(OperationKind::SetSectionPageSetup {
+                    section_id: section_id.clone(),
+                    page_setup: section.page_setup,
+                })
+            }
+            _ => Inversion::Nothing,
+        },
+        OperationKind::SetSectionFurniture {
+            section_id,
+            slot,
+            blocks,
+        } => match before.sections.get(section_id) {
+            Some(section) if section.furniture(*slot) != blocks => {
+                if slot.is_override() && !section.has_furniture_override(*slot) {
+                    one(OperationKind::ClearSectionFurnitureOverride {
+                        section_id: section_id.clone(),
+                        slot: *slot,
+                    })
+                } else {
+                    one(OperationKind::SetSectionFurniture {
+                        section_id: section_id.clone(),
+                        slot: *slot,
+                        blocks: section.furniture(*slot).to_vec(),
+                    })
+                }
+            }
+            _ => Inversion::Nothing,
+        },
+        OperationKind::ClearSectionFurnitureOverride { section_id, slot } => {
+            match before.sections.get(section_id) {
+                Some(section) if slot.is_override() && section.has_furniture_override(*slot) => {
+                    one(OperationKind::SetSectionFurniture {
+                        section_id: section_id.clone(),
+                        slot: *slot,
+                        blocks: section.furniture(*slot).to_vec(),
+                    })
+                }
+                _ => Inversion::Nothing,
+            }
+        }
         OperationKind::UpdateCitationStyle { style, locale } => {
             let database = &before.citation_database;
             if *style == database.style && *locale == database.locale {
@@ -197,6 +242,39 @@ pub fn invert_operation(before: &Document, kind: &OperationKind) -> Inversion {
                 }),
                 None => Inversion::Nothing,
             }
+        }
+        OperationKind::InsertSection {
+            boundary_id,
+            section,
+            ..
+        } => {
+            if before.sections.contains_key(&section.id)
+                || block_anywhere(&before.blocks, boundary_id).is_some()
+            {
+                Inversion::Nothing
+            } else {
+                one(OperationKind::DeleteSection {
+                    section_id: section.id.clone(),
+                })
+            }
+        }
+        OperationKind::DeleteSection { section_id } => {
+            let Some(section) = before.sections.get(section_id) else {
+                return Inversion::Nothing;
+            };
+            let Some(index) = before.blocks.iter().position(|block| {
+                matches!(&block.kind, BlockKind::SectionBreak { section_id: id } if id == section_id)
+            }) else {
+                return Inversion::Nothing;
+            };
+            let Some(next) = before.blocks.get(index + 1) else {
+                return Inversion::Nothing;
+            };
+            one(OperationKind::InsertSection {
+                before_block_id: next.id.clone(),
+                boundary_id: before.blocks[index].id.clone(),
+                section: section.clone(),
+            })
         }
         OperationKind::SetBlockTextStyle { block_id, style } => {
             match block_anywhere(&before.blocks, block_id).map(|block| &block.kind) {

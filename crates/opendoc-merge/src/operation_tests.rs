@@ -2,6 +2,7 @@
 
 use crate::causal::{ActorId, OperationId};
 use crate::inline_ops::inline_id;
+use crate::inverse::{invert_operation, Inversion};
 use crate::merge::merge_operations;
 use crate::operation::{Operation, OperationKind};
 use crate::test_support::assert_mark_kinds;
@@ -148,6 +149,153 @@ fn generic_block_operations_cannot_separate_a_section_from_its_record() {
             .count(),
         2
     );
+}
+
+#[test]
+fn section_insert_delete_and_inverse_keep_the_boundary_and_record_atomic() {
+    let mut base = Document::new("Section operation");
+    let first = Block::paragraph("first");
+    let second = Block::paragraph("second");
+    let second_id = second.id.clone();
+    base.blocks = vec![first, second];
+    let section_id = StableId::parse("section-two").unwrap();
+    let section = Section {
+        id: section_id.clone(),
+        page_setup: Default::default(),
+        header: Vec::new(),
+        footer: Vec::new(),
+        first_page_header: None,
+        first_page_footer: None,
+        even_page_header: None,
+        even_page_footer: None,
+    };
+    let insert_kind = OperationKind::InsertSection {
+        before_block_id: second_id,
+        boundary_id: StableId::parse("section-break").unwrap(),
+        section: section.clone(),
+    };
+    let inserted = merge_operations(
+        &base,
+        &[vec![Operation {
+            id: OperationId {
+                actor: ActorId("author".to_string()),
+                seq: 1,
+            },
+            kind: insert_kind.clone(),
+            context: None,
+        }]],
+    )
+    .unwrap();
+    inserted.document.validate().unwrap();
+    assert_eq!(inserted.document.sections.get(&section_id), Some(&section));
+    assert!(matches!(
+        inserted.document.blocks[1].kind,
+        BlockKind::SectionBreak { section_id: ref id } if id == &section_id
+    ));
+    assert_eq!(
+        invert_operation(&base, &insert_kind),
+        Inversion::Operations(vec![OperationKind::DeleteSection {
+            section_id: section_id.clone(),
+        }])
+    );
+
+    let delete_kind = OperationKind::DeleteSection {
+        section_id: section_id.clone(),
+    };
+    let inverse = invert_operation(&inserted.document, &delete_kind);
+    assert_eq!(
+        inverse,
+        Inversion::Operations(vec![insert_kind.clone()]),
+        "delete inverse restores the exact section and boundary identity"
+    );
+    let deleted = merge_operations(
+        &inserted.document,
+        &[vec![Operation {
+            id: OperationId {
+                actor: ActorId("author".to_string()),
+                seq: 2,
+            },
+            kind: delete_kind,
+            context: None,
+        }]],
+    )
+    .unwrap();
+    assert!(deleted.document.sections.len() == 1);
+    assert_eq!(deleted.document.blocks, base.blocks);
+    deleted.document.validate().unwrap();
+}
+
+#[test]
+fn section_configuration_writes_are_scoped_and_keep_override_semantics() {
+    let base = Document::new("Section configuration");
+    let root_id = base.root_section_id();
+    let mut a4 = opendoc_core::PageSetup::default();
+    a4.width = opendoc_core::Length::from_twips(11906).unwrap();
+    a4.height = opendoc_core::Length::from_twips(16838).unwrap();
+    let header = Block::paragraph("first-page header");
+    let setup = Operation {
+        id: OperationId {
+            actor: ActorId("author".to_string()),
+            seq: 1,
+        },
+        kind: OperationKind::SetSectionPageSetup {
+            section_id: root_id.clone(),
+            page_setup: a4,
+        },
+        context: None,
+    };
+    let furniture = Operation {
+        id: OperationId {
+            actor: ActorId("author".to_string()),
+            seq: 2,
+        },
+        kind: OperationKind::SetSectionFurniture {
+            section_id: root_id.clone(),
+            slot: opendoc_core::HeaderFooterSlot::FirstPageHeader,
+            blocks: vec![header.clone()],
+        },
+        context: None,
+    };
+    let configured = merge_operations(&base, &[vec![setup], vec![furniture]]).unwrap();
+    let root = &configured.document.sections[&root_id];
+    assert_eq!(root.page_setup, a4);
+    assert_eq!(
+        root.first_page_header.as_deref(),
+        Some(std::slice::from_ref(&header))
+    );
+    assert_eq!(
+        invert_operation(
+            &configured.document,
+            &OperationKind::ClearSectionFurnitureOverride {
+                section_id: root_id.clone(),
+                slot: opendoc_core::HeaderFooterSlot::FirstPageHeader,
+            },
+        ),
+        Inversion::Operations(vec![OperationKind::SetSectionFurniture {
+            section_id: root_id.clone(),
+            slot: opendoc_core::HeaderFooterSlot::FirstPageHeader,
+            blocks: vec![header],
+        }])
+    );
+    let cleared = merge_operations(
+        &configured.document,
+        &[vec![Operation {
+            id: OperationId {
+                actor: ActorId("author".to_string()),
+                seq: 3,
+            },
+            kind: OperationKind::ClearSectionFurnitureOverride {
+                section_id: root_id.clone(),
+                slot: opendoc_core::HeaderFooterSlot::FirstPageHeader,
+            },
+            context: None,
+        }]],
+    )
+    .unwrap();
+    assert!(cleared.document.sections[&root_id]
+        .first_page_header
+        .is_none());
+    cleared.document.validate().unwrap();
 }
 
 #[test]

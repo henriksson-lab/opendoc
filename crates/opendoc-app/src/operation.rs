@@ -267,6 +267,59 @@ fn validate_rich_document_operation_source(kind: &OperationKind) -> Result<(), A
                 .validate_isolated()
                 .map_err(|err| AppApiError::Format(err.to_string()))
         }
+        OperationKind::InsertSection {
+            before_block_id,
+            boundary_id,
+            section,
+        } => {
+            validate_stable_operation_id(before_block_id)?;
+            validate_stable_operation_id(boundary_id)?;
+            validate_stable_operation_id(&section.id)?;
+            section
+                .page_setup
+                .validate()
+                .map_err(|err| AppApiError::Format(err.to_string()))?;
+            for slot in opendoc_core::HeaderFooterSlot::ALL {
+                for block in section.furniture(slot) {
+                    block
+                        .validate_isolated()
+                        .map_err(|err| AppApiError::Format(err.to_string()))?;
+                }
+            }
+            Ok(())
+        }
+        OperationKind::DeleteSection { section_id } => validate_stable_operation_id(section_id),
+        OperationKind::SetSectionPageSetup {
+            section_id,
+            page_setup,
+        } => {
+            validate_stable_operation_id(section_id)?;
+            page_setup
+                .validate()
+                .map_err(|err| AppApiError::Format(err.to_string()))
+        }
+        OperationKind::SetSectionFurniture {
+            section_id, blocks, ..
+        } => {
+            validate_stable_operation_id(section_id)?;
+            for block in blocks {
+                block
+                    .validate_isolated()
+                    .map_err(|err| AppApiError::Format(err.to_string()))?;
+            }
+            Ok(())
+        }
+        OperationKind::ClearSectionFurnitureOverride { section_id, slot } => {
+            validate_stable_operation_id(section_id)?;
+            if slot.is_override() {
+                Ok(())
+            } else {
+                Err(AppApiError::Format(format!(
+                    "{} is ordinary furniture and cannot inherit from itself",
+                    slot.as_str()
+                )))
+            }
+        }
         OperationKind::DeleteBlock { block_id } => validate_stable_operation_id(block_id),
         OperationKind::MoveBlock { block_id, position } => {
             validate_stable_operation_id(block_id)?;
@@ -877,6 +930,11 @@ pub(crate) fn rich_document_operation_kind(kind: &OperationKind) -> &'static str
         OperationKind::InsertBlock { .. } => "insert-block",
         OperationKind::DeleteBlock { .. } => "delete-block",
         OperationKind::MoveBlock { .. } => "move-block",
+        OperationKind::InsertSection { .. } => "insert-section",
+        OperationKind::DeleteSection { .. } => "delete-section",
+        OperationKind::SetSectionPageSetup { .. } => "set-section-page-setup",
+        OperationKind::SetSectionFurniture { .. } => "set-section-furniture",
+        OperationKind::ClearSectionFurnitureOverride { .. } => "clear-section-furniture-override",
         OperationKind::InsertInline { .. } => "insert-inline",
         OperationKind::MoveInlineToBlock { .. } => "move-inline-to-block",
         OperationKind::AddMark { .. } => "add-mark",

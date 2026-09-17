@@ -43,8 +43,9 @@ use crate::validate::{
     table_row_payload_valid_for_merge,
 };
 use opendoc_core::{
-    Anchor, CommentActivityEntry, CommentActivityKind, CommentHistoryEntry, Document, Mark,
-    ModelWarning, StableId, SuggestionKind, SuggestionState, MAX_COMMENT_ACTIVITY_ENTRIES,
+    Anchor, Block, BlockKind, BlockProperties, CommentActivityEntry, CommentActivityKind,
+    CommentHistoryEntry, Document, Mark, ModelWarning, Section, StableId, SuggestionKind,
+    SuggestionState, MAX_COMMENT_ACTIVITY_ENTRIES,
 };
 
 #[derive(Clone)]
@@ -228,6 +229,58 @@ pub(crate) fn apply(
                         message: format!("moving block {block_id} would leave a table cell empty"),
                     }),
                 }
+            }
+        }
+        OperationKind::InsertSection {
+            before_block_id,
+            boundary_id,
+            section,
+        } => {
+            if let Err(message) = insert_section(document, &before_block_id, &boundary_id, &section)
+            {
+                warnings.push(ModelWarning {
+                    code: "invalid-section-insert".to_string(),
+                    message,
+                });
+            }
+        }
+        OperationKind::DeleteSection { section_id } => {
+            if let Err(message) = delete_section(document, &section_id) {
+                warnings.push(ModelWarning {
+                    code: "invalid-section-delete".to_string(),
+                    message,
+                });
+            }
+        }
+        OperationKind::SetSectionPageSetup {
+            section_id,
+            page_setup,
+        } => {
+            if let Err(message) = set_section_page_setup(document, &section_id, page_setup) {
+                warnings.push(ModelWarning {
+                    code: "invalid-section-page-setup".to_string(),
+                    message,
+                });
+            }
+        }
+        OperationKind::SetSectionFurniture {
+            section_id,
+            slot,
+            blocks,
+        } => {
+            if let Err(message) = set_section_furniture(document, &section_id, slot, blocks) {
+                warnings.push(ModelWarning {
+                    code: "invalid-section-furniture".to_string(),
+                    message,
+                });
+            }
+        }
+        OperationKind::ClearSectionFurnitureOverride { section_id, slot } => {
+            if let Err(message) = clear_section_furniture_override(document, &section_id, slot) {
+                warnings.push(ModelWarning {
+                    code: "invalid-section-furniture-override".to_string(),
+                    message,
+                });
             }
         }
         OperationKind::SetBlockTextStyle { block_id, style } => {
@@ -2110,4 +2163,166 @@ pub(crate) fn apply_mark_range(
             message: format!("mark range {}..{} was missing", range.start, range.end),
         }),
     }
+}
+
+/// Applies the two source changes which constitute adding a section as one
+/// all-or-nothing transition. A generic block insertion is deliberately not
+/// used: it may degrade a vanished anchor to append, which would make a
+/// boundary terminal and invalid.
+fn insert_section(
+    document: &mut Document,
+    before_block_id: &StableId,
+    boundary_id: &StableId,
+    section: &Section,
+) -> Result<(), String> {
+    if section.id == document.root_section_id() {
+        return Err("the document root section cannot be inserted".to_string());
+    }
+    if block_exists(&document.blocks, boundary_id) {
+        return Err(format!("section boundary id {boundary_id} already exists"));
+    }
+    let Some(index) = document
+        .blocks
+        .iter()
+        .position(|block| &block.id == before_block_id)
+    else {
+        return Err(format!(
+            "section insertion anchor {before_block_id} is missing or is not top-level"
+        ));
+    };
+
+    let mut candidate = document.clone();
+    candidate
+        .materialize_legacy_sections()
+        .map_err(|error| format!("legacy section migration failed: {error}"))?;
+    if candidate.sections.contains_key(&section.id) {
+        return Err(format!("section {} already exists", section.id));
+    }
+    candidate
+        .sections
+        .insert(section.id.clone(), section.clone());
+    candidate.blocks.insert(
+        index,
+        Block {
+            id: boundary_id.clone(),
+            kind: BlockKind::SectionBreak {
+                section_id: section.id.clone(),
+            },
+            content: Vec::new(),
+            properties: BlockProperties::default(),
+        },
+    );
+    if !candidate.text_sequences.is_empty() {
+        candidate
+            .synchronize_text_sequences()
+            .map_err(|error| format!("section furniture text source is invalid: {error}"))?;
+    }
+    candidate
+        .validate()
+        .map_err(|error| format!("section insertion violates document structure: {error}"))?;
+    *document = candidate;
+    Ok(())
+}
+
+/// Removes the exact boundary that introduces a non-root section, plus the
+/// record that boundary owns. This is similarly transactional: a stale or
+/// malformed target leaves the document untouched.
+fn delete_section(document: &mut Document, section_id: &StableId) -> Result<(), String> {
+    if section_id == &document.root_section_id() {
+        return Err("the root section cannot be deleted".to_string());
+    }
+    let Some(index) = document.blocks.iter().position(|block| {
+        matches!(&block.kind, BlockKind::SectionBreak { section_id: id } if id == section_id)
+    }) else {
+        return Err(format!("section boundary for {section_id} is missing"));
+    };
+    let mut candidate = document.clone();
+    if candidate.sections.remove(section_id).is_none() {
+        return Err(format!("section {section_id} is missing"));
+    }
+    candidate.blocks.remove(index);
+    if !candidate.text_sequences.is_empty() {
+        candidate
+            .synchronize_text_sequences()
+            .map_err(|error| format!("section furniture text source is invalid: {error}"))?;
+    }
+    candidate
+        .validate()
+        .map_err(|error| format!("section deletion violates document structure: {error}"))?;
+    *document = candidate;
+    Ok(())
+}
+
+fn set_section_page_setup(
+    document: &mut Document,
+    section_id: &StableId,
+    page_setup: opendoc_core::PageSetup,
+) -> Result<(), String> {
+    page_setup
+        .validate()
+        .map_err(|error| format!("section page setup is invalid: {error}"))?;
+    mutate_section(document, section_id, |section| {
+        section.page_setup = page_setup
+    })
+}
+
+fn set_section_furniture(
+    document: &mut Document,
+    section_id: &StableId,
+    slot: opendoc_core::HeaderFooterSlot,
+    blocks: Vec<Block>,
+) -> Result<(), String> {
+    for block in &blocks {
+        block
+            .validate_isolated()
+            .map_err(|error| format!("section furniture block is invalid: {error}"))?;
+    }
+    mutate_section(document, section_id, |section| {
+        *section.furniture_mut(slot) = blocks;
+    })
+}
+
+fn clear_section_furniture_override(
+    document: &mut Document,
+    section_id: &StableId,
+    slot: opendoc_core::HeaderFooterSlot,
+) -> Result<(), String> {
+    if !slot.is_override() {
+        return Err(format!(
+            "{} is ordinary furniture and cannot inherit from itself",
+            slot.as_str()
+        ));
+    }
+    mutate_section(document, section_id, |section| {
+        section.clear_furniture_override(slot);
+    })
+}
+
+/// Section configuration writers materialize legacy root source once and
+/// commit only a validated complete candidate. This is deliberately shared:
+/// page setup and six furniture slots must agree on their treatment of stale
+/// deleted-section writes and durable character-token source.
+fn mutate_section(
+    document: &mut Document,
+    section_id: &StableId,
+    mutate: impl FnOnce(&mut Section),
+) -> Result<(), String> {
+    let mut candidate = document.clone();
+    candidate
+        .materialize_legacy_sections()
+        .map_err(|error| format!("legacy section migration failed: {error}"))?;
+    let Some(section) = candidate.sections.get_mut(section_id) else {
+        return Err(format!("section {section_id} is missing or deleted"));
+    };
+    mutate(section);
+    if !candidate.text_sequences.is_empty() {
+        candidate
+            .synchronize_text_sequences()
+            .map_err(|error| format!("section furniture text source is invalid: {error}"))?;
+    }
+    candidate
+        .validate()
+        .map_err(|error| format!("section update violates document structure: {error}"))?;
+    *document = candidate;
+    Ok(())
 }

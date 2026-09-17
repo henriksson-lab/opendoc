@@ -4,7 +4,7 @@ use crate::causal::{CausalContext, OperationId};
 use opendoc_core::{
     BibliographyReference, Block, BlockProperty, BlockPropertyKey, Bookmark, CellSpan,
     CitationGroup, CommentThread, Footnote, HeaderFooterSlot, ImageLayout, Inline, InsertPosition,
-    Length, ListKind, Mark, MarkKind, OrderedListFormat, PageSetup, StableId, Suggestion,
+    Length, ListKind, Mark, MarkKind, OrderedListFormat, PageSetup, Section, StableId, Suggestion,
     TableCell, TableCellProperty, TableCellPropertyKey, TableColumn, TableRow,
 };
 use serde::{Deserialize, Serialize};
@@ -80,6 +80,37 @@ pub enum OperationKind {
     MoveBlock {
         block_id: StableId,
         position: InsertPosition,
+    },
+    /// Atomically inserts a section record and the boundary immediately before
+    /// an existing top-level body block. `before_block_id` is required: a
+    /// section boundary can never be the last body block, so unlike generic
+    /// block insertion it must not degrade to an append when its anchor is
+    /// gone.
+    InsertSection {
+        before_block_id: StableId,
+        boundary_id: StableId,
+        section: Section,
+    },
+    /// Atomically removes a non-root section and its unique boundary.
+    DeleteSection {
+        section_id: StableId,
+    },
+    /// Replaces one section's whole page geometry under the same all-or-
+    /// nothing semantics as document-wide `SetPageSetup`.
+    SetSectionPageSetup {
+        section_id: StableId,
+        page_setup: PageSetup,
+    },
+    /// Replaces one declared furniture slot of one section.
+    SetSectionFurniture {
+        section_id: StableId,
+        slot: HeaderFooterSlot,
+        blocks: Vec<Block>,
+    },
+    /// Restores a first/even section slot to its ordinary-slot inheritance.
+    ClearSectionFurnitureOverride {
+        section_id: StableId,
+        slot: HeaderFooterSlot,
     },
     SetBlockTextStyle {
         block_id: StableId,

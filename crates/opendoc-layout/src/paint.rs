@@ -181,7 +181,21 @@ pub enum PaintItem {
 /// Everything on one sheet, in drawing order.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PaintedPage {
+    /// Durable source context for this physical page. `None` is retained for
+    /// callers that construct a paint page mid-layout; completed document
+    /// layouts always populate it.
+    pub context: Option<PageContext>,
     pub items: Vec<PaintItem>,
+}
+
+/// The section-local facts a physical page was laid out under.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PageContext {
+    pub section_id: opendoc_core::StableId,
+    /// Zero-based page number within this section, independent of the
+    /// document-global page number used by page-number fields in this slice.
+    pub section_page_index: u32,
+    pub page_setup: opendoc_core::PageSetup,
 }
 
 /// Why a block's geometry is an estimate rather than a measurement.

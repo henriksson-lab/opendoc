@@ -69,6 +69,44 @@ impl Section {
         }
     }
 
+    /// The declared furniture slot to replace. Writing an override makes it
+    /// explicit even when its replacement is empty.
+    pub fn furniture_mut(&mut self, slot: HeaderFooterSlot) -> &mut Vec<Block> {
+        match slot {
+            HeaderFooterSlot::Header => &mut self.header,
+            HeaderFooterSlot::Footer => &mut self.footer,
+            HeaderFooterSlot::FirstPageHeader => self.first_page_header.get_or_insert_default(),
+            HeaderFooterSlot::FirstPageFooter => self.first_page_footer.get_or_insert_default(),
+            HeaderFooterSlot::EvenPageHeader => self.even_page_header.get_or_insert_default(),
+            HeaderFooterSlot::EvenPageFooter => self.even_page_footer.get_or_insert_default(),
+        }
+    }
+
+    /// Removes an optional override, restoring inheritance from the ordinary
+    /// header or footer. Ordinary slots cannot inherit from themselves.
+    pub fn clear_furniture_override(&mut self, slot: HeaderFooterSlot) -> bool {
+        match slot {
+            HeaderFooterSlot::FirstPageHeader => self.first_page_header = None,
+            HeaderFooterSlot::FirstPageFooter => self.first_page_footer = None,
+            HeaderFooterSlot::EvenPageHeader => self.even_page_header = None,
+            HeaderFooterSlot::EvenPageFooter => self.even_page_footer = None,
+            HeaderFooterSlot::Header | HeaderFooterSlot::Footer => return false,
+        }
+        true
+    }
+
+    /// Whether an optional override is explicitly present, including an
+    /// intentionally empty override.
+    pub const fn has_furniture_override(&self, slot: HeaderFooterSlot) -> bool {
+        match slot {
+            HeaderFooterSlot::FirstPageHeader => self.first_page_header.is_some(),
+            HeaderFooterSlot::FirstPageFooter => self.first_page_footer.is_some(),
+            HeaderFooterSlot::EvenPageHeader => self.even_page_header.is_some(),
+            HeaderFooterSlot::EvenPageFooter => self.even_page_footer.is_some(),
+            HeaderFooterSlot::Header | HeaderFooterSlot::Footer => true,
+        }
+    }
+
     /// The furniture which appears at this section-relative page index.
     pub fn furniture_for_page(&self, slot: HeaderFooterSlot, page_index: usize) -> &[Block] {
         match (slot.base_slot(), page_index == 0, page_index % 2 == 1) {
